@@ -1,42 +1,42 @@
 # Compiler
 CXX = g++
-CXXFLAGS = -std=c++11 -Wall -Wextra -O2 -I./libs
-CXXFLAGS += $(shell pkg-config --cflags opencv4)
-
-# Remove viz and hdf from libraries
-LDFLAGS = $(shell pkg-config --libs opencv4 | sed 's/-lopencv_viz//g' | sed 's/-lopencv_hdf//g')
 
 # Directories
-BIN_DIR = ./bin
-BUILD_DIR = ./build
+INCLUDE_DIR = include
+SRC_DIR = src
+BUILD_DIR = build
+
+# Flags
+CXXFLAGS = -std=c++11 -Wall -Wextra -O2 -I$(INCLUDE_DIR)
+CXXFLAGS += $(shell pkg-config --cflags opencv4)
+
+# Get all libraries but remove viz and hdf
+LDFLAGS = $(shell pkg-config --libs opencv4 | sed 's/-lopencv_viz//g' | sed 's/-lopencv_hdf//g')
 
 # Target
-TARGET = $(BIN_DIR)/app
-SRCS = main.cpp libs/scanner.cpp
-OBJS = $(SRCS:%.cpp=$(BUILD_DIR)/%.o)
-OBJS := $(OBJS:libs/%.o=$(BUILD_DIR)/%.o)
+TARGET = lab_1
+SRCS = main.cpp $(wildcard $(SRC_DIR)/*.cpp)
+OBJS = $(addprefix $(BUILD_DIR)/, $(notdir $(SRCS:.cpp=.o)))
 
-# Create directories
-$(shell mkdir -p $(BIN_DIR) $(BUILD_DIR))
+all: $(BUILD_DIR) $(TARGET)
 
-all: $(TARGET)
+# Create build directory
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
 
-# Link
 $(TARGET): $(OBJS)
 	$(CXX) -o $@ $^ $(LDFLAGS)
 
-# Compile any .cpp to .o in build directory
-$(BUILD_DIR)/%.o: %.cpp
-	@mkdir -p $(dir $@)
+# Compile main.cpp
+$(BUILD_DIR)/main.o: main.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# Handle libs/ directory specially
-$(BUILD_DIR)/%.o: libs/%.cpp
-	@mkdir -p $(dir $@)
+# Compile src/*.cpp files
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BIN_DIR) $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) $(TARGET)
 
 run: $(TARGET)
 	./$(TARGET)
