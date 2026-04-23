@@ -7,14 +7,14 @@ SRC_DIR = src
 BUILD_DIR = build
 
 # Flags
-CXXFLAGS = -std=c++11 -Wall -Wextra -O2 -I$(INCLUDE_DIR)
+CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -I$(INCLUDE_DIR)
 CXXFLAGS += $(shell pkg-config --cflags opencv4)
 
 # Get all libraries but remove viz and hdf
 LDFLAGS = $(shell pkg-config --libs opencv4 | sed 's/-lopencv_viz//g' | sed 's/-lopencv_hdf//g')
 
 # Target
-TARGET = lab_1
+TARGET = ./bin/app
 SRCS = main.cpp $(wildcard $(SRC_DIR)/*.cpp)
 OBJS = $(addprefix $(BUILD_DIR)/, $(notdir $(SRCS:.cpp=.o)))
 

@@ -38,12 +38,7 @@ void CalibrateCamera::display_color_in_terminal(const cv::Scalar& hsv_color) {
     std::cout << std::flush;
 }
 
-cv::Scalar CalibrateCamera::get_dominant_color(const cv::Mat& frame) {
-    int w = frame.cols / 2;
-    int h = frame.rows / 2;
-    int x = (frame.cols - w) / 2;
-    int y = (frame.rows - h) / 2;
-    const cv::Rect roi = cv::Rect(x, y, w, h);
+cv::Scalar CalibrateCamera::get_dominant_color(const cv::Mat& frame, const cv::Rect& roi) {
     cv::Mat roi_frame = frame(roi);
     cv::Mat hsv_frame;
     cv::cvtColor(roi_frame, hsv_frame, cv::COLOR_BGR2HSV);
@@ -71,11 +66,14 @@ cv::Scalar CalibrateCamera::start_calibration() {
     if (!cap.isOpened()) {
         throw runtime_error("Cannot Open camera.");
     }
-    
     cap.set(cv::CAP_PROP_FRAME_WIDTH, config.width);
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, config.height);
     cap.set(cv::CAP_PROP_FPS, config.fps_target);
-    
+    int w = config.width / 2;
+    int h = config.height / 2;
+    int x = (config.width - w) / 2;
+    int y = (config.height - h) / 2;
+    const cv::Rect roi = cv::Rect(x, y, w, h);
     cv::Mat frame;
     cv::Scalar main_color_hsv;
     
@@ -83,14 +81,13 @@ cv::Scalar CalibrateCamera::start_calibration() {
         cap >> frame;
         if (frame.empty()) break;
         
-        main_color_hsv = get_dominant_color(frame);
+        main_color_hsv = get_dominant_color(frame, roi);
         display_color_in_terminal(main_color_hsv);
         
         cv::rectangle(frame, 
-                    cv::Point(frame.cols/4, frame.rows/4), 
-                    cv::Point(3*frame.cols/4, 3*frame.rows/4), 
+                    roi,
                     cv::Scalar(0, 255, 0), 2);
-        
+        cv::imshow("Calibration Setup", frame);
         char key = cv::waitKey(1);
         if (key == 'q') {
             cout << "\nQuitting without selecting color" << endl;
@@ -100,11 +97,9 @@ cv::Scalar CalibrateCamera::start_calibration() {
             cout << "\n\nColor captured!" << endl;
             cout << "Selected HSV: (" << (int)main_color_hsv[0] << ", " 
                  << (int)main_color_hsv[1] << ", " << (int)main_color_hsv[2] << ")" << endl;
-            
             break;
         }
     }
-
     cv::destroyAllWindows();
     return main_color_hsv;
 }
