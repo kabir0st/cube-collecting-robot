@@ -8,7 +8,7 @@ class CalibrateCamera {
         static const int k_neighbors = 5;
         cv::Scalar hsvToRgb(float h, float s, float v);
         void display_color_in_terminal(const cv::Scalar& hsv_color);
-        cv::Scalar get_dominant_color(const cv::Mat& frame, const cv::Rect& roi);
+        std::pair<cv::Scalar, cv::Mat> get_dominant_color(const cv::Mat& frame, const cv::Rect& roi);
 
     public:
         CalibrateCamera(const CameraConfig &config);
