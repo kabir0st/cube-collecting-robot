@@ -8,9 +8,6 @@
 
 using namespace std;
 
-CameraConfig::CameraConfig(int w, int h, int f) : 
-    width(w), height(h), fps_target(f) {}
-
 CalibrateCamera::CalibrateCamera(const CameraConfig& cfg) : config(cfg) {}
 
 cv::Scalar CalibrateCamera::hsvToRgb(float h, float s, float v) {
@@ -63,6 +60,25 @@ bool CalibrateCamera::create_filter_mask(FilterResult& result){
     const float h_margin = 10.f;
     const float s_margin = 30.f;
     const float v_margin = 40.f;
+    const float sv_floor_ratio = 0.35f;
+    const float min_non_black_sv = 10.f;
+
+    const float dominant_s = centers.at<float>(dominant_idx, 1);
+    const float dominant_v = centers.at<float>(dominant_idx, 2);
+
+    auto compute_lower_sv = [&](float min_channel, float margin, float dominant_channel) {
+        const float raw_lower = std::max(0.f, min_channel - margin);
+        if (dominant_channel <= min_non_black_sv) {
+            return raw_lower;
+        }
+        const float dynamic_floor = std::max(min_non_black_sv, dominant_channel * sv_floor_ratio);
+        return std::max(raw_lower, dynamic_floor);
+    };
+
+    const float s_lower = compute_lower_sv(s_min, s_margin, dominant_s);
+    const float v_lower = compute_lower_sv(v_min, v_margin, dominant_v);
+    const float s_upper = std::min(255.f, s_max + s_margin);
+    const float v_upper = std::min(255.f, v_max + v_margin);
 
     if ((h_max - h_min) > 90.f){
         sort(h_vals.begin(), h_vals.end());
@@ -80,22 +96,18 @@ bool CalibrateCamera::create_filter_mask(FilterResult& result){
         float h_high_min = h_vals[gap_idx];
 
         // High side: ~170 → 180
-        result.lower1 = cv::Scalar (std::max(0.f,   h_high_min - h_margin), std::max(0.f,   s_min - s_margin), std::max(0.f,   v_min - v_margin));
-        result.upper1 =  cv::Scalar (180.f, std::min(255.f, s_max + s_margin), std::min(255.f, v_max + v_margin));
+        result.lower1 = cv::Scalar (std::max(0.f, h_high_min - h_margin), s_lower, v_lower);
+        result.upper1 =  cv::Scalar (180.f, s_upper, v_upper);
 
         // Low side: 0 → ~8
-        result.lower2 = cv::Scalar (0.f, std::max(0.f,   s_min - s_margin), std::max(0.f,   v_min - v_margin));
-        result.upper2 = cv::Scalar (std::min(180.f, h_low_max + h_margin),   std::min(255.f, s_max + s_margin), std::min(255.f, v_max + v_margin));
+        result.lower2 = cv::Scalar (0.f, s_lower, v_lower);
+        result.upper2 = cv::Scalar (std::min(180.f, h_low_max + h_margin), s_upper, v_upper);
         result.has_wrap_around = true;
     }
     else
     {
-        result.lower1 = cv::Scalar (std::max(0.f,   h_min - h_margin),
-                         std::max(0.f,   s_min - s_margin),
-                         std::max(0.f,   v_min - v_margin));
-        result.upper1 = cv::Scalar (std::min(180.f, h_max + h_margin),
-                         std::min(255.f, s_max + s_margin),
-                         std::min(255.f, v_max + v_margin));
+        result.lower1 = cv::Scalar (std::max(0.f, h_min - h_margin), s_lower, v_lower);
+        result.upper1 = cv::Scalar (std::min(180.f, h_max + h_margin), s_upper, v_upper);
         result.has_wrap_around = false;
 
     }

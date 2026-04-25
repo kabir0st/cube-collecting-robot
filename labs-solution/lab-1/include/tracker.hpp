@@ -1,11 +1,13 @@
-// #include <opencv2/opencv.hpp>
-// #include <chrono>
-// #include <thread>
-// #include <stdio.h>
-// #include <include/types.hpp>
+#include <opencv2/opencv.hpp>
+#include <chrono>
+#include <thread>
+#include <stdio.h>
+#include <types.hpp>
 
-// class Tracker {
-//     CameraConfig config;
+class Tracker {
+    CameraConfig config;
 
-//     float start(FilterResult& filter);
-// };
+    public:
+        Tracker(const CameraConfig& cfg): config(cfg) {}
+        float start(FilterResult& filter);  
+};

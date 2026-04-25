@@ -11,7 +11,9 @@ struct CameraConfig {
     int width;
     int height;
     int fps_target;
-    CameraConfig(int w, int h, int f);
+    CameraConfig(int w, int h, int f):
+        width(w), height(h), fps_target(f) {}
+
 };
 
 struct FilterResult {
