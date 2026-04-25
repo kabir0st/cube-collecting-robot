@@ -5,6 +5,7 @@
 #include <opencv2/opencv.hpp>
 #include <stdexcept>
 #include <vector>
+#include <cfloat>
 
 
 void Tracker::start(FilterResult& filter){
@@ -19,8 +20,11 @@ void Tracker::start(FilterResult& filter){
 
     std::vector<std::vector<cv::Point>> contours;
     cv::Mat frame, hsv_frame;
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 7));
+    cv::Mat open_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 7));
+    cv::Mat close_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
     bool obj_tracking = false;
+    bool has_last_position = false;
+    cv::Point2f last_center;
     float cx=0, cy=0, obj_orientation = 0;
     std::cout << "\n\n";
     while (1)
@@ -43,33 +47,48 @@ void Tracker::start(FilterResult& filter){
         }
         // cv::erode(mask, mask, kernel);
         // cv::dilate(mask, mask, kernel);c
-        cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel);
+        cv::morphologyEx(mask, mask, cv::MORPH_OPEN, open_kernel);
+        cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, close_kernel);
 
-        int largest = -1;
+        obj_tracking = false;
         cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
         if (!contours.empty()) {
-            double max_area = 0;
-            largest = -1;
-            obj_tracking = false;
+            int selected = -1;
+            double selected_score = -DBL_MAX;
+            cv::Point2f selected_center;
             for (int i = 0; i < (int)contours.size(); i++)
             {
                 double area = cv::contourArea(contours[i]);
-                if ((area > max_area) && area > 700) {
-                    max_area = area;
-                    largest = i;
+                if (area <= 700) {
+                    continue;
+                }
+                cv::Moments M = moments(contours[i]);
+                if (M.m00 == 0) {
+                    continue;
+                }
+                cv::Point2f center((float)(M.m10 / M.m00), (float)(M.m01 / M.m00));
+                double score = area;
+                if (has_last_position) {
+                    const double distance = cv::norm(center - last_center);
+                    score -= (8.0 * distance);
+                }
+                if (score > selected_score) {
+                    selected_score = score;
+                    selected = i;
+                    selected_center = center;
                 }
             }
-            if (largest != -1){
-                cv::Moments M = moments(contours[largest]);  // What you're using now
-                if (M.m00 !=0) {
-                    cx = M.m10 / M.m00;
-                    cy = M.m01 / M.m00;
-                    cv::circle(frame, cv::Point(cx, cy), 5, cv::Scalar(0, 255, 0), -1);
-                    cv::Rect bbox = boundingRect(contours[largest]);
-                    rectangle(frame, bbox, cv::Scalar(0, 0, 255), 2);
-                    obj_tracking = true;
-                    obj_orientation = 320 - cx;
-                }
+
+            if (selected != -1){
+                cx = selected_center.x;
+                cy = selected_center.y;
+                cv::circle(frame, cv::Point(cx, cy), 5, cv::Scalar(0, 255, 0), -1);
+                cv::Rect bbox = boundingRect(contours[selected]);
+                rectangle(frame, bbox, cv::Scalar(0, 0, 255), 2);
+                obj_tracking = true;
+                has_last_position = true;
+                last_center = selected_center;
+                obj_orientation = 320 - cx;
             }
         }
     
