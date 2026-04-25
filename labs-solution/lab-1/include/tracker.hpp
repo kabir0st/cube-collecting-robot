@@ -9,5 +9,5 @@ class Tracker {
 
     public:
         Tracker(const CameraConfig& cfg): config(cfg) {}
-        float start(FilterResult& filter);  
+        void start(FilterResult& filter);  
 };

@@ -7,7 +7,7 @@
 #include <vector>
 
 
-float Tracker::start(FilterResult& filter){
+void Tracker::start(FilterResult& filter){
     cv::VideoCapture cap(0, cv::CAP_V4L2);
     if (!cap.isOpened()) {
         throw std::runtime_error("Cannot open camera.\n");
@@ -20,8 +20,8 @@ float Tracker::start(FilterResult& filter){
     std::vector<std::vector<cv::Point>> contours;
     cv::Mat frame, hsv_frame;
     cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 7));
-    
-    float cx, cy, fps, obj_tracking, obj_orientation = 0;
+    bool obj_tracking = false;
+    float cx=0, cy=0, obj_orientation = 0;
     std::cout << "\n\n";
     while (1)
     {
@@ -50,9 +50,11 @@ float Tracker::start(FilterResult& filter){
         if (!contours.empty()) {
             double max_area = 0;
             largest = -1;
-            for (int i = 0; i < contours.size(); i++) {
+            obj_tracking = false;
+            for (int i = 0; i < (int)contours.size(); i++)
+            {
                 double area = cv::contourArea(contours[i]);
-                if ((area > max_area) && area > 600) {
+                if ((area > max_area) && area > 700) {
                     max_area = area;
                     largest = i;
                 }
@@ -64,20 +66,22 @@ float Tracker::start(FilterResult& filter){
                     cy = M.m01 / M.m00;
                     cv::circle(frame, cv::Point(cx, cy), 5, cv::Scalar(0, 255, 0), -1);
                     cv::Rect bbox = boundingRect(contours[largest]);
-                    rectangle(frame, bbox, cv::Scalar(0, 0, 255), 2);    
+                    rectangle(frame, bbox, cv::Scalar(0, 0, 255), 2);
+                    obj_tracking = true;
+                    obj_orientation = 320 - cx;
                 }
             }
         }
     
         imshow("Live", frame);
-        // printf("\rFPS: %d | Center: %d, %d | Orientation: %s   ",
-        // fps, cx, cy, obj_tracking ? std::to_string(obj_orientation).c_str() : "None");
-        // fflush(stdout);
-        if (cv::waitKey(1) == 'q' || cv::waitKey(1) == 27) {
-        std::cout << "\nExiting...\n";
-        break;
+        printf("\rFPS: - | Center: %.2f, %.2f | Orientation: %s   ",
+         cx, cy, obj_tracking ? std::to_string(obj_orientation).c_str() : "None");
+        fflush(stdout);
+        int key = cv::waitKey(1);
+        if (key == 'q' || key == 27) {
+            std::cout << "\nExiting...\n";
+            break;
         }
     }
     cv::destroyAllWindows();
-    return obj_orientation;
 }

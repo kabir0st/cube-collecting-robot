@@ -5,6 +5,11 @@
 #include <iostream>
 #include <opencv2/opencv.hpp>
 
+#include <mutex>
+#include <atomic>
+
+
+
 // will be handled using threads in future
 void start_tracking(Tracker& tracker, FilterResult& filter){
     tracker.start(filter);
