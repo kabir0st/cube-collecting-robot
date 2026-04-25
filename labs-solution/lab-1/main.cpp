@@ -7,41 +7,73 @@
 
 #include <mutex>
 #include <atomic>
+#include <thread>
+#include <chrono>
+#include <exception>
 
+TrackerResult tracking_result = TrackerResult();
 
+void main_logic() {
+    // CameraConfig config(640, 480, 12);
+    CameraConfig config(320, 240, 12);
+    CalibrateCamera calibration(config);
+    Tracker tracker = Tracker(config);
+    auto filter = calibration.start_filter_calibration();
+    if (!filter.ready) {
+        throw std::runtime_error("Cannot get filter ready.");
+    }
+    std::cout << "Dominant HSV: " << filter.dominant_color << std::endl;
+    std::cout << "Upperbound HSV: " << filter.upper1 << std::endl;
+    std::cout << "Lowerbound HSV: " << filter.lower1 << std::endl;
+    if (filter.has_wrap_around) {
+        std::cout << "WrapUpper HSV: " << filter.upper2 << std::endl;
+        std::cout << "Wraplower HSV: " << filter.lower2 << std::endl;
+    }
+    std::cout << "Starting tracking . . ." << std::endl;
+    std::exception_ptr tracker_error;
+    std::thread tracking_thread([&tracker, &filter, &tracker_error]() {
+        try {
+            tracker.start(filter, tracking_result);
+        } catch (...) {
+            tracker_error = std::current_exception();
+            tracking_result.stop();
+        }
+    });
 
-// will be handled using threads in future
-void start_tracking(Tracker& tracker, FilterResult& filter){
-    tracker.start(filter);
+    cv::namedWindow("Live", cv::WINDOW_AUTOSIZE);
+    printf("\n\n");
+    while (tracking_result.is_running())
+    {
+        cv::Mat frame = tracking_result.get_frame();
+        if (!frame.empty()) {
+            cv::imshow("Live", frame);
+        }
+        const int key = cv::waitKey(1);
+        if (key == 'q') {
+            tracking_result.stop();
+            break;
+        }
+        if (frame.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        std::cout << "\rOrientation: " << tracking_result.get_orientation();
+        std::cout.flush();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    cv::destroyAllWindows();
+
+    if (tracking_thread.joinable()) {
+        tracking_thread.join();
+    }
+    if (tracker_error) {
+        std::rethrow_exception(tracker_error);
+    }
 }
 
 int main() {
     try {
-        CameraConfig config(640, 480, 12);
-        CalibrateCamera calibration(config);
-        Tracker tracker = Tracker(config);
-        auto filter = calibration.start_filter_calibration();
-        std::cout << "filter is ready? " << (filter.ready ? "true" : "false") << std::endl;
-        if (filter.ready) {
-            std::cout << "Dominant HSV: " << filter.dominant_color << std::endl;
-            std::cout << "Upperbound HSV: " << filter.upper1 << std::endl;
-            std::cout << "Lowerbound HSV: " << filter.lower1 << std::endl;
-            if (filter.has_wrap_around) {
-                std::cout << "WrapUpper HSV: " << filter.upper2 << std::endl;
-                std::cout << "Wraplower HSV: " << filter.lower2 << std::endl;
-            }
-            cv::waitKey(5000);
-            std::cout << "Starting tracking . . ." << std::endl;
-            // thread out to start tracking here
-            start_tracking(tracker, filter);
-        }
-        else
-        {
-            std::cout << "Couldn't get filter ready.";
-        }
-    }
-    catch (const std::exception &e)
-    {
+        main_logic();
+    } catch (const std::exception &e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return -1;
     }

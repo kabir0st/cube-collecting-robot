@@ -7,11 +7,11 @@ SRC_DIR = src
 BUILD_DIR = build
 
 # Flags
-CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -I$(INCLUDE_DIR)
+CXXFLAGS = -std=c++23 -Wall -Wextra -O2 -I$(INCLUDE_DIR) -pthread
 CXXFLAGS += $(shell pkg-config --cflags opencv4)
 
 # Get all libraries but remove viz and hdf
-LDFLAGS = $(shell pkg-config --libs opencv4 | sed 's/-lopencv_viz//g' | sed 's/-lopencv_hdf//g')
+LDFLAGS = -pthread $(shell pkg-config --libs opencv4 | sed 's/-lopencv_viz//g' | sed 's/-lopencv_hdf//g')
 
 # Target
 TARGET = ./bin/app

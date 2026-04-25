@@ -6,9 +6,10 @@
 #include <stdexcept>
 #include <vector>
 #include <cfloat>
+#include <chrono>
 
 
-void Tracker::start(FilterResult& filter){
+void Tracker::start(FilterResult& filter, TrackerResult &result){
     cv::VideoCapture cap(0, cv::CAP_V4L2);
     if (!cap.isOpened()) {
         throw std::runtime_error("Cannot open camera.\n");
@@ -20,18 +21,18 @@ void Tracker::start(FilterResult& filter){
 
     std::vector<std::vector<cv::Point>> contours;
     cv::Mat frame, hsv_frame;
-    cv::Mat open_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 7));
+    // cv::Mat open_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 7));
     cv::Mat close_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-    bool obj_tracking = false;
     bool has_last_position = false;
     cv::Point2f last_center;
-    float cx=0, cy=0, obj_orientation = 0;
-    std::cout << "\n\n";
-    while (1)
-    {
+    float cx=0, cy=0;
+    result.clear_orientation();
+
+    while (result.is_running()) {
         cap >> frame;
-        if (frame.empty())
+        if (frame.empty()) {
             continue;
+        }
         cvtColor(frame, hsv_frame, cv::COLOR_BGR2HSV);
         cv::Mat mask, wrap_mask;
 
@@ -47,10 +48,10 @@ void Tracker::start(FilterResult& filter){
         }
         // cv::erode(mask, mask, kernel);
         // cv::dilate(mask, mask, kernel);c
-        cv::morphologyEx(mask, mask, cv::MORPH_OPEN, open_kernel);
+        // cv::morphologyEx(mask, mask, cv::MORPH_OPEN, open_kernel);
         cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, close_kernel);
 
-        obj_tracking = false;
+        result.clear_orientation();
         cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
         if (!contours.empty()) {
             int selected = -1;
@@ -78,29 +79,18 @@ void Tracker::start(FilterResult& filter){
                     selected_center = center;
                 }
             }
-
             if (selected != -1){
                 cx = selected_center.x;
                 cy = selected_center.y;
                 cv::circle(frame, cv::Point(cx, cy), 5, cv::Scalar(0, 255, 0), -1);
                 cv::Rect bbox = boundingRect(contours[selected]);
                 rectangle(frame, bbox, cv::Scalar(0, 0, 255), 2);
-                obj_tracking = true;
                 has_last_position = true;
                 last_center = selected_center;
-                obj_orientation = 320 - cx;
+                result.set_orientation(config.width/2 - cx);
             }
         }
-    
-        imshow("Live", frame);
-        printf("\rFPS: - | Center: %.2f, %.2f | Orientation: %s   ",
-         cx, cy, obj_tracking ? std::to_string(obj_orientation).c_str() : "None");
-        fflush(stdout);
-        int key = cv::waitKey(1);
-        if (key == 'q' || key == 27) {
-            std::cout << "\nExiting...\n";
-            break;
-        }
+        result.update_frame(frame);
     }
-    cv::destroyAllWindows();
+    result.stop();
 }
