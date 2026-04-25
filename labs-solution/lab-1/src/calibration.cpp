@@ -57,11 +57,13 @@ bool CalibrateCamera::create_filter_mask(FilterResult& result){
         }
     }
 
-    const float h_margin = 10.f;
-    const float s_margin = 30.f;
-    const float v_margin = 40.f;
+    const float h_margin = 8.f;
+    const float s_margin = 24.f;
+    const float v_margin = 28.f;
     const float sv_floor_ratio = 0.35f;
     const float min_non_black_sv = 10.f;
+    const float min_hue_confidence = 40.f;
+    const float red_edge_window = 25.f;
 
     const float dominant_s = centers.at<float>(dominant_idx, 1);
     const float dominant_v = centers.at<float>(dominant_idx, 2);
@@ -80,7 +82,12 @@ bool CalibrateCamera::create_filter_mask(FilterResult& result){
     const float s_upper = std::min(255.f, s_max + s_margin);
     const float v_upper = std::min(255.f, v_max + v_margin);
 
-    if ((h_max - h_min) > 90.f){
+    const bool hue_is_reliable =
+        dominant_s >= min_hue_confidence && dominant_v >= min_hue_confidence;
+    const bool spans_red_edges =
+        h_min <= red_edge_window && h_max >= (180.f - red_edge_window);
+
+    if ((h_max - h_min) > 90.f && hue_is_reliable && spans_red_edges){
         sort(h_vals.begin(), h_vals.end());
         float max_gap = 0.f;
         int gap_idx = 1;

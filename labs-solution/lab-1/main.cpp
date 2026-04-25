@@ -12,7 +12,7 @@ void start_tracking(Tracker& tracker, FilterResult& filter){
 
 int main() {
     try {
-        CameraConfig config(640, 480, 120);
+        CameraConfig config(640, 480, 12);
         CalibrateCamera calibration(config);
         Tracker tracker = Tracker(config);
         auto filter = calibration.start_filter_calibration();

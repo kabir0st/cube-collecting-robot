@@ -52,7 +52,7 @@ float Tracker::start(FilterResult& filter){
             largest = -1;
             for (int i = 0; i < contours.size(); i++) {
                 double area = cv::contourArea(contours[i]);
-                if ((area > max_area)) {
+                if ((area > max_area) && area > 600) {
                     max_area = area;
                     largest = i;
                 }
