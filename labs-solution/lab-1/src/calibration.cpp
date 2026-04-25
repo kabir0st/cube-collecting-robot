@@ -40,7 +40,7 @@ void CalibrateCamera::display_color_in_terminal(const cv::Scalar& hsv_color) {
 
 
 
-bool CalibrateCamera::create_filter_mask(){
+bool CalibrateCamera::create_filter_mask(FilterResult& result){
     float h_min = 180.f, s_min = 255.f, v_min = 255.f;
     float h_max = 0.f, s_max = 0.f, v_max = 0.f;
     std::vector<float> h_vals;
@@ -80,25 +80,24 @@ bool CalibrateCamera::create_filter_mask(){
         float h_high_min = h_vals[gap_idx];
 
         // High side: ~170 → 180
-        cv::Scalar lower1(std::max(0.f,   h_high_min - h_margin), std::max(0.f,   s_min - s_margin), std::max(0.f,   v_min - v_margin));
-        cv::Scalar upper1(180.f,                                   std::min(255.f, s_max + s_margin), std::min(255.f, v_max + v_margin));
+        result.lower1 = cv::Scalar (std::max(0.f,   h_high_min - h_margin), std::max(0.f,   s_min - s_margin), std::max(0.f,   v_min - v_margin));
+        result.upper1 =  cv::Scalar (180.f, std::min(255.f, s_max + s_margin), std::min(255.f, v_max + v_margin));
 
         // Low side: 0 → ~8
-        cv::Scalar lower2(0.f,                                     std::max(0.f,   s_min - s_margin), std::max(0.f,   v_min - v_margin));
-        cv::Scalar upper2(std::min(180.f, h_low_max + h_margin),   std::min(255.f, s_max + s_margin), std::min(255.f, v_max + v_margin));
-
-        cv::Mat mask1, mask2;
-        cv::inRange(hsv_frame, lower1, upper1, mask1);
-        cv::inRange(hsv_frame, lower2, upper2, mask2);
-        cv::bitwise_or(mask1, mask2, mask);
-    } else {
-        cv::Scalar lower(std::max(0.f,   h_min - h_margin),
+        result.lower2 = cv::Scalar (0.f, std::max(0.f,   s_min - s_margin), std::max(0.f,   v_min - v_margin));
+        result.upper2 = cv::Scalar (std::min(180.f, h_low_max + h_margin),   std::min(255.f, s_max + s_margin), std::min(255.f, v_max + v_margin));
+        result.has_wrap_around = true;
+    }
+    else
+    {
+        result.lower1 = cv::Scalar (std::max(0.f,   h_min - h_margin),
                          std::max(0.f,   s_min - s_margin),
                          std::max(0.f,   v_min - v_margin));
-        cv::Scalar upper(std::min(180.f, h_max + h_margin),
+        result.upper1 = cv::Scalar (std::min(180.f, h_max + h_margin),
                          std::min(255.f, s_max + s_margin),
                          std::min(255.f, v_max + v_margin));
-        cv::inRange(hsv_frame, lower, upper, mask);
+        result.has_wrap_around = false;
+
     }
     return true;
 }
@@ -162,12 +161,11 @@ FilterResult CalibrateCamera::start_filter_calibration() {
             cout << "\n\nColor captured!" << endl;
             cout << "Selected HSV: (" << (int)dominant_color[0] << ", " 
                  << (int)dominant_color[1] << ", " << (int)dominant_color[2] << ")" << endl;
-            result.ready = create_filter_mask();
+            result.ready = create_filter_mask(result);
             break;
         }
     }
     cv::destroyAllWindows();
-    result.mask = this->mask;
     result.dominant_color = dominant_color;
     return result;
 }

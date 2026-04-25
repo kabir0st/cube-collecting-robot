@@ -18,7 +18,7 @@ class CalibrateCamera {
         cv::Scalar hsvToRgb(float h, float s, float v);
         void display_color_in_terminal(const cv::Scalar& hsv_color);
         cv::Scalar get_dominant_color(const cv::Mat& frame, const cv::Rect& roi);
-        bool create_filter_mask();
+        bool create_filter_mask(FilterResult& result);
 
     public:
         CalibrateCamera(const CameraConfig &config);

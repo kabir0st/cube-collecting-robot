@@ -16,6 +16,10 @@ struct CameraConfig {
 
 struct FilterResult {
     cv::Scalar dominant_color;
-    cv::Mat mask;
+    cv::Scalar upper1;
+    cv::Scalar lower1;
+    cv::Scalar upper2;
+    cv::Scalar lower2;
     bool ready = false;
+    bool has_wrap_around = false;
 };

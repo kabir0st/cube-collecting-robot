@@ -12,7 +12,13 @@ int main() {
         std::cout << "filter is ready? " << (filter.ready ? "true" : "false") << std::endl;
         if (filter.ready) {
             std::cout << "Dominant HSV: " << filter.dominant_color << std::endl;
-            cv::imshow("Filter Mask", filter.mask);
+            std::cout << "Upperbound HSV: " << filter.upper1 << std::endl;
+            std::cout << "Lowerbound HSV: " << filter.lower1 << std::endl;
+            if (filter.has_wrap_around) {
+                std::cout << "WrapUpper HSV: " << filter.upper2 << std::endl;
+                std::cout << "Wraplower HSV: " << filter.lower2 << std::endl;
+            }
+
             cv::waitKey(5000);
         }
     }
