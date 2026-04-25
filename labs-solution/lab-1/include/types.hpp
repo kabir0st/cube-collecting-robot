@@ -14,7 +14,8 @@ struct CameraConfig {
     CameraConfig(int w, int h, int f);
 };
 
-struct CalibrationResult {
-    cv::Scalar dominate_color;
-    cv::Mat color_mask;
+struct FilterResult {
+    cv::Scalar dominant_color;
+    cv::Mat mask;
+    bool ready = false;
 };

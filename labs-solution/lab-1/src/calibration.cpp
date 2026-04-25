@@ -40,35 +40,11 @@ void CalibrateCamera::display_color_in_terminal(const cv::Scalar& hsv_color) {
 
 
 
-
-
-std::pair<cv::Scalar, cv::Mat> CalibrateCamera::get_dominant_color(const cv::Mat& frame, const cv::Rect& roi) {
-    CalibrationResult result;
-    cv::Mat roi_frame = frame(roi);
-    cv::Mat hsv_frame;
-    cv::cvtColor(roi_frame, hsv_frame, cv::COLOR_BGR2HSV);
-    
-    cv::Mat pixels = hsv_frame.reshape(1, hsv_frame.rows * hsv_frame.cols);
-    pixels.convertTo(pixels, CV_32F);
-    cv::Mat labels, centers;
-    cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::MAX_ITER, 10, 1.0);
-    cv::kmeans(pixels, k_neighbors, labels, criteria, 10, cv::KMEANS_RANDOM_CENTERS, centers);
-    
-    std::vector<int> counts(k_neighbors, 0);
-    for (int i = 0; i < labels.rows; i++) {
-        counts[labels.at<int>(i)]++;
-    }
-    
-    int dominant_idx = std::max_element(counts.begin(), counts.end()) - counts.begin();
-
-    //labels 
-    // pixels
-
-
+bool CalibrateCamera::create_filter_mask(){
     float h_min = 180.f, s_min = 255.f, v_min = 255.f;
     float h_max = 0.f, s_max = 0.f, v_max = 0.f;
     std::vector<float> h_vals;
-    h_vals.reserve(counts[dominant_idx]);
+    h_vals.reserve(d_index_pixel_count);
     for (int i = 0; i < labels.rows; i++) {
         if (labels.at<int>(i) == dominant_idx) {
             float h = pixels.at<float>(i, 0);
@@ -88,7 +64,6 @@ std::pair<cv::Scalar, cv::Mat> CalibrateCamera::get_dominant_color(const cv::Mat
     const float s_margin = 30.f;
     const float v_margin = 40.f;
 
-    cv::Mat mask;
     if ((h_max - h_min) > 90.f){
         sort(h_vals.begin(), h_vals.end());
         float max_gap = 0.f;
@@ -125,14 +100,34 @@ std::pair<cv::Scalar, cv::Mat> CalibrateCamera::get_dominant_color(const cv::Mat
                          std::min(255.f, v_max + v_margin));
         cv::inRange(hsv_frame, lower, upper, mask);
     }
-    cv::Scalar dominant(
+    return true;
+}
+
+cv::Scalar CalibrateCamera::get_dominant_color(const cv::Mat& frame, const cv::Rect& roi) {
+    cv::Mat roi_frame = frame(roi);
+    cv::cvtColor(roi_frame, hsv_frame, cv::COLOR_BGR2HSV);
+
+    pixels = hsv_frame.reshape(1, hsv_frame.rows * hsv_frame.cols);
+    pixels.convertTo(pixels, CV_32F);
+    // cv::Mat labels, centers; -> moved definition to class
+    cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::MAX_ITER, 10, 1.0);
+    cv::kmeans(pixels, k_neighbors, labels, criteria, 10, cv::KMEANS_RANDOM_CENTERS, centers);
+
+    std::vector<int> counts(k_neighbors, 0);
+    for (int i = 0; i < labels.rows; i++) {
+        counts[labels.at<int>(i)]++;
+    }
+
+    dominant_idx = std::max_element(counts.begin(), counts.end()) - counts.begin();
+    d_index_pixel_count = counts[dominant_idx];
+    return cv::Scalar(
         centers.at<float>(dominant_idx, 0),
         centers.at<float>(dominant_idx, 1),
         centers.at<float>(dominant_idx, 2));
-    return {dominant, mask};
 }
 
-cv::Scalar CalibrateCamera::start_calibration() {
+FilterResult CalibrateCamera::start_filter_calibration() {
+    FilterResult result;
     cv::VideoCapture cap(0, cv::CAP_V4L2);
     if (!cap.isOpened()) {
         throw runtime_error("Cannot Open camera.");
@@ -151,8 +146,7 @@ cv::Scalar CalibrateCamera::start_calibration() {
     {
         cap >> frame;
         if (frame.empty()) break;
-        
-        auto [dominant_color, mask] = get_dominant_color(frame, roi);
+        dominant_color = get_dominant_color(frame, roi);
         display_color_in_terminal(dominant_color);
         
         cv::rectangle(frame, 
@@ -168,9 +162,12 @@ cv::Scalar CalibrateCamera::start_calibration() {
             cout << "\n\nColor captured!" << endl;
             cout << "Selected HSV: (" << (int)dominant_color[0] << ", " 
                  << (int)dominant_color[1] << ", " << (int)dominant_color[2] << ")" << endl;
+            result.ready = create_filter_mask();
             break;
         }
     }
     cv::destroyAllWindows();
-    return dominant_color;
+    result.mask = this->mask;
+    result.dominant_color = dominant_color;
+    return result;
 }
