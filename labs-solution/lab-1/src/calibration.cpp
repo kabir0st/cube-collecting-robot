@@ -85,6 +85,10 @@ bool CalibrateCamera::create_filter_mask(FilterResult& result){
     const bool spans_red_edges =
         h_min <= red_edge_window && h_max >= (180.f - red_edge_window);
 
+    const float hue_margin = 10.f;
+    const float s_margin = 20.f;
+    const float v_margin = 40.f;  
+
     if ((h_max - h_min) > 90.f && hue_is_reliable && spans_red_edges){
         sort(h_vals.begin(), h_vals.end());
         float max_gap = 0.f;
@@ -100,21 +104,21 @@ bool CalibrateCamera::create_filter_mask(FilterResult& result){
         float h_low_max = h_vals[gap_idx - 1];
         float h_high_min = h_vals[gap_idx];
 
+
         // High side: ~170 → 180
-        result.lower1 = Scalar (max(0.f, h_high_min), s_lower, v_lower);
-        result.upper1 =  Scalar (180.f, s_upper, v_upper);
+        result.lower1 = Scalar (max(0.f, h_high_min - hue_margin), max(0.f, s_lower - s_margin), max(0.f, v_lower - v_margin));
+        result.upper1 =  Scalar (180.f, min(255.f, s_upper + s_margin), min(255.f, v_upper + v_margin));
 
         // Low side: 0 → ~8
-        result.lower2 = Scalar (0.f, s_lower, v_lower);
-        result.upper2 = Scalar (min(180.f, h_low_max), s_upper, v_upper);
+        result.lower2 = Scalar (0.f, max(0.f, s_lower - s_margin), max(0.f, v_lower - v_margin));
+        result.upper2 = Scalar (min(180.f, h_low_max + hue_margin), min(255.f, s_upper + s_margin), min(255.f, v_upper + v_margin));
         result.has_wrap_around = true;
     }
     else
     {
-        result.lower1 = Scalar (max(0.f, h_min), s_lower, v_lower);
-        result.upper1 = Scalar (min(180.f, h_max), s_upper, v_upper);
+        result.lower1 = Scalar (max(0.f, h_min - hue_margin), max(0.f, s_lower - s_margin), max(0.f, v_lower - v_margin));
+        result.upper1 = Scalar (min(180.f, h_max + hue_margin), min(255.f, s_upper + s_margin), min(255.f, v_upper + v_margin));
         result.has_wrap_around = false;
-
     }
     return true;
 }
@@ -143,8 +147,8 @@ Scalar CalibrateCamera::get_dominant_color(const Mat& frame, const Rect& roi) {
 }
 FilterResult CalibrateCamera::start_filter_calibration() {
     FilterResult result;
-    // VideoCapture cap(0);
-    VideoCapture cap(0, CAP_V4L2);
+    VideoCapture cap(0);
+    // VideoCapture cap(0, CAP_V4L2);
     if (!cap.isOpened())
     {
         throw runtime_error("Cannot Open camera.");
@@ -152,6 +156,8 @@ FilterResult CalibrateCamera::start_filter_calibration() {
     cap.set(CAP_PROP_FRAME_WIDTH, config.width);
     cap.set(CAP_PROP_FRAME_HEIGHT, config.height);
     cap.set(CAP_PROP_FPS, config.fps_target);
+    cap.set(CAP_PROP_BUFFERSIZE, 1);
+
     int w = config.width / 2;
     int h = config.height / 2;
     int x = (config.width - w) / 2;
@@ -159,12 +165,12 @@ FilterResult CalibrateCamera::start_filter_calibration() {
     const Rect roi = Rect(x, y, w, h);
     Mat frame;
     Scalar dominant_color;
+    cout << "Press C to capture, Q to quit." << endl;
     while (true)
     {
         cap >> frame;
         if (frame.empty()) break;
-        dominant_color = get_dominant_color(frame, roi);
-        display_color_in_terminal(dominant_color);
+        // display_color_in_terminal(dominant_color);
         
         rectangle(frame, 
                     roi,
@@ -176,6 +182,7 @@ FilterResult CalibrateCamera::start_filter_calibration() {
             break;
         }
         else if (key == 'c') {
+            dominant_color = get_dominant_color(frame, roi);
             cout << "\n\nColor captured!" << endl;
             cout << "Selected HSV: (" << (int)dominant_color[0] << ", " 
                  << (int)dominant_color[1] << ", " << (int)dominant_color[2] << ")" << endl;

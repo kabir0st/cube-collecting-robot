@@ -12,8 +12,8 @@ using namespace std;
 using namespace cv;
 
 void TrackerClass::start(FilterResult& filter, TrackerResult &result){
-    // VideoCapture cap(0);
-    VideoCapture cap(0, CAP_V4L2);
+    VideoCapture cap(0);
+    // VideoCapture cap(0, CAP_V4L2);
     if (!cap.isOpened())
     {
         throw runtime_error("Cannot open camera.\n");
@@ -26,7 +26,7 @@ void TrackerClass::start(FilterResult& filter, TrackerResult &result){
     vector<vector<Point>> contours;
     Mat frame, hsv_frame;
     // Mat open_kernel = getStructuringElement(MORPH_RECT, Size(7, 7));
-    Mat close_kernel = getStructuringElement(MORPH_RECT, Size(3, 3));
+    Mat close_kernel = getStructuringElement(MORPH_RECT, Size(5, 5));
     bool has_last_position = false;
     Point2f last_center;
     float cx=0, cy=0;
@@ -67,7 +67,7 @@ void TrackerClass::start(FilterResult& filter, TrackerResult &result){
             for (int i = 0; i < (int)contours.size(); i++)
             {
                 double area = contourArea(contours[i]);
-                if (area <= 700) {
+                if (area <= 500) {
                     continue;
                 }
                 Moments M = moments(contours[i]);

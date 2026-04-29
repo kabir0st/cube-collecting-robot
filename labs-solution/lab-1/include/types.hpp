@@ -54,9 +54,9 @@ struct TrackerResult {
         orientation = 0; //reset value
     }
 
-    tuple<bool, float, int> get_orientation() const {
+    pair< float, int> get_orientation() const {
         lock_guard<mutex> guard(lock);
-        return {has_orientation, orientation, fps};
+        return {orientation, fps};
     }
 
     bool is_orientation_available() const {

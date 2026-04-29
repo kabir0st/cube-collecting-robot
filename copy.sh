@@ -4,7 +4,7 @@
 SOURCE_DIR="./labs-solution"
 ZIP_FILE="labs-solution.zip"
 REMOTE_USER="pi"
-REMOTE_HOST="192.168.0.37"
+REMOTE_HOST="10.228.190.142"
 REMOTE_PASSWORD="pi"
 REMOTE_PATH="/home/pi"
 

@@ -19,7 +19,7 @@ TrackerResult tracking_result;
 
 void main_logic() {
     // CameraConfig config(640, 480, 12);
-    CameraConfig config(320, 240, 15);
+    CameraConfig config(320, 240, 12);
     CalibrateCamera calibration(config);
     TrackerClass tracker = TrackerClass(config);
     auto filter = calibration.start_filter_calibration();
@@ -61,10 +61,10 @@ void main_logic() {
             this_thread::sleep_for(chrono::milliseconds(5));
         }
         auto result = tracking_result.get_orientation(); 
-        if (get<0>(result)) { 
-            cout << "\nOrientation: " << get<1>(result) << " FPS: " << get<2>(result);
+        if (tracking_result.is_orientation_available()) { 
+            cout << "\nOrientation: " << result.first << " FPS: " << result.second;
         } else {
-            cout << "\nOrientation: none FPS: " << get<2>(result);
+            cout << "\nOrientation: none FPS: " << result.second;
         }
         flush(cout);
         this_thread::sleep_for(chrono::milliseconds(10));
