@@ -3,6 +3,10 @@
 #include <mutex>
 #include <atomic>
 
+using namespace std;
+using namespace cv;
+
+
 // color tracking margins
 static constexpr float HUE_MARGIN  = 10.f;  // hue is sensitive
 static constexpr float SAT_MARGIN  = 40.f;  // sat can vary a lot in lighting
@@ -18,55 +22,56 @@ struct CameraConfig {
 };
 
 struct FilterResult {
-    cv::Scalar dominant_color;
-    cv::Scalar upper1;
-    cv::Scalar lower1;
-    cv::Scalar upper2;
-    cv::Scalar lower2;
+    Scalar dominant_color;
+    Scalar upper1;
+    Scalar lower1;
+    Scalar upper2;
+    Scalar lower2;
     bool ready = false;
     bool has_wrap_around = false;
 };
 
 struct TrackerResult {
-    mutable std::mutex lock;
-    std::atomic<bool> running{true};
+    mutable mutex lock;
+    atomic<bool> running{true};
     bool has_orientation = false;
     float orientation = 0;
 
-    mutable std::mutex mutex_frame;
+    mutable mutex mutex_frame;
     int fps = 0;
-    cv::Mat frame;
+    Mat frame;
 
     // Thread-safe
     void set_orientation(float value) {
-        std::lock_guard<std::mutex> guard(lock);
+        lock_guard<mutex> guard(lock);
         orientation = value;
         has_orientation = true;
     }
 
     void clear_orientation() {
-        std::lock_guard<std::mutex> guard(lock);
+        lock_guard<mutex> guard(lock);
         has_orientation = false;
         orientation = 0; //reset value
     }
 
-    float get_orientation() const {
-        std::lock_guard<std::mutex> guard(lock);
-        return orientation;
+    tuple<bool, float, int> get_orientation() const {
+        lock_guard<mutex> guard(lock);
+        return {has_orientation, orientation, fps};
     }
 
     bool is_orientation_available() const {
-        std::lock_guard<std::mutex> guard(lock);
+        lock_guard<mutex> guard(lock);
         return has_orientation;
     }
 
-    void update_frame(const cv::Mat& f) {
-        std::lock_guard<std::mutex> guard(mutex_frame);
+    void update_frame(const Mat& f, int frame_rate) {
+        lock_guard<mutex> guard(mutex_frame);
         frame = f;
-    }
+        fps = frame_rate;
+        }
 
-    cv::Mat get_frame() const {
-        std::lock_guard<std::mutex> guard(mutex_frame);
+    Mat get_frame() const {
+        lock_guard<mutex> guard(mutex_frame);
         return frame.clone();
     }
 

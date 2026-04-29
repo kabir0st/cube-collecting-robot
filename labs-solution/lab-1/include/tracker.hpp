@@ -4,10 +4,13 @@
 #include <stdio.h>
 #include <types.hpp>
 
-class Tracker {
+using namespace std;
+using namespace cv;
+
+class TrackerClass {
     CameraConfig config;
 
     public:
-        Tracker(const CameraConfig& cfg): config(cfg) {}
+        TrackerClass(const CameraConfig& cfg): config(cfg) {}
         void start(FilterResult& filter, TrackerResult &result);  
 };

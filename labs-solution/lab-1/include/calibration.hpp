@@ -2,6 +2,9 @@
 #include <opencv2/opencv.hpp>
 #include <types.hpp>
 
+using namespace std;
+using namespace cv;
+
 class CalibrateCamera {
     private:
         CameraConfig config;
@@ -9,15 +12,15 @@ class CalibrateCamera {
         // share variables for the function;
         int dominant_idx;
         int d_index_pixel_count;
-        cv::Mat hsv_frame;
-        cv::Mat pixels;
-        cv::Mat labels;
-        cv::Mat centers;
-        cv::Mat mask;
+        Mat hsv_frame;
+        Mat pixels;
+        Mat labels;
+        Mat centers;
+        Mat mask;
 
-        cv::Scalar hsvToRgb(float h, float s, float v);
-        void display_color_in_terminal(const cv::Scalar& hsv_color);
-        cv::Scalar get_dominant_color(const cv::Mat& frame, const cv::Rect& roi);
+        Scalar hsvToRgb(float h, float s, float v);
+        void display_color_in_terminal(const Scalar& hsv_color);
+        Scalar get_dominant_color(const Mat& frame, const Rect& roi);
         bool create_filter_mask(FilterResult& result);
 
     public:
