@@ -18,8 +18,8 @@ using namespace cv;
 TrackerResult tracking_result;
 
 void main_logic() {
-    // CameraConfig config(640, 480, 12);
-    CameraConfig config(320, 240, 12);
+    CameraConfig config(640, 480, 12);
+    // CameraConfig config(320, 240, 12);
     CalibrateCamera calibration(config);
     TrackerClass tracker = TrackerClass(config);
     auto filter = calibration.start_filter_calibration();
