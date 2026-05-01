@@ -9,7 +9,7 @@ constexpr int LISTENER_PORT = 9887;
 constexpr int CONTORL_PORT = 9887;
 
 std::atomic<bool> listener_ready{false};
-
+const int FRAME_BUFFER_SIZE = 12;
 
 struct LidarDataFrame
 {
@@ -24,7 +24,40 @@ struct LidarDataFrame
     }
 };
 
-struct LidarResult {
+// we send a copy to SLAM process
+struct Snapshot {
     std::vector<LidarDataFrame> frames;
     int lead_frame;
+};
+
+struct LidarResult {
+    
+    std::vector<LidarDataFrame> frames;
+    int lead_frame;
+    
+    // we treat the lead_frame as buffer space so no need
+    // to lock the whole vector space to thread safety.
+    mutable std::mutex mutex_lead_frame;
+
+    LidarResult(int num_frames = 11) : frames(num_frames), lead_frame(0) {
+        for (int i = 0; i < num_frames; i++) {
+            frames[i].angle.clear();
+            frames[i].distance.clear();
+        }
+    }
+
+    void update_lead_frame(int fc) {
+        std::lock_guard<std::mutex> guard(mutex_lead_frame);
+        lead_frame = fc;
+    }
+
+    Snapshot get_frames_stack() {
+        std::lock_guard<std::mutex> guard(mutex_lead_frame);
+        Snapshot snap;
+        snap.frames = frames;      // Explicit copy
+        snap.lead_frame = lead_frame;
+        return snap;
+        // only works in C++17 it seems
+        // return {frames, lead_frame};
+    }
 };

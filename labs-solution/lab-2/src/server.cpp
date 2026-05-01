@@ -10,11 +10,13 @@
 #include <chrono>
 #include <thread>
 #include <stdexcept>
-#include <utils.cpp>
+#include <utils.hpp>
 
-
-using namespace std;
-
+// for networking
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 LidarDataServer server;
 
 
@@ -28,14 +30,14 @@ void LidarDataServer::process_frame() {
 int LidarDataServer::start_stream() {
     int server = -1;
     int client = -1;
-    ofstream data_file;
-    // 360 / 2 ; has 2 degree separation
-    // single frame = 180; taking 12 frames so
-    // will process in a bit of 2160 points
-    std::vector<LidarDataFrame> frames(12);
+    // cannot do implicit copy cause of C++11
+    LidarResult lidar_frame_stack(FRAME_BUFFER_SIZE);
+    int last_angle = -1;
+    bool is_new_frame = false;
 
-    try {
-        cout << "[info] Starting lidar driver" << endl;
+    try
+    {
+        std::cout << "[info] Starting lidar driver" << std::endl;
         std::this_thread::sleep_for(std::chrono::seconds(1));
         server = socket(AF_INET, SOCK_STREAM, 0);
         if (server < 0) {
@@ -62,25 +64,8 @@ int LidarDataServer::start_stream() {
         }
         std::cout << "[info] Lidar client connected" << std::endl;
 
-
-        // Open file for writing lidar data
-        std::stringstream filename;
-        filename << "lidar_data.txt";
-        
-        data_file.open(filename.str(), std::ios::out);
-        if (!data_file.is_open()) {
-            throw std::runtime_error("failed to open lidar data file");
-        }
-        std::cout << "[info] Writing lidar data to: " << filename.str() << std::endl;
-        
-        // Write header to file
-        data_file << "# Format: quality angle distance" << std::endl;
-        data_file << "#" << std::endl;
-        data_file.flush();
-
         char header[5];
         char data[4096];
-        long frame_count;
         while (recv(client, header, 5, 0) == 5)
         {
             if ((unsigned char)header[0] == 165) {
@@ -96,21 +81,28 @@ int LidarDataServer::start_stream() {
                 }
 
                 int quality = (unsigned char)data[0] >> 2;
-                if (quality > 0) {
-                    int angle = (((unsigned char)data[1] >> 1) +
+                int angle = (((unsigned char)data[1] >> 1) +
                     ((unsigned char)data[2] << 8)) >> 7;
+                    
+                if (angle == 0) {
+                    if (last_angle != 0 ) {
+                        is_new_frame = true;
+                    }
+                }
+                last_angle = angle;
+                if (quality > 0) {
                     int distance = ((unsigned char)data[3] +
                     ((unsigned char)data[4] << 8)) >> 2;
-                    // process frames here
-                    // Write data to file instead of printing
-                    data_file << quality << " " << angle << " " << distance << std::endl;
-                    frame_count++;
-                    // Flush periodically to ensure data is written
-                    if (frame_count % 200 == 0) {
-                        data_file.flush();
-                        std::cout << "[info] Written " << frame_count << " frames" << std::endl;
-                        frame_count = 0;
+                    if (is_new_frame) {
+                        // thread safe
+                        lidar_frame_stack.update_lead_frame((lidar_frame_stack.lead_frame + 1) % 11);
+                        // Clear the new lead frame before using it
+                        lidar_frame_stack.frames[lidar_frame_stack.lead_frame].angle.clear();
+                        lidar_frame_stack.frames[lidar_frame_stack.lead_frame].distance.clear();
+                        is_new_frame = false;
                     }
+                    lidar_frame_stack.frames[lidar_frame_stack.lead_frame].angle.push_back(angle);
+                    lidar_frame_stack.frames[lidar_frame_stack.lead_frame].distance.push_back(distance);
                 }
             }
         }
@@ -118,7 +110,9 @@ int LidarDataServer::start_stream() {
         close(client);
         close(server);
         return 0;
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception &e)
+    {
         if (client >= 0) close(client);
         if (server >= 0) close(server);
         std::cerr << "[error] " << e.what() << std::endl;
@@ -130,7 +124,7 @@ int LidarDataServer::start_lidar() {
     try {
 
         while(!listener_ready.load()) {
-            cout << "[info] Listener not ready, waiting 2 seconds. " << endl;
+            std::cout << "[info] Listener not ready, waiting 2 seconds. " << std::endl;
             std::this_thread::sleep_for(
                 std::chrono::seconds(2));
         }

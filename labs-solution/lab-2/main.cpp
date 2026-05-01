@@ -11,13 +11,12 @@
 #include <chrono>
 
 
-using namespace std;
 
 const int LISTEN_FOR = 10;
 
 int main() {
     std::exception_ptr error;
-    cout << "[info] Starting Data Listen Server . . " << endl;
+    std::cout << "[info] Starting Data Listen Server . . " << std::endl;
     // imported global server from server.hpp to user atomic variable
     // LidarDataServer server = LidarDataServer();
     std::thread server_thread([&error]() {
@@ -35,17 +34,17 @@ int main() {
             server.stop_lidar();
         }
     });
-    cout << "[info] Waiting for lister to be ready." << endl;
+    std::cout << "[info] Waiting for lister to be ready." << std::endl;
     // waiting for the server to be ready
     while (!server.is_ready()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
-    cout << "[info] Starting lidar now" << endl;
+    std::cout << "[info] Starting lidar now" << std::endl;
     try {
         if (server.start_lidar() != 0) {
             throw std::runtime_error("failed to start lidar");
         }
-        cout << "[info] Sleeping for a bit . . . " << endl;
+        std::cout << "[info] Sleeping for a bit . . . " << std::endl;
         std::this_thread::sleep_for(
             std::chrono::seconds(LISTEN_FOR));
     } catch (const std::exception& e) {

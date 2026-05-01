@@ -6,6 +6,15 @@ class LidarDataServer {
     void process_frame();
 
 public:
+    LidarDataServer() {
+    // 360 / 2 ; has 2 degree separation
+    // single frame = 180; taking 12 frames so
+    // will process in a bit of 2160 points
+    // std::vector<LidarDataFrame> frames(12);
+    // processing half second of scan, 10hz scan, 
+    // temp_points.reserve(4300);
+    }
+    
     int start_stream();
     int start_lidar();
     int stop_lidar();
