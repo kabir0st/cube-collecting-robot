@@ -17,6 +17,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <functional>
+
 LidarDataServer server;
 
 
@@ -27,13 +29,13 @@ void LidarDataServer::process_frame() {
 
 
 
-int LidarDataServer::start_stream() {
+int LidarDataServer::start_stream(std::function<void(int, int, int)> process_point) {
     int server = -1;
     int client = -1;
     // cannot do implicit copy cause of C++11
     LidarResult lidar_frame_stack(FRAME_BUFFER_SIZE);
-    int last_angle = -1;
-    bool is_new_frame = false;
+    // int last_angle = -1;
+    // bool is_new_frame = false;
 
     try
     {
@@ -83,27 +85,29 @@ int LidarDataServer::start_stream() {
                 int quality = (unsigned char)data[0] >> 2;
                 int angle = (((unsigned char)data[1] >> 1) +
                     ((unsigned char)data[2] << 8)) >> 7;
-                    
-                if (angle == 0) {
-                    if (last_angle != 0 ) {
-                        is_new_frame = true;
-                    }
-                }
-                last_angle = angle;
-                if (quality > 0) {
-                    int distance = ((unsigned char)data[3] +
-                    ((unsigned char)data[4] << 8)) >> 2;
-                    if (is_new_frame) {
-                        // thread safe
-                        lidar_frame_stack.update_lead_frame((lidar_frame_stack.lead_frame + 1) % 11);
-                        // Clear the new lead frame before using it
-                        lidar_frame_stack.frames[lidar_frame_stack.lead_frame].angle.clear();
-                        lidar_frame_stack.frames[lidar_frame_stack.lead_frame].distance.clear();
-                        is_new_frame = false;
-                    }
-                    lidar_frame_stack.frames[lidar_frame_stack.lead_frame].angle.push_back(angle);
-                    lidar_frame_stack.frames[lidar_frame_stack.lead_frame].distance.push_back(distance);
-                }
+                int distance = ((unsigned char)data[3] +
+                ((unsigned char)data[4] << 8)) >> 2;
+                process_point(quality, angle, distance);
+                // if (angle == 0) {
+                //     if (last_angle != 0 ) {
+                //         is_new_frame = true;
+                //     }
+                // }
+                // last_angle = angle;
+                // if (quality > 0) {
+                //     int distance = ((unsigned char)data[3] +
+                //     ((unsigned char)data[4] << 8)) >> 2;
+                //     if (is_new_frame) {
+                //         // thread safe
+                //         lidar_frame_stack.update_lead_frame((lidar_frame_stack.lead_frame + 1) % 11);
+                //         // Clear the new lead frame before using it
+                //         lidar_frame_stack.frames[lidar_frame_stack.lead_frame].angle.clear();
+                //         lidar_frame_stack.frames[lidar_frame_stack.lead_frame].distance.clear();
+                //         is_new_frame = false;
+                //     }
+                //     lidar_frame_stack.frames[lidar_frame_stack.lead_frame].angle.push_back(angle);
+                //     lidar_frame_stack.frames[lidar_frame_stack.lead_frame].distance.push_back(distance);
+                // }
             }
         }
         listener_ready.store(false);

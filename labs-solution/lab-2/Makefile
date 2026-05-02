@@ -20,7 +20,7 @@ UNAME_S := $(shell uname -s)
 # =========================
 # Compiler flags
 # =========================
-CXXFLAGS = -std=c++11 -Wall -Wextra -O2 -I$(INCLUDE_DIR) -pthread
+CXXFLAGS = -std=c++11 -Wall -Wextra -O2 -I$(INCLUDE_DIR) -pthread -MMD -MP
 
 # Linker flags
 LDFLAGS = -pthread
@@ -36,6 +36,8 @@ LDFLAGS := $(filter-out -lopencv_viz -lopencv_hdf, $(LDFLAGS))
 # =========================
 SRCS = main.cpp $(wildcard $(SRC_DIR)/*.cpp)
 OBJS = $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(notdir $(SRCS)))
+DEPS = $(OBJS:.o=.d)
+-include $(DEPS)
 
 # =========================
 # Build rules

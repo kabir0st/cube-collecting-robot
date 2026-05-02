@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <functional>
 
 class LidarDataServer {
     std::atomic<bool> listener_ready{false};
@@ -15,7 +16,7 @@ public:
     // temp_points.reserve(4300);
     }
     
-    int start_stream();
+    int start_stream(std::function<void(int, int, int)> process_point);
     int start_lidar();
     int stop_lidar();
     

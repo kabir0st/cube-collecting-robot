@@ -8,14 +8,13 @@ const char* const TCP_IP = "127.0.0.1";
 constexpr int LISTENER_PORT = 9887;
 constexpr int CONTORL_PORT = 9887;
 
-std::atomic<bool> listener_ready{false};
 const int FRAME_BUFFER_SIZE = 12;
 
 struct LidarDataFrame
 {
     int frame;
-    std::vector<float> angle;
-    std::vector<float> distance;
+    std::vector<int> angle;
+    std::vector<int> distance;
     int num_points;
     
     LidarDataFrame() : frame(0), num_points(0) {
