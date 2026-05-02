@@ -15,4 +15,5 @@ class LidarCalibration {
     public:
         float calibrate();
         void collect_points(int quality, int angle, int distance);
+        const std::map<int, std::vector<int>>& samples() const { return scan_collection; }
 };

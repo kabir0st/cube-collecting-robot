@@ -3,6 +3,25 @@
 #include <atomic>
 #include <vector>
 
+struct Pose2D {
+    float x;        // mm
+    float y;        // mm
+    float theta;    // rad
+};
+
+struct LineSeg {
+    float nx, ny, r;        // unit normal, n . p = r, n points away from sensor origin
+    float ax, ay, bx, by;   // segment endpoints (mm)
+};
+
+struct TrackerResult {
+    Pose2D pose;
+    float  cov[9];          // row-major 3x3 covariance: [Cxx Cxy Cxt; Cyx Cyy Cyt; Ctx Cty Ctt]
+    int    iterations;
+    int    inliers;
+    bool   converged;
+};
+
 constexpr int FRAME_COUNT = 20;
 const char* const TCP_IP = "127.0.0.1";
 constexpr int LISTENER_PORT = 9887;
