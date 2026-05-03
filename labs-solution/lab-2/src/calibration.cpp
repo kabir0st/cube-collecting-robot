@@ -5,9 +5,7 @@
 #include <utils.hpp>
 #include <cmath>
 
-// Pooled sample standard deviation across per-angle bins:
 //   σ = sqrt( Σᵢ Σⱼ (dᵢⱼ − μᵢ)² / Σᵢ (nᵢ − 1) )
-// Two-pass within each bin to avoid catastrophic cancellation.
 float LidarCalibration::calibrate() {
 
     double ss_total = 0.0;       // Σᵢ Σⱼ (d − μᵢ)²

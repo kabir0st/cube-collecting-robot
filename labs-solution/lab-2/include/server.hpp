@@ -4,6 +4,8 @@
 
 class LidarDataServer {
     std::atomic<bool> listener_ready{false};
+    std::atomic<int> stream_server_fd{-1};
+    std::atomic<int> stream_client_fd{-1};
     void process_frame();
 
 public:
@@ -19,6 +21,7 @@ public:
     int start_stream(std::function<void(int, int, int)> process_point);
     int start_lidar();
     int stop_lidar();
+    int stop_stream();
     
     bool is_ready() const {
         return listener_ready.load();

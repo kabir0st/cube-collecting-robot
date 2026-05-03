@@ -11,6 +11,7 @@
 #include <thread>
 #include <stdexcept>
 #include <utils.hpp>
+#include <global.hpp>
 
 // for networking
 #include <sys/socket.h>
@@ -22,29 +23,20 @@
 LidarDataServer server;
 
 
-
-void LidarDataServer::process_frame() {
-    
-}
-
-
-
 int LidarDataServer::start_stream(std::function<void(int, int, int)> process_point) {
     int server = -1;
     int client = -1;
     // cannot do implicit copy cause of C++11
     LidarResult lidar_frame_stack(FRAME_BUFFER_SIZE);
-    // int last_angle = -1;
-    // bool is_new_frame = false;
 
     try
     {
-        std::cout << "[info] Starting lidar driver" << std::endl;
         std::this_thread::sleep_for(std::chrono::seconds(1));
         server = socket(AF_INET, SOCK_STREAM, 0);
         if (server < 0) {
             throw std::runtime_error("failed to create lidar stream socket");
         }
+        stream_server_fd.store(server);
 
         sockaddr_in addr = {};
         addr.sin_family = AF_INET;
@@ -58,17 +50,24 @@ int LidarDataServer::start_stream(std::function<void(int, int, int)> process_poi
             throw std::runtime_error("failed to listen on lidar stream socket");
         }
 
-        std::cout << "[info] Waiting for lidar client..." << std::endl;
+        std::cout << "[Stream Thread] Waiting for lidar driver..." << std::endl;
         listener_ready.store(true);
         client = accept(server, nullptr, nullptr);
         if (client < 0) {
+            if (app::shutdown.load()) {
+                listener_ready.store(false);
+                int s = stream_server_fd.exchange(-1);
+                if (s >= 0) close(s);
+                return 0;
+            }
             throw std::runtime_error("failed to accept lidar client");
         }
-        std::cout << "[info] Lidar client connected" << std::endl;
+        stream_client_fd.store(client);
+        std::cout << "[Steam Thread] Lidar client connected" << std::endl;
 
         char header[5];
         char data[4096];
-        while (recv(client, header, 5, 0) == 5)
+        while (!app::shutdown.load() && recv(client, header, 5, 0) == 5)
         {
             if ((unsigned char)header[0] == 165) {
                 int size = ((unsigned char)header[2] << 16) |
@@ -88,47 +87,47 @@ int LidarDataServer::start_stream(std::function<void(int, int, int)> process_poi
                 int distance = ((unsigned char)data[3] +
                 ((unsigned char)data[4] << 8)) >> 2;
                 process_point(quality, angle, distance);
-                // if (angle == 0) {
-                //     if (last_angle != 0 ) {
-                //         is_new_frame = true;
-                //     }
-                // }
-                // last_angle = angle;
-                // if (quality > 0) {
-                //     int distance = ((unsigned char)data[3] +
-                //     ((unsigned char)data[4] << 8)) >> 2;
-                //     if (is_new_frame) {
-                //         // thread safe
-                //         lidar_frame_stack.update_lead_frame((lidar_frame_stack.lead_frame + 1) % 11);
-                //         // Clear the new lead frame before using it
-                //         lidar_frame_stack.frames[lidar_frame_stack.lead_frame].angle.clear();
-                //         lidar_frame_stack.frames[lidar_frame_stack.lead_frame].distance.clear();
-                //         is_new_frame = false;
-                //     }
-                //     lidar_frame_stack.frames[lidar_frame_stack.lead_frame].angle.push_back(angle);
-                //     lidar_frame_stack.frames[lidar_frame_stack.lead_frame].distance.push_back(distance);
-                // }
             }
         }
         listener_ready.store(false);
-        close(client);
-        close(server);
+        int c = stream_client_fd.exchange(-1);
+        int s = stream_server_fd.exchange(-1);
+        if (c >= 0) close(c);
+        if (s >= 0) close(s);
         return 0;
-    }
-    catch (const std::exception &e)
-    {
-        if (client >= 0) close(client);
-        if (server >= 0) close(server);
+    } catch (const std::exception &e) {
+        listener_ready.store(false);
+        int c = stream_client_fd.exchange(-1);
+        int s = stream_server_fd.exchange(-1);
+        if (c >= 0) close(c);
+        if (s >= 0) close(s);
         std::cerr << "[error] " << e.what() << std::endl;
         return -1;
     }
+}
+
+int LidarDataServer::stop_stream() {
+    // stoping lidar before stopping stream
+    this->stop_lidar();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    int s = stream_server_fd.exchange(-1);
+    int c = stream_client_fd.exchange(-1);
+    if (c >= 0) {
+        ::shutdown(c, SHUT_RDWR);
+        ::close(c);
+    }
+    if (s >= 0) {
+        ::shutdown(s, SHUT_RDWR);
+        ::close(s);
+    }
+    return 0;
 }
 
 int LidarDataServer::start_lidar() {
     try {
 
         while(!listener_ready.load()) {
-            std::cout << "[info] Listener not ready, waiting 2 seconds. " << std::endl;
+            std::cout << "[Steam Thread] Listener not ready, waiting 2 seconds. " << std::endl;
             std::this_thread::sleep_for(
                 std::chrono::seconds(2));
         }
@@ -137,7 +136,7 @@ int LidarDataServer::start_lidar() {
             throw std::runtime_error("error while sending start signal");
         }
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        std::cout << "[info] Lidar start signal sent" << std::endl;
+        std::cout << "[Steam Thread] Lidar start signal sent" << std::endl;
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "[error] " << e.what() << std::endl;
@@ -153,7 +152,7 @@ int LidarDataServer::stop_lidar() {
             throw std::runtime_error("error while sending stop signal");
         }
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        std::cout << "[info] Lidar stop signal sent" << std::endl;
+        std::cout << "[Steam Thread] Lidar stop signal sent" << std::endl;
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "[error] " << e.what() << std::endl;
