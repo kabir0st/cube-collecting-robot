@@ -57,7 +57,6 @@ void LidarCalibration::create_reference_map() {
     std::vector<Point> scan;
 
     // Keep map geometry in millimeters to match downstream scan matching.
-    SplitAndMerge extractor(15.0, 2.0, 50.0, 4);
 
     for (const auto& pair: scan_collection){
         const auto &angle = pair.first;
@@ -70,12 +69,7 @@ void LidarCalibration::create_reference_map() {
         // y = d * sin theta
         scan.emplace_back(distance_mm * std::cos(angle_rad), distance_mm * std::sin(angle_rad));
     }
-    std::vector<Line> walls = extractor.extractWalls(scan);
+    // std::vector<Line> walls = extractor.extractWalls(scan);
     std::cout << "[info] Walls payena ? " << scan.size() << std::endl;
 
-    // Process extracted walls
-    for (const auto& wall : walls) {
-        std::cout << "Wall from (" << wall.start.x << "," << wall.start.y 
-                  << ") to (" << wall.end.x << "," << wall.end.y << ")" << std::endl;
-    }    
 }

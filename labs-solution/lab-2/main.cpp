@@ -47,7 +47,7 @@ void do_calibration() {
     // running calibration;
     float sensor_noise = lidar_calibration.calibrate();
     std::cout << "\n[RESULT] Calculated Sensor noise : " << sensor_noise << std::endl;
-    lidar_calibration.create_reference_map();
+    // lidar_calibration.create_reference_map();
 
     if (calibration_error)
     {
