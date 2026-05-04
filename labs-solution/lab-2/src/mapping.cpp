@@ -23,12 +23,12 @@ double Line::angle() const {
 }
 
 // SplitAndMerge implementations
-SplitAndMerge::SplitAndMerge(double splitThresh, double mergeAngleDeg, 
-                             double mergeDist, int minPts)
-    : split_threshold(splitThresh),
-      merge_angle(mergeAngleDeg * M_PI / 180.0),
-      merge_distance(mergeDist),
-      min_points(minPts) {}
+SplitAndMerge::SplitAndMerge(double st, double ma, 
+                             double md, int min_p)
+    : split_threshold(st),
+      merge_angle(ma * M_PI / 180.0),
+      merge_distance(md),
+      min_points(min_p) {}
 
 void SplitAndMerge::fitLine(const std::vector<Point>& points, Line& line) {
     if (points.size() < 2) return;

@@ -47,10 +47,10 @@ private:
     void merge(std::vector<Line>& segments);
     
 public:
-    SplitAndMerge(double splitThresh = 15.0,   // 15 mm split threshold
-                  double mergeAngleDeg = 2.0,  // 2 degrees
-                  double mergeDist = 50.0,     // 50 mm gap
-                  int minPts = 4);             // minimum points per wall
+    SplitAndMerge(double st = 15.0,   // 15 mm split threshold
+                  double ma = 2.0,  // 2 degrees
+                  double md = 50.0,     // 50 mm gap
+                  int min_p = 4);             // minimum points per wall
     
     // Main function: extract walls from LiDAR scan
     std::vector<Line> extractWalls(std::vector<Point>& scan);
