@@ -82,8 +82,9 @@ int LidarDataServer::start_stream(std::function<void(int, int, int)> process_poi
                 }
 
                 int quality = (unsigned char)data[0] >> 2;
-                int angle = (((unsigned char)data[1] >> 1) +
-                    ((unsigned char)data[2] << 8)) >> 7;
+                int angle_q6 = (((unsigned char)data[1] >> 1) |
+                    ((unsigned char)data[2] << 7));
+                int angle = (angle_q6 >> 6) % 360;
                 int distance = ((unsigned char)data[3] +
                 ((unsigned char)data[4] << 8)) >> 2;
                 process_point(quality, angle, distance);
@@ -109,6 +110,7 @@ int LidarDataServer::start_stream(std::function<void(int, int, int)> process_poi
 int LidarDataServer::stop_stream() {
     // stoping lidar before stopping stream
     this->stop_lidar();
+    app::shutdown_listener.store(true);
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     int s = stream_server_fd.exchange(-1);
     int c = stream_client_fd.exchange(-1);

@@ -48,4 +48,4 @@ The `lidar_sigma` field in [include/calibrate.hpp](include/calibrate.hpp#L13) is
 ## Not changed (intentionally)
 
 - Aggregation strategy: still per-angle binning. This assumes the lidar is truly stationary during calibration; if the platform drifts, even pooled variance overestimates noise. Out of scope for a numerical-correctness fix.
-- `LidarCalibration::collect_points` filter (`quality > 0`) — unchanged. Worth revisiting if the sensor reports a richer quality scale, but that is a sensor-model question, not a math bug.
+- `LidarCalibration::process_point` filter (`quality > 0`) — unchanged. Worth revisiting if the sensor reports a richer quality scale, but that is a sensor-model question, not a math bug.

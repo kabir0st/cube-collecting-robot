@@ -5,7 +5,14 @@
 #include <iostream>
 #include <stdexcept>
 #include <types.hpp>
-
+#include <thread>
+#include <future>
+#include <calibrate.hpp>
+#include <server.hpp>
+#include <global.hpp>
+#include <iostream>
+#include <chrono>
+#include <utils.hpp>
 
 int send_control_signal(int start) {
     int sock = -1;
@@ -41,5 +48,13 @@ int send_control_signal(int start) {
         }
         std::cerr << "[error] " << e.what() << std::endl;
         return -1;
+    }
+}
+
+
+
+ListenerThread::~ListenerThread() {
+    if (thread.joinable()) {
+        thread.join();
     }
 }

@@ -6,7 +6,6 @@ class LidarDataServer {
     std::atomic<bool> listener_ready{false};
     std::atomic<int> stream_server_fd{-1};
     std::atomic<int> stream_client_fd{-1};
-    void process_frame();
 
 public:
     LidarDataServer() {

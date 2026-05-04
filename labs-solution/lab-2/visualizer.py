@@ -90,7 +90,7 @@ def main():
         scat.set_offsets(xy)
         return (scat,)
 
-    _anim = FuncAnimation(fig, update, interval=1000 / 24, blit=True, cache_frame_data=False)
+    _anim = FuncAnimation(fig, update, interval=500 / 24, blit=True, cache_frame_data=False)
 
     try:
         plt.show()
