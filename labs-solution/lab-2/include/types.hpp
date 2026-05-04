@@ -14,13 +14,6 @@ struct LineSeg {
     float ax, ay, bx, by;   // segment endpoints (mm)
 };
 
-struct TrackerResult {
-    Pose2D pose;
-    float  cov[9];          // row-major 3x3 covariance: [Cxx Cxy Cxt; Cyx Cyy Cyt; Ctx Cty Ctt]
-    int    iterations;
-    int    inliers;
-    bool   converged;
-};
 
 constexpr int FRAME_COUNT = 20;
 const char* const TCP_IP = "127.0.0.1";

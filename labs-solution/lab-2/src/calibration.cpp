@@ -54,22 +54,33 @@ void LidarCalibration::process_point(int quality, int angle, int distance) {
 
 void LidarCalibration::create_reference_map() {
     std::cout << "[info] Creating reference map" << std::endl;
-    std::vector<Point> scan;
-
-    // Keep map geometry in millimeters to match downstream scan matching.
-
+    std::vector<Point> points;
     for (const auto& pair: scan_collection){
         const auto &angle = pair.first;
         const auto &distances = pair.second;
-        if (distances.size() == 0) continue;
+        if (distances.empty()) continue;
         const double avg = std::accumulate(distances.begin(), distances.end(), 0.0) / distances.size();
+        if (avg < 150.0) continue;
         const double angle_rad = static_cast<double>(angle) * M_PI / 180.0;
-        const double distance_mm = avg;
-        // x = d * cos theta
-        // y = d * sin theta
-        scan.emplace_back(distance_mm * std::cos(angle_rad), distance_mm * std::sin(angle_rad));
+        points.emplace_back(avg * std::cos(angle_rad), avg * std::sin(angle_rad));
     }
-    // std::vector<Line> walls = extractor.extractWalls(scan);
-    std::cout << "[info] Walls payena ? " << scan.size() << std::endl;
+    std::cout << "[calibration] Data points: " << points.size() << std::endl;
 
+    Rectangle rect = fit_rectangle(points);
+
+    std::cout << "[calibration] Arena orientation: "
+              << (rect.theta * 180.0 / M_PI) << " deg" << std::endl;
+    std::cout << "[calibration] Corners (mm):" << std::endl;
+    for (int i = 0; i < 4; ++i) {
+        std::cout << "  C" << i << " = (" << rect.corners[i].x
+                  << ", " << rect.corners[i].y << ")" << std::endl;
+    }
+    std::cout << "[calibration] Walls (n . p = r, endpoints):" << std::endl;
+    for (int i = 0; i < 4; ++i) {
+        const LineSeg& w = rect.walls[i];
+        std::cout << "  W" << i
+                  << " n=(" << w.nx << ", " << w.ny << ") r=" << w.r
+                  << "  (" << w.ax << ", " << w.ay
+                  << ") -> (" << w.bx << ", " << w.by << ")" << std::endl;
+    }
 }

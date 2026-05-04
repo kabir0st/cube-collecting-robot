@@ -26,8 +26,6 @@ LidarDataServer server;
 int LidarDataServer::start_stream(std::function<void(int, int, int)> process_point) {
     int server = -1;
     int client = -1;
-    // cannot do implicit copy cause of C++11
-    LidarResult lidar_frame_stack(FRAME_BUFFER_SIZE);
 
     try
     {
