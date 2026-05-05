@@ -39,7 +39,8 @@ float LidarCalibration::calibrate() {
         processed_points += static_cast<int>(n);
     }   
     // RMSE (Root Mean Square Error)
-    return static_cast<float>(std::sqrt(accumulated_error / processed_points));
+    lidar_sigma = static_cast<float>(std::sqrt(accumulated_error / processed_points));
+    return lidar_sigma;
 }
 
 
@@ -52,7 +53,7 @@ void LidarCalibration::process_point(int quality, int angle, int distance) {
     }
 }
 
-void LidarCalibration::create_reference_map() {
+Rectangle LidarCalibration::create_reference_map() {
     std::cout << "[info] Creating reference map" << std::endl;
     std::vector<Point> points;
     for (const auto& pair: scan_collection){
@@ -83,4 +84,5 @@ void LidarCalibration::create_reference_map() {
                   << "  (" << w.ax << ", " << w.ay
                   << ") -> (" << w.bx << ", " << w.by << ")" << std::endl;
     }
+    return rect;
 }
