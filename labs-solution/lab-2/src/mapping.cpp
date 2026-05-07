@@ -1,83 +1,50 @@
-#include "mapping.hpp"
+#include <mapping.hpp>
 
-#include <random>
+#include <algorithm>
+#include <cmath>
 #include <limits>
-#include <stdexcept>
+#include <random>
 
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
 
-// Point implementations
-Point::Point(double x_, double y_) : x(x_), y(y_) {}
 
-double Point::distance_to(const Point& other) const {
-    double dx = x - other.x;
-    double dy = y - other.y;
-    return std::sqrt(dx * dx + dy * dy);
-}
-
-// Line implementations
-double Line::length() const {
-    return start.distance_to(end);
-}
-
-double Line::distance_to(const Point& p) const {
-    return std::abs(a * p.x + b * p.y + c) / std::sqrt(a * a + b * b);
-}
-
-double Line::angle() const {
-    return std::atan2(end.y - start.y, end.x - start.x);
-}
-
-bool Line::check_fit(const Point& p, float threshold){
-    if (na * p.x + nb * p.y + nc > threshold){
-        return false;
-    }
-    return true;
-}
-
-void Line::add_point(const Point &p) {
-    points.push_back(p);
-    end = p;
-    a = end.y - start.y;
-    b = end.x - start.x;
-    c = start.x * end.y - end.x * start.y;
-    double d = start.distance_to(end);
-    na = a / d;
-    nb = b / d;
-    nc = c / d;
-}
-
+// =============================================================================
+// Total-least-squares line fit (orthogonal regression)
+// =============================================================================
+//
+// Given a set of points, find the line that minimises the sum of squared
+// PERPENDICULAR distances. The classical y = mx + b least-squares fit
+// minimises VERTICAL distances and breaks down for vertical walls.
+// TLS is symmetric in x and y and works for any orientation.
+//
+// Method: form the 2x2 sample covariance about the centroid; the
+// eigenvector of the smaller eigenvalue is the line normal, the
+// eigenvector of the larger eigenvalue is the line direction.
 namespace {
 
-// Total-least-squares line fit on a set of points. Returns unit
-// direction d (along the line) and unit normal n (perpendicular),
-// plus centroid. The normal is the eigenvector of the smaller
-// eigenvalue of the centered 2x2 covariance.
 struct LineFit {
     double cx, cy;   // centroid
-    double dx, dy;   // unit direction
-    double nx, ny;   // unit normal
+    double dx, dy;   // unit direction along the line
+    double nx, ny;   // unit normal, perpendicular to (dx, dy)
 };
 
 LineFit refit_tls(const std::vector<Point>& pts,
                   const std::vector<int>& idx) {
-    LineFit f{0, 0, 1, 0, 0, 1};
     const size_t n = idx.size();
-    if (n == 0) return f;
 
     double sx = 0.0, sy = 0.0;
     for (size_t i = 0; i < n; ++i) {
         sx += pts[idx[i]].x;
         sy += pts[idx[i]].y;
     }
-    f.cx = sx / static_cast<double>(n);
-    f.cy = sy / static_cast<double>(n);
+    const double cx = sx / static_cast<double>(n);
+    const double cy = sy / static_cast<double>(n);
 
     double sxx = 0.0, sxy = 0.0, syy = 0.0;
     for (size_t i = 0; i < n; ++i) {
-        const double dx = pts[idx[i]].x - f.cx;
-        const double dy = pts[idx[i]].y - f.cy;
+        const double dx = pts[idx[i]].x - cx;
+        const double dy = pts[idx[i]].y - cy;
         sxx += dx * dx;
         sxy += dx * dy;
         syy += dy * dy;
@@ -87,137 +54,140 @@ LineFit refit_tls(const std::vector<Point>& pts,
     C << sxx, sxy,
          sxy, syy;
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> es(C);
-    // eigenvalues in increasing order: col 0 = smaller (normal),
-    // col 1 = larger (direction).
-    const Eigen::Vector2d nrm = es.eigenvectors().col(0);
-    const Eigen::Vector2d dir = es.eigenvectors().col(1);
-    f.nx = nrm(0);
-    f.ny = nrm(1);
-    f.dx = dir(0);
-    f.dy = dir(1);
+
+    // SelfAdjointEigenSolver returns eigenvalues in ascending order:
+    //   col(0) = smaller -> normal
+    //   col(1) = larger  -> direction
+    LineFit f;
+    f.cx = cx; f.cy = cy;
+    f.nx = es.eigenvectors()(0, 0);
+    f.ny = es.eigenvectors()(1, 0);
+    f.dx = es.eigenvectors()(0, 1);
+    f.dy = es.eigenvectors()(1, 1);
     return f;
+}
+
+
+// Inliers of a candidate line (n, r) within `thresh` perpendicular distance.
+std::vector<int> inliers_of(const std::vector<Point>& pts,
+                            double nx, double ny, double r,
+                            double thresh) {
+    std::vector<int> out;
+    out.reserve(pts.size() / 4);
+    for (size_t k = 0; k < pts.size(); ++k) {
+        if (std::fabs(nx * pts[k].x + ny * pts[k].y - r) <= thresh)
+            out.push_back(static_cast<int>(k));
+    }
+    return out;
+}
+
+
+// Replace `pts` with everything that is NOT in `inliers`. O(n) and
+// stable (preserves order of survivors).
+void erase_inliers(std::vector<Point>& pts,
+                   const std::vector<int>& inliers) {
+    std::vector<bool> mark(pts.size(), false);
+    for (int i : inliers) mark[i] = true;
+    std::vector<Point> next;
+    next.reserve(pts.size() - inliers.size());
+    for (size_t k = 0; k < pts.size(); ++k)
+        if (!mark[k]) next.push_back(pts[k]);
+    pts.swap(next);
 }
 
 }  // namespace
 
+
 std::vector<LineSeg> fit_lines_ransac(const std::vector<Point>& points,
                                       const RansacParams& p) {
-    std::vector<LineSeg> lines;
-    if (points.size() < static_cast<size_t>(std::max(2, p.min_inliers))) {
-        return lines;
-    }
+    std::vector<LineSeg> walls;
+    if (points.size() < static_cast<size_t>(std::max(2, p.min_inliers)))
+        return walls;
 
     std::vector<Point> remaining = points;
-    const size_t initial_size = remaining.size();
-    const size_t min_set_size = std::max<size_t>(
+    const size_t initial = remaining.size();
+
+    // Combined floor: at least min_inliers AND min_inlier_fraction of the
+    // ORIGINAL cloud size. Using the original size (not the dwindling
+    // remaining size) prevents the loop from extracting noise lines once
+    // the real walls have been consumed.
+    const size_t hard_floor = std::max<size_t>(
         static_cast<size_t>(std::max(2, p.min_inliers)),
-        static_cast<size_t>(std::ceil(p.min_inlier_fraction *
-                                      static_cast<double>(initial_size))));
+        static_cast<size_t>(std::ceil(p.min_inlier_fraction * initial)));
 
     std::mt19937 rng(p.seed != 0 ? p.seed : std::random_device{}());
 
-    while (remaining.size() >= min_set_size &&
-           static_cast<int>(lines.size()) < p.max_lines) {
+    while (remaining.size() >= hard_floor &&
+           static_cast<int>(walls.size()) < p.max_lines) {
 
         const int N = static_cast<int>(remaining.size());
-        std::uniform_int_distribution<int> dist(0, N - 1);
+        std::uniform_int_distribution<int> pick(0, N - 1);
 
-        std::vector<int> best_inliers;
-
+        // -- Inner RANSAC loop: best 2-point hypothesis ----------------
+        std::vector<int> best;
         for (int trial = 0; trial < p.max_iters_per_line; ++trial) {
-            int i = dist(rng);
-            int j = dist(rng);
-            if (i == j) continue;
-            const Point& a = remaining[i];
-            const Point& b = remaining[j];
-            double dx = b.x - a.x;
-            double dy = b.y - a.y;
-            double len = std::sqrt(dx * dx + dy * dy);
+            int i = pick(rng);
+            int j = pick(rng);
+            if (i == j) { --trial; continue; }    // resample, don't waste
+
+            const double dx  = remaining[j].x - remaining[i].x;
+            const double dy  = remaining[j].y - remaining[i].y;
+            const double len = std::hypot(dx, dy);
             if (len < 1e-6) continue;
-            // Unit normal (perpendicular to ab).
+
             const double nx = -dy / len;
             const double ny =  dx / len;
-            const double r  = nx * a.x + ny * a.y;
+            const double r  = nx * remaining[i].x + ny * remaining[i].y;
 
-            std::vector<int> trial_inliers;
-            trial_inliers.reserve(N / 4);
-            for (int k = 0; k < N; ++k) {
-                const double d = std::fabs(nx * remaining[k].x +
-                                           ny * remaining[k].y - r);
-                if (d <= p.inlier_thresh_mm) trial_inliers.push_back(k);
-            }
-            if (trial_inliers.size() > best_inliers.size()) {
-                best_inliers.swap(trial_inliers);
-            }
+            std::vector<int> inl = inliers_of(remaining, nx, ny, r,
+                                              p.inlier_thresh_mm);
+            if (inl.size() > best.size()) best.swap(inl);
         }
+        if (static_cast<int>(best.size()) < p.min_inliers) break;
 
-        if (static_cast<int>(best_inliers.size()) < p.min_inliers) break;
-        if (best_inliers.size() < min_set_size) break;
-
-        // Refit with total least squares on inliers.
-        LineFit fit = refit_tls(remaining, best_inliers);
-
-        // Tighten inlier set against the refit line. This catches points
-        // the random-sample line missed and drops any that drift after refit.
-        std::vector<int> refined;
-        refined.reserve(best_inliers.size());
-        for (int k = 0; k < N; ++k) {
-            const double d = std::fabs(fit.nx * (remaining[k].x - fit.cx) +
-                                       fit.ny * (remaining[k].y - fit.cy));
-            if (d <= p.inlier_thresh_mm) refined.push_back(k);
-        }
+        // -- Refit on inliers, then re-collect inliers around the refit -
+        const LineFit fit = refit_tls(remaining, best);
+        const double r_refit = fit.nx * fit.cx + fit.ny * fit.cy;
+        const std::vector<int> refined = inliers_of(remaining,
+                                                    fit.nx, fit.ny, r_refit,
+                                                    p.inlier_thresh_mm);
         if (static_cast<int>(refined.size()) < p.min_inliers) {
-            // The refit moved enough that we lost the line. Walk away.
-            // Drop the original inliers anyway so we don't loop forever.
-            std::vector<bool> kill(N, false);
-            for (int idx : best_inliers) kill[idx] = true;
-            std::vector<Point> next;
-            next.reserve(N - best_inliers.size());
-            for (int k = 0; k < N; ++k) if (!kill[k]) next.push_back(remaining[k]);
-            remaining.swap(next);
+            // Refit drifted too far; drop original inliers and try again.
+            erase_inliers(remaining, best);
             continue;
         }
 
-        // Endpoints: project refined inliers onto direction d, take min/max.
+        // -- Endpoints from min/max projection along the line direction -
         double t_min =  std::numeric_limits<double>::infinity();
         double t_max = -std::numeric_limits<double>::infinity();
-        for (int idx : refined) {
-            const double t = fit.dx * (remaining[idx].x - fit.cx) +
-                             fit.dy * (remaining[idx].y - fit.cy);
+        for (int k : refined) {
+            const double t = fit.dx * (remaining[k].x - fit.cx)
+                           + fit.dy * (remaining[k].y - fit.cy);
             if (t < t_min) t_min = t;
             if (t > t_max) t_max = t;
         }
-        const double ax = fit.cx + t_min * fit.dx;
-        const double ay = fit.cy + t_min * fit.dy;
-        const double bx = fit.cx + t_max * fit.dx;
-        const double by = fit.cy + t_max * fit.dy;
+        // Pad the segment a little so a downstream endpoint test (Cox
+        // matcher) covers points hitting just past the last inlier.
+        t_min -= p.endpoint_padding_mm;
+        t_max += p.endpoint_padding_mm;
 
-        // Signed distance r so that n . p = r on the line.
-        double nx = fit.nx;
-        double ny = fit.ny;
+        // -- Build the LineSeg with normal pointing away from origin ----
+        double nx = fit.nx, ny = fit.ny;
         double r  = nx * fit.cx + ny * fit.cy;
-        // Convention: normal points away from the sensor at the origin,
-        // matching the original rectangle code.
         if (r < 0.0) { nx = -nx; ny = -ny; r = -r; }
 
         LineSeg seg;
         seg.nx = static_cast<float>(nx);
         seg.ny = static_cast<float>(ny);
         seg.r  = static_cast<float>(r);
-        seg.ax = static_cast<float>(ax);
-        seg.ay = static_cast<float>(ay);
-        seg.bx = static_cast<float>(bx);
-        seg.by = static_cast<float>(by);
-        lines.push_back(seg);
+        seg.ax = static_cast<float>(fit.cx + t_min * fit.dx);
+        seg.ay = static_cast<float>(fit.cy + t_min * fit.dy);
+        seg.bx = static_cast<float>(fit.cx + t_max * fit.dx);
+        seg.by = static_cast<float>(fit.cy + t_max * fit.dy);
+        walls.push_back(seg);
 
-        // Remove refined inliers from the working set.
-        std::vector<bool> kill(N, false);
-        for (int idx : refined) kill[idx] = true;
-        std::vector<Point> next;
-        next.reserve(N - refined.size());
-        for (int k = 0; k < N; ++k) if (!kill[k]) next.push_back(remaining[k]);
-        remaining.swap(next);
+        erase_inliers(remaining, refined);
     }
 
-    return lines;
+    return walls;
 }

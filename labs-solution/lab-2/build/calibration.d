@@ -1,9 +1,7 @@
-build/calibration.o: src/calibration.cpp include/types.hpp \
- include/calibrate.hpp include/mapping.hpp include/server.hpp \
- include/utils.hpp include/global.hpp
-include/types.hpp:
+build/calibration.o: src/calibration.cpp include/calibrate.hpp \
+ include/types.hpp include/mapping.hpp include/loging.hpp include/log.hpp
 include/calibrate.hpp:
+include/types.hpp:
 include/mapping.hpp:
-include/server.hpp:
-include/utils.hpp:
-include/global.hpp:
+include/loging.hpp:
+include/log.hpp:

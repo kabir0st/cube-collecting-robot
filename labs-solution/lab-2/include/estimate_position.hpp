@@ -1,34 +1,38 @@
 #pragma once
-#include <vector>
 #include <deque>
 #include <mutex>
-#include <types.hpp>
-#include <mapping.hpp>
+#include <vector>
+
 #include <Eigen/Core>
 
+#include <types.hpp>
+#include <loging.hpp>
 
-// Result of one Cox match: pose plus covariance / uncertainty.
+// Output of one Cox-matcher solve.
 struct PoseEstimate {
     Pose2D pose;          // (x mm, y mm, theta rad)
     float  cov[9];        // 3x3 row-major covariance over (x, y, theta)
     float  sigma_x;       // sqrt(cov[0])
     float  sigma_y;       // sqrt(cov[4])
-    float  sigma_theta;   // sqrt(cov[8])
-    int    iterations;
-    int    inliers;
-    bool   converged;
+    float  sigma_theta;   // sqrt(cov[8])  (rad)
+    int    iterations;    // Newton iterations performed
+    int    inliers;       // scan points that passed the residual gate
+    bool   converged;     // step size dropped below tolerance
 };
 
 
 // Cox '91 line-based scan matcher with a built-in rolling frame buffer.
-// process_point() is the same shape as LidarCalibration::process_point so
-// it plugs into ListenerThread directly.
+//
+// Threading: process_point() is the producer (lidar listener thread);
+// estimate() is the consumer (main thread, ~1 Hz). The mutex protects
+// `frames_` and `in_progress_`.
 class PositionEstimator {
 public:
     PositionEstimator(const std::vector<LineSeg>& ref_map,
                       Pose2D initial_pose,
-                      int frames_window,
-                      float sensor_noise_mm);
+                      int    frames_window,
+                      float  sensor_noise_mm,
+                      Loging* logger = nullptr);
 
     void process_point(int quality, int angle, int distance);
     PoseEstimate estimate();
@@ -54,13 +58,16 @@ private:
     LidarDataFrame             in_progress_;
     int                        last_angle_;
 
+    Loging* logger_;
+
     // Pre-allocated to avoid heap traffic in the 1 Hz hot path.
     Eigen::Matrix2Xf P_lidar_;   // 2 x N : scan in lidar frame
     Eigen::Matrix2Xf P_world_;   // 2 x N : scan transformed per iteration
 };
 
 
-// Top-level driver: mirrors do_calibration's threading. Starts the
-// listener + lidar, polls estimate() at 1 Hz until app::shutdown is set,
-// prints pose + uncertainty, then stops the stream.
-void do_estimate_position(const std::vector<LineSeg>& ref_map, float sensor_noise_mm);
+// Top-level driver: starts the listener + lidar, polls estimate() at
+// 1 Hz until app::shutdown is set, prints pose + uncertainty.
+void do_estimate_position(const std::vector<LineSeg>& ref_map,
+                          float sensor_noise_mm,
+                          Loging* logger = nullptr);
