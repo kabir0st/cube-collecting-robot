@@ -28,8 +28,8 @@ namespace app {
 static void handle_sigint(int) { app::shutdown.store(true); }
 
 struct CalibrationResult {
-    Rectangle reference_map;
-    float     sensor_noise;
+    std::vector<LineSeg> reference_map;
+    float                sensor_noise;
 };
 
 CalibrationResult do_calibration() {

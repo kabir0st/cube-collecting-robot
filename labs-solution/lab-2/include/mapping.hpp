@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <numeric>
+#include <cstdint>
 #include <types.hpp>
 
 struct Point {
@@ -13,16 +14,23 @@ struct Point {
     double distance_to(const Point& other) const;
 };
 
-struct Rectangle {
-    Point corners[4];   // CCW order in rotated frame: BL, BR, TR, TL
-    LineSeg walls[4];   // wall i runs from corners[i] to corners[(i+1)%4]
-    double theta;       // rotation of the rectangle's local axes (rad)
+struct RansacParams {
+    double   inlier_thresh_mm    = 25.0;     // perpendicular distance gate
+    int      max_iters_per_line  = 200;      // inner RANSAC trials
+    int      min_inliers         = 20;       // absolute floor
+    double   min_inlier_fraction = 0.05;     // of remaining-point set
+    int      max_lines           = 16;       // hard cap
+    uint32_t seed                = 0xC0FFEEu; // 0 -> std::random_device
 };
 
-// Fit an axis-aligned-after-rotation rectangle to 2D points.
-// Robust to outliers; uses minimum-area bounding rectangle search +
-// per-side median. Throws on too few points.
-Rectangle fit_rectangle(const std::vector<Point>& points);
+// Iteratively extract line segments from a 2D point cloud via RANSAC.
+// Each iteration: sample two points, count inliers within
+// `inlier_thresh_mm` perpendicular distance, refit on inliers via
+// total least squares, derive endpoints from inlier projection,
+// remove inliers, repeat. Stops when the remaining set is too small
+// or no candidate line clears `min_inliers`.
+std::vector<LineSeg> fit_lines_ransac(const std::vector<Point>& points,
+                                      const RansacParams& p = {});
 
 struct Line {
     public:

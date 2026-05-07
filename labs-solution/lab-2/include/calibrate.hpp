@@ -17,7 +17,7 @@ class LidarCalibration {
         LidarCalibration() : lidar_sigma(0.0f) {}
         float calibrate();
         void process_point(int quality, int angle, int distance);
-        Rectangle create_reference_map();
+        std::vector<LineSeg> create_reference_map();
         float sensor_noise() const { return lidar_sigma; }
         const std::map<int, std::vector<int>> &samples() const { return scan_collection; }
 };

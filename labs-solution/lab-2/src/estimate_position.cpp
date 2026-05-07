@@ -42,10 +42,10 @@ const float MIN_GATE_MM    = 10.0f;
 
 // Find the wall whose perpendicular distance to (pwx, pwy) is smallest,
 // within endpoint slack. Returns -1 if no wall qualifies.
-int nearest_wall(const LineSeg walls[4], float pwx, float pwy, float& y_signed) {
+int nearest_wall(const std::vector<LineSeg>& walls, float pwx, float pwy, float& y_signed) {
     int best = -1;
     float best_abs = 1e30f;
-    for (int i = 0; i < 4; ++i) {
+    for (size_t i = 0; i < walls.size(); ++i) {
         const LineSeg& L = walls[i];
         const float dx = L.bx - L.ax;
         const float dy = L.by - L.ay;
@@ -57,7 +57,7 @@ int nearest_wall(const LineSeg walls[4], float pwx, float pwy, float& y_signed) 
         const float ay = std::fabs(y);
         if (ay < best_abs) {
             best_abs = ay;
-            best = i;
+            best = static_cast<int>(i);
             y_signed = y;
         }
     }
@@ -67,11 +67,12 @@ int nearest_wall(const LineSeg walls[4], float pwx, float pwy, float& y_signed) 
 }  // namespace
 
 
-PositionEstimator::PositionEstimator(const Rectangle& ref_map,
+PositionEstimator::PositionEstimator(const std::vector<LineSeg>& ref_map,
                                      Pose2D initial_pose,
                                      int frames_window,
                                      float sensor_noise_mm)
-    : current_pose_(initial_pose),
+    : walls_(ref_map),
+      current_pose_(initial_pose),
       frames_window_(frames_window > 0 ? frames_window : 1),
       max_iters_(15),
       sigma_r_(sensor_noise_mm > 1.0f ? sensor_noise_mm : 30.0f),
@@ -79,7 +80,6 @@ PositionEstimator::PositionEstimator(const Rectangle& ref_map,
       tol_dxy_(0.5f),
       tol_dtheta_(1e-4f),
       last_angle_(-1) {
-    for (int i = 0; i < 4; ++i) walls_[i] = ref_map.walls[i];
     // Reserve enough capacity for ~22 lidar revolutions; resize() inside
     // estimate() is then a no-op as long as N stays below this.
     P_lidar_.resize(2, 4096);
@@ -243,7 +243,7 @@ PoseEstimate PositionEstimator::estimate() {
 }
 
 
-void do_estimate_position(const Rectangle& ref_map, float sensor_noise_mm) {
+void do_estimate_position(const std::vector<LineSeg>& ref_map, float sensor_noise_mm) {
     std::cout << "[estimate] Starting position estimation . . ." << std::endl;
 
     PositionEstimator estimator(ref_map, Pose2D{0.0f, 0.0f, 0.0f},

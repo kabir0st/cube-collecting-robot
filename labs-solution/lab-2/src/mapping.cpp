@@ -1,5 +1,12 @@
 #include "mapping.hpp"
 
+#include <random>
+#include <limits>
+#include <stdexcept>
+
+#include <Eigen/Core>
+#include <Eigen/Eigenvalues>
+
 // Point implementations
 Point::Point(double x_, double y_) : x(x_), y(y_) {}
 
@@ -43,132 +50,174 @@ void Line::add_point(const Point &p) {
 
 namespace {
 
-double percentile_sorted(const std::vector<double>& sorted_vals, double q) {
-    if (sorted_vals.empty()) return 0.0;
-    double idx = q * (sorted_vals.size() - 1);
-    size_t i = static_cast<size_t>(idx);
-    if (i + 1 >= sorted_vals.size()) return sorted_vals.back();
-    double frac = idx - static_cast<double>(i);
-    return sorted_vals[i] * (1.0 - frac) + sorted_vals[i + 1] * frac;
-}
+// Total-least-squares line fit on a set of points. Returns unit
+// direction d (along the line) and unit normal n (perpendicular),
+// plus centroid. The normal is the eigenvector of the smaller
+// eigenvalue of the centered 2x2 covariance.
+struct LineFit {
+    double cx, cy;   // centroid
+    double dx, dy;   // unit direction
+    double nx, ny;   // unit normal
+};
 
-double median_of(std::vector<double>& v) {
-    std::sort(v.begin(), v.end());
-    return v[v.size() / 2];
-}
+LineFit refit_tls(const std::vector<Point>& pts,
+                  const std::vector<int>& idx) {
+    LineFit f{0, 0, 1, 0, 0, 1};
+    const size_t n = idx.size();
+    if (n == 0) return f;
 
-double bbox_area_at(const std::vector<Point>& pts, double theta) {
-    const double c = std::cos(-theta);
-    const double s = std::sin(-theta);
-    std::vector<double> xs, ys;
-    xs.reserve(pts.size());
-    ys.reserve(pts.size());
-    for (size_t i = 0; i < pts.size(); ++i) {
-        xs.push_back(c * pts[i].x - s * pts[i].y);
-        ys.push_back(s * pts[i].x + c * pts[i].y);
+    double sx = 0.0, sy = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        sx += pts[idx[i]].x;
+        sy += pts[idx[i]].y;
     }
-    std::sort(xs.begin(), xs.end());
-    std::sort(ys.begin(), ys.end());
-    double w = percentile_sorted(xs, 0.98) - percentile_sorted(xs, 0.02);
-    double h = percentile_sorted(ys, 0.98) - percentile_sorted(ys, 0.02);
-    return w * h;
+    f.cx = sx / static_cast<double>(n);
+    f.cy = sy / static_cast<double>(n);
+
+    double sxx = 0.0, sxy = 0.0, syy = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double dx = pts[idx[i]].x - f.cx;
+        const double dy = pts[idx[i]].y - f.cy;
+        sxx += dx * dx;
+        sxy += dx * dy;
+        syy += dy * dy;
+    }
+
+    Eigen::Matrix2d C;
+    C << sxx, sxy,
+         sxy, syy;
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> es(C);
+    // eigenvalues in increasing order: col 0 = smaller (normal),
+    // col 1 = larger (direction).
+    const Eigen::Vector2d nrm = es.eigenvectors().col(0);
+    const Eigen::Vector2d dir = es.eigenvectors().col(1);
+    f.nx = nrm(0);
+    f.ny = nrm(1);
+    f.dx = dir(0);
+    f.dy = dir(1);
+    return f;
 }
 
 }  // namespace
 
-Rectangle fit_rectangle(const std::vector<Point>& points) {
-    if (points.size() < 16) {
-        throw std::runtime_error("fit_rectangle: need at least 16 points");
+std::vector<LineSeg> fit_lines_ransac(const std::vector<Point>& points,
+                                      const RansacParams& p) {
+    std::vector<LineSeg> lines;
+    if (points.size() < static_cast<size_t>(std::max(2, p.min_inliers))) {
+        return lines;
     }
 
-    double best_theta = 0.0;
-    double best_area = std::numeric_limits<double>::infinity();
-    for (int i = 0; i < 90; ++i) {
-        double t = i * M_PI / 180.0;
-        double a = bbox_area_at(points, t);
-        if (a < best_area) { best_area = a; best_theta = t; }
-    }
-    const double fine_step = 0.05 * M_PI / 180.0;
-    for (int i = -20; i <= 20; ++i) {
-        double t = best_theta + i * fine_step;
-        double a = bbox_area_at(points, t);
-        if (a < best_area) { best_area = a; best_theta = t; }
-    }
+    std::vector<Point> remaining = points;
+    const size_t initial_size = remaining.size();
+    const size_t min_set_size = std::max<size_t>(
+        static_cast<size_t>(std::max(2, p.min_inliers)),
+        static_cast<size_t>(std::ceil(p.min_inlier_fraction *
+                                      static_cast<double>(initial_size))));
 
-    const double cN = std::cos(-best_theta);
-    const double sN = std::sin(-best_theta);
-    std::vector<Point> rot;
-    rot.reserve(points.size());
-    for (size_t i = 0; i < points.size(); ++i) {
-        rot.push_back(Point(cN * points[i].x - sN * points[i].y,
-                            sN * points[i].x + cN * points[i].y));
-    }
+    std::mt19937 rng(p.seed != 0 ? p.seed : std::random_device{}());
 
-    std::vector<double> xs, ys;
-    xs.reserve(rot.size());
-    ys.reserve(rot.size());
-    for (size_t i = 0; i < rot.size(); ++i) {
-        xs.push_back(rot[i].x);
-        ys.push_back(rot[i].y);
-    }
-    std::sort(xs.begin(), xs.end());
-    std::sort(ys.begin(), ys.end());
-    const double cx = xs[xs.size() / 2];
-    const double cy = ys[ys.size() / 2];
+    while (remaining.size() >= min_set_size &&
+           static_cast<int>(lines.size()) < p.max_lines) {
 
-    std::vector<double> left_xs, right_xs, bot_ys, top_ys;
-    for (size_t i = 0; i < rot.size(); ++i) {
-        double dx = rot[i].x - cx;
-        double dy = rot[i].y - cy;
-        if (std::abs(dx) >= std::abs(dy)) {
-            (dx < 0 ? left_xs : right_xs).push_back(rot[i].x);
-        } else {
-            (dy < 0 ? bot_ys : top_ys).push_back(rot[i].y);
+        const int N = static_cast<int>(remaining.size());
+        std::uniform_int_distribution<int> dist(0, N - 1);
+
+        std::vector<int> best_inliers;
+
+        for (int trial = 0; trial < p.max_iters_per_line; ++trial) {
+            int i = dist(rng);
+            int j = dist(rng);
+            if (i == j) continue;
+            const Point& a = remaining[i];
+            const Point& b = remaining[j];
+            double dx = b.x - a.x;
+            double dy = b.y - a.y;
+            double len = std::sqrt(dx * dx + dy * dy);
+            if (len < 1e-6) continue;
+            // Unit normal (perpendicular to ab).
+            const double nx = -dy / len;
+            const double ny =  dx / len;
+            const double r  = nx * a.x + ny * a.y;
+
+            std::vector<int> trial_inliers;
+            trial_inliers.reserve(N / 4);
+            for (int k = 0; k < N; ++k) {
+                const double d = std::fabs(nx * remaining[k].x +
+                                           ny * remaining[k].y - r);
+                if (d <= p.inlier_thresh_mm) trial_inliers.push_back(k);
+            }
+            if (trial_inliers.size() > best_inliers.size()) {
+                best_inliers.swap(trial_inliers);
+            }
         }
-    }
-    if (left_xs.size() < 3 || right_xs.size() < 3 ||
-        bot_ys.size() < 3 || top_ys.size() < 3) {
-        throw std::runtime_error("fit_rectangle: a side has too few points");
-    }
 
-    const double xL = median_of(left_xs);
-    const double xR = median_of(right_xs);
-    const double yB = median_of(bot_ys);
-    const double yT = median_of(top_ys);
+        if (static_cast<int>(best_inliers.size()) < p.min_inliers) break;
+        if (best_inliers.size() < min_set_size) break;
 
-    Point r0(xL, yB), r1(xR, yB), r2(xR, yT), r3(xL, yT);
+        // Refit with total least squares on inliers.
+        LineFit fit = refit_tls(remaining, best_inliers);
 
-    const double cB = std::cos(best_theta);
-    const double sB = std::sin(best_theta);
-    Rectangle rect;
-    rect.theta = best_theta;
-    Point rcorners[4] = {r0, r1, r2, r3};
-    for (int i = 0; i < 4; ++i) {
-        rect.corners[i] = Point(cB * rcorners[i].x - sB * rcorners[i].y,
-                                sB * rcorners[i].x + cB * rcorners[i].y);
-    }
+        // Tighten inlier set against the refit line. This catches points
+        // the random-sample line missed and drops any that drift after refit.
+        std::vector<int> refined;
+        refined.reserve(best_inliers.size());
+        for (int k = 0; k < N; ++k) {
+            const double d = std::fabs(fit.nx * (remaining[k].x - fit.cx) +
+                                       fit.ny * (remaining[k].y - fit.cy));
+            if (d <= p.inlier_thresh_mm) refined.push_back(k);
+        }
+        if (static_cast<int>(refined.size()) < p.min_inliers) {
+            // The refit moved enough that we lost the line. Walk away.
+            // Drop the original inliers anyway so we don't loop forever.
+            std::vector<bool> kill(N, false);
+            for (int idx : best_inliers) kill[idx] = true;
+            std::vector<Point> next;
+            next.reserve(N - best_inliers.size());
+            for (int k = 0; k < N; ++k) if (!kill[k]) next.push_back(remaining[k]);
+            remaining.swap(next);
+            continue;
+        }
 
-    for (int i = 0; i < 4; ++i) {
-        const Point& A = rect.corners[i];
-        const Point& B = rect.corners[(i + 1) % 4];
+        // Endpoints: project refined inliers onto direction d, take min/max.
+        double t_min =  std::numeric_limits<double>::infinity();
+        double t_max = -std::numeric_limits<double>::infinity();
+        for (int idx : refined) {
+            const double t = fit.dx * (remaining[idx].x - fit.cx) +
+                             fit.dy * (remaining[idx].y - fit.cy);
+            if (t < t_min) t_min = t;
+            if (t > t_max) t_max = t;
+        }
+        const double ax = fit.cx + t_min * fit.dx;
+        const double ay = fit.cy + t_min * fit.dy;
+        const double bx = fit.cx + t_max * fit.dx;
+        const double by = fit.cy + t_max * fit.dy;
+
+        // Signed distance r so that n . p = r on the line.
+        double nx = fit.nx;
+        double ny = fit.ny;
+        double r  = nx * fit.cx + ny * fit.cy;
+        // Convention: normal points away from the sensor at the origin,
+        // matching the original rectangle code.
+        if (r < 0.0) { nx = -nx; ny = -ny; r = -r; }
+
         LineSeg seg;
-        seg.ax = static_cast<float>(A.x);
-        seg.ay = static_cast<float>(A.y);
-        seg.bx = static_cast<float>(B.x);
-        seg.by = static_cast<float>(B.y);
-        double dx = B.x - A.x;
-        double dy = B.y - A.y;
-        double len = std::sqrt(dx * dx + dy * dy);
-        double nx = -dy / len;
-        double ny = dx / len;
-        double mx = 0.5 * (A.x + B.x);
-        double my = 0.5 * (A.y + B.y);
-        if (nx * mx + ny * my < 0) { nx = -nx; ny = -ny; }
         seg.nx = static_cast<float>(nx);
         seg.ny = static_cast<float>(ny);
-        seg.r  = static_cast<float>(nx * A.x + ny * A.y);
-        rect.walls[i] = seg;
+        seg.r  = static_cast<float>(r);
+        seg.ax = static_cast<float>(ax);
+        seg.ay = static_cast<float>(ay);
+        seg.bx = static_cast<float>(bx);
+        seg.by = static_cast<float>(by);
+        lines.push_back(seg);
+
+        // Remove refined inliers from the working set.
+        std::vector<bool> kill(N, false);
+        for (int idx : refined) kill[idx] = true;
+        std::vector<Point> next;
+        next.reserve(N - refined.size());
+        for (int k = 0; k < N; ++k) if (!kill[k]) next.push_back(remaining[k]);
+        remaining.swap(next);
     }
 
-    return rect;
+    return lines;
 }

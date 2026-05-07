@@ -25,7 +25,7 @@ struct PoseEstimate {
 // it plugs into ListenerThread directly.
 class PositionEstimator {
 public:
-    PositionEstimator(const Rectangle& ref_map,
+    PositionEstimator(const std::vector<LineSeg>& ref_map,
                       Pose2D initial_pose,
                       int frames_window,
                       float sensor_noise_mm);
@@ -40,7 +40,7 @@ public:
     void set_sigma_r(float s) { sigma_r_ = s; }
 
 private:
-    LineSeg walls_[4];
+    std::vector<LineSeg> walls_;
     Pose2D  current_pose_;
     int     frames_window_;
     int     max_iters_;
@@ -63,4 +63,4 @@ private:
 // Top-level driver: mirrors do_calibration's threading. Starts the
 // listener + lidar, polls estimate() at 1 Hz until app::shutdown is set,
 // prints pose + uncertainty, then stops the stream.
-void do_estimate_position(const Rectangle& ref_map, float sensor_noise_mm);
+void do_estimate_position(const std::vector<LineSeg>& ref_map, float sensor_noise_mm);

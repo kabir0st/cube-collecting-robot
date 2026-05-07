@@ -53,7 +53,7 @@ void LidarCalibration::process_point(int quality, int angle, int distance) {
     }
 }
 
-Rectangle LidarCalibration::create_reference_map() {
+std::vector<LineSeg> LidarCalibration::create_reference_map() {
     std::cout << "[info] Creating reference map" << std::endl;
     std::vector<Point> points;
     for (const auto& pair: scan_collection){
@@ -67,22 +67,20 @@ Rectangle LidarCalibration::create_reference_map() {
     }
     std::cout << "[calibration] Data points: " << points.size() << std::endl;
 
-    Rectangle rect = fit_rectangle(points);
+    RansacParams ransac;
+    // 3-sigma residual gate, floored so very-low-noise sensors don't fragment walls.
+    ransac.inlier_thresh_mm = std::max(15.0, 3.0 * static_cast<double>(lidar_sigma));
+    std::vector<LineSeg> walls = fit_lines_ransac(points, ransac);
 
-    std::cout << "[calibration] Arena orientation: "
-              << (rect.theta * 180.0 / M_PI) << " deg" << std::endl;
-    std::cout << "[calibration] Corners (mm):" << std::endl;
-    for (int i = 0; i < 4; ++i) {
-        std::cout << "  C" << i << " = (" << rect.corners[i].x
-                  << ", " << rect.corners[i].y << ")" << std::endl;
-    }
-    std::cout << "[calibration] Walls (n . p = r, endpoints):" << std::endl;
-    for (int i = 0; i < 4; ++i) {
-        const LineSeg& w = rect.walls[i];
+    std::cout << "[calibration] RANSAC inlier threshold: "
+              << ransac.inlier_thresh_mm << " mm" << std::endl;
+    std::cout << "[calibration] Walls extracted: " << walls.size() << std::endl;
+    for (size_t i = 0; i < walls.size(); ++i) {
+        const LineSeg& w = walls[i];
         std::cout << "  W" << i
                   << " n=(" << w.nx << ", " << w.ny << ") r=" << w.r
                   << "  (" << w.ax << ", " << w.ay
                   << ") -> (" << w.bx << ", " << w.by << ")" << std::endl;
     }
-    return rect;
+    return walls;
 }
