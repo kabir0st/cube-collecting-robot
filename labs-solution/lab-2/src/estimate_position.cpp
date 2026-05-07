@@ -8,6 +8,11 @@
 #include <thread>
 #include <iostream>
 #include <stdexcept>
+#include <algorithm>
+
+#include <Eigen/Core>
+#include <Eigen/Cholesky>
+#include <Eigen/LU>
 
 
 // Cox '91 line-based scan matching, simple form.
@@ -33,36 +38,6 @@ const float PI_F = 3.14159265358979323846f;
 const float ENDPOINT_SLACK = 0.02f;   // 2% tolerance off either end of a wall.
 const float MAX_GATE_MM    = 150.0f;  // Hard ceiling on the residual gate.
 const float MIN_GATE_MM    = 10.0f;
-const float DET_EPS        = 1e-9f;
-
-
-bool inverse3x3_sym(const float A[9], float Ainv[9]) {
-    const float d = A[0] * (A[4] * A[8] - A[5] * A[7])
-                  - A[1] * (A[3] * A[8] - A[5] * A[6])
-                  + A[2] * (A[3] * A[7] - A[4] * A[6]);
-    if (std::fabs(d) < DET_EPS) return false;
-    const float inv = 1.0f / d;
-    Ainv[0] =  (A[4] * A[8] - A[5] * A[7]) * inv;
-    Ainv[1] = -(A[1] * A[8] - A[2] * A[7]) * inv;
-    Ainv[2] =  (A[1] * A[5] - A[2] * A[4]) * inv;
-    Ainv[3] = -(A[3] * A[8] - A[5] * A[6]) * inv;
-    Ainv[4] =  (A[0] * A[8] - A[2] * A[6]) * inv;
-    Ainv[5] = -(A[0] * A[5] - A[2] * A[3]) * inv;
-    Ainv[6] =  (A[3] * A[7] - A[4] * A[6]) * inv;
-    Ainv[7] = -(A[0] * A[7] - A[1] * A[6]) * inv;
-    Ainv[8] =  (A[0] * A[4] - A[1] * A[3]) * inv;
-    return true;
-}
-
-
-bool solve3x3(const float A[9], const float b[3], float x[3]) {
-    float Ainv[9];
-    if (!inverse3x3_sym(A, Ainv)) return false;
-    x[0] = Ainv[0] * b[0] + Ainv[1] * b[1] + Ainv[2] * b[2];
-    x[1] = Ainv[3] * b[0] + Ainv[4] * b[1] + Ainv[5] * b[2];
-    x[2] = Ainv[6] * b[0] + Ainv[7] * b[1] + Ainv[8] * b[2];
-    return true;
-}
 
 
 // Find the wall whose perpendicular distance to (pwx, pwy) is smallest,
@@ -105,6 +80,10 @@ PositionEstimator::PositionEstimator(const Rectangle& ref_map,
       tol_dtheta_(1e-4f),
       last_angle_(-1) {
     for (int i = 0; i < 4; ++i) walls_[i] = ref_map.walls[i];
+    // Reserve enough capacity for ~22 lidar revolutions; resize() inside
+    // estimate() is then a no-op as long as N stays below this.
+    P_lidar_.resize(2, 4096);
+    P_world_.resize(2, 4096);
 }
 
 
@@ -155,22 +134,26 @@ PoseEstimate PositionEstimator::estimate() {
         }
     }
     if (angles.size() < 8) return out;
+    const int N = static_cast<int>(angles.size());
 
-    // Precompute lidar-frame cartesian coords once. Inside the iteration
-    // loop we only do the world transform with the current pose's c, s.
-    const size_t N = angles.size();
-    std::vector<float> xs_l(N), ys_l(N);
-    for (size_t i = 0; i < N; ++i) {
+    // Precompute lidar-frame cartesian coords once into a 2xN Eigen matrix.
+    // The per-iteration world transform is then a single Matrix2f * Matrix2Xf
+    // multiply, which Eigen vectorizes (NEON on Cortex-A53).
+    if (P_lidar_.cols() < N) {
+        P_lidar_.resize(2, N);
+        P_world_.resize(2, N);
+    }
+    for (int i = 0; i < N; ++i) {
         const float a = angles[i] * (PI_F / 180.0f);
-        xs_l[i] = distances[i] * std::cos(a);
-        ys_l[i] = distances[i] * std::sin(a);
+        P_lidar_(0, i) = distances[i] * std::cos(a);
+        P_lidar_(1, i) = distances[i] * std::sin(a);
     }
 
     Pose2D pose = current_pose_;
-    float A[9]  = {0};
-    float b[3]  = {0};
-    float ssq   = 0.0f;
-    int   n_in  = 0;
+    Eigen::Matrix3f A = Eigen::Matrix3f::Zero();
+    Eigen::Vector3f b = Eigen::Vector3f::Zero();
+    float ssq  = 0.0f;
+    int   n_in = 0;
     bool  converged = false;
 
     float gate = gate_k_ * sigma_r_;
@@ -179,17 +162,25 @@ PoseEstimate PositionEstimator::estimate() {
 
     int iter = 0;
     for (; iter < max_iters_; ++iter) {
-        for (int k = 0; k < 9; ++k) A[k] = 0.0f;
-        b[0] = b[1] = b[2] = 0.0f;
-        ssq = 0.0f;
-        n_in = 0;
-
         const float c = std::cos(pose.theta);
         const float s = std::sin(pose.theta);
 
-        for (size_t i = 0; i < N; ++i) {
-            const float pwx = c * xs_l[i] - s * ys_l[i] + pose.x;
-            const float pwy = s * xs_l[i] + c * ys_l[i] + pose.y;
+        Eigen::Matrix2f R;
+        R << c, -s,
+             s,  c;
+        // Vectorized rigid transform: P_world = R * P_lidar + t.
+        P_world_.leftCols(N).noalias() = R * P_lidar_.leftCols(N);
+        P_world_.row(0).head(N).array() += pose.x;
+        P_world_.row(1).head(N).array() += pose.y;
+
+        A.setZero();
+        b.setZero();
+        ssq = 0.0f;
+        n_in = 0;
+
+        for (int i = 0; i < N; ++i) {
+            const float pwx = P_world_(0, i);
+            const float pwy = P_world_(1, i);
 
             float y_i = 0.0f;
             const int w = nearest_wall(walls_, pwx, pwy, y_i);
@@ -200,36 +191,29 @@ PoseEstimate PositionEstimator::estimate() {
             const float ny = walls_[w].ny;
             const float j3 = -nx * (pwy - pose.y) + ny * (pwx - pose.x);
 
-            // Symmetric rank-1 accumulation of J^T J.
-            A[0] += nx * nx;
-            A[1] += nx * ny;
-            A[2] += nx * j3;
-            A[4] += ny * ny;
-            A[5] += ny * j3;
-            A[8] += j3 * j3;
-
-            b[0] += -nx * y_i;
-            b[1] += -ny * y_i;
-            b[2] += -j3 * y_i;
+            const Eigen::Vector3f Ji(nx, ny, j3);
+            // Symmetric rank-1 update of A = sum Ji * Ji^T (lower triangle).
+            A.selfadjointView<Eigen::Lower>().rankUpdate(Ji);
+            b.noalias() -= Ji * y_i;
 
             ssq += y_i * y_i;
             ++n_in;
         }
-        A[3] = A[1];
-        A[6] = A[2];
-        A[7] = A[5];
+        // Mirror lower into upper so A is fully populated.
+        A.triangularView<Eigen::StrictlyUpper>() = A.transpose();
 
         if (n_in < 6) break;
 
-        float delta[3];
-        if (!solve3x3(A, b, delta)) break;
+        Eigen::LDLT<Eigen::Matrix3f> ldlt(A);
+        if (ldlt.info() != Eigen::Success) break;
+        const Eigen::Vector3f delta = ldlt.solve(b);
 
-        pose.x     += delta[0];
-        pose.y     += delta[1];
-        pose.theta += delta[2];
+        pose.x     += delta(0);
+        pose.y     += delta(1);
+        pose.theta += delta(2);
 
-        const float step_xy = std::sqrt(delta[0] * delta[0] + delta[1] * delta[1]);
-        if (step_xy < tol_dxy_ && std::fabs(delta[2]) < tol_dtheta_) {
+        const float step_xy = std::sqrt(delta(0) * delta(0) + delta(1) * delta(1));
+        if (step_xy < tol_dxy_ && std::fabs(delta(2)) < tol_dtheta_) {
             converged = true;
             ++iter;
             break;
@@ -245,15 +229,13 @@ PoseEstimate PositionEstimator::estimate() {
     out.converged = converged && n_in >= 6;
 
     if (n_in >= 6) {
-        const int dof = (n_in - 3 > 0) ? (n_in - 3) : 1;
+        const int dof = std::max(1, n_in - 3);
         const float s2 = ssq / static_cast<float>(dof);
-        float Ainv[9];
-        if (inverse3x3_sym(A, Ainv)) {
-            for (int i = 0; i < 9; ++i) out.cov[i] = s2 * Ainv[i];
-            out.sigma_x = std::sqrt(std::max(0.0f, out.cov[0]));
-            out.sigma_y = std::sqrt(std::max(0.0f, out.cov[4]));
-            out.sigma_theta = std::sqrt(std::max(0.0f, out.cov[8]));
-        }
+        const Eigen::Matrix3f cov = s2 * A.inverse();
+        Eigen::Map<Eigen::Matrix<float, 3, 3, Eigen::RowMajor>>(out.cov) = cov;
+        out.sigma_x     = std::sqrt(std::max(0.0f, cov(0, 0)));
+        out.sigma_y     = std::sqrt(std::max(0.0f, cov(1, 1)));
+        out.sigma_theta = std::sqrt(std::max(0.0f, cov(2, 2)));
     }
 
     if (out.converged) current_pose_ = pose;

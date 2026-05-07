@@ -20,13 +20,23 @@ UNAME_S := $(shell uname -s)
 # =========================
 # Compiler flags
 # =========================
-CXXFLAGS = -std=c++11 -Wall -Wextra -O2 -I$(INCLUDE_DIR) -pthread -MMD -MP
+CXXFLAGS = -std=c++11 -Wall -Wextra -O3 -ffast-math -I$(INCLUDE_DIR) -pthread -MMD -MP
 
 # Linker flags
 LDFLAGS = -pthread
 
 CXXFLAGS += -I/usr/include/opencv4
+CXXFLAGS += -I/usr/include/eigen3 -DEIGEN_NO_DEBUG
 LDFLAGS += -lopencv_core -lopencv_imgproc -lopencv_highgui -lopencv_imgcodecs -lopencv_videoio
+
+# ARM-specific tuning (RPi 3B): only when building natively on ARM.
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),aarch64)
+  CXXFLAGS += -mcpu=cortex-a53
+endif
+ifeq ($(UNAME_M),armv7l)
+  CXXFLAGS += -mcpu=cortex-a53 -mfpu=neon-fp-armv8 -mfloat-abi=hard
+endif
 
 # Remove problematic modules if they exist
 LDFLAGS := $(filter-out -lopencv_viz -lopencv_hdf, $(LDFLAGS))

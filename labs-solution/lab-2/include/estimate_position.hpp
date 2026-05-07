@@ -4,6 +4,7 @@
 #include <mutex>
 #include <types.hpp>
 #include <mapping.hpp>
+#include <Eigen/Core>
 
 
 // Result of one Cox match: pose plus covariance / uncertainty.
@@ -52,6 +53,10 @@ private:
     std::deque<LidarDataFrame> frames_;
     LidarDataFrame             in_progress_;
     int                        last_angle_;
+
+    // Pre-allocated to avoid heap traffic in the 1 Hz hot path.
+    Eigen::Matrix2Xf P_lidar_;   // 2 x N : scan in lidar frame
+    Eigen::Matrix2Xf P_world_;   // 2 x N : scan transformed per iteration
 };
 
 
