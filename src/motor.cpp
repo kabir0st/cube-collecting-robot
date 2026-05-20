@@ -22,76 +22,17 @@ namespace {
     constexpr auto   LOOP_PERIOD       = std::chrono::milliseconds(20);
 
     // Acceleration limits — robot ramps toward set_velocity() target at these rates.
-    constexpr double ACCEL_V_MM_S2     = 300.0;  // forward accel
-    constexpr double ACCEL_W_RAD_S2    = 3.0;    // yaw accel
+    // Baseline values scale with ROBOT_SPEED so the whole motion stack
+    // (velocity caps + accel ramps) speeds up or slows down together.
+    constexpr double ACCEL_V_MM_S2     = 150.0 * ROBOT_SPEED;  // forward accel
+    constexpr double ACCEL_W_RAD_S2    = 1.5   * ROBOT_SPEED;  // yaw accel
     constexpr double DT_S              = 0.020;  // matches LOOP_PERIOD
-    constexpr double V_STEP_PER_TICK   = ACCEL_V_MM_S2  * DT_S;  // 6 mm/s
-    constexpr double W_STEP_PER_TICK   = ACCEL_W_RAD_S2 * DT_S;  // 0.06 rad/s
+    constexpr double V_STEP_PER_TICK   = ACCEL_V_MM_S2  * DT_S;
+    constexpr double W_STEP_PER_TICK   = ACCEL_W_RAD_S2 * DT_S;
 }
 
 constexpr double Motor::TICKS_PER_MM;
 constexpr double Motor::WHEELBASE_MM;
-
-Motor::Motor() = default;
-
-Motor::~Motor() {
-    stop();
-}
-
-bool Motor::start() {
-    if (_motor_running.load()) return true;
-    if (wiringPiSPISetup(1, 4000000) < 0) {
-          LOGE("Motor") << "wiringPiSPISetup(1) failed";
-          return false;
-      }
-    // Median-of-3 seed so a single corrupted SPI read can't bias every
-    // subsequent delta in the read-write loop.
-    std::array<int32_t, 3> seed_l{0,0,0}, seed_r{0,0,0};
-    MotorDataType md = {0, 0, 0, 0, 0, 0};
-    for (int i = 0; i < 3; ++i) {
-        Send_Read_Motor_Data(&md);
-        seed_l[i] = md.Encoder_M1;
-        seed_r[i] = md.Encoder_M2;
-    }
-    std::sort(seed_l.begin(), seed_l.end());
-    std::sort(seed_r.begin(), seed_r.end());
-    {
-        std::lock_guard<std::mutex> lock(_mutex_motor);
-        _enc_left      = seed_l[1];
-        _enc_right     = seed_r[1];
-        _last_acc_left  = seed_l[1];
-        _last_acc_right = seed_r[1];
-        _last_acc_ts    = std::chrono::steady_clock::now();
-        _act_left  = md.Act_Speed_M1;
-        _act_right = md.Act_Speed_M2;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(_mutex_motor);
-        // Smoother starts at zero, target zero, so the first set_velocity
-        // ramps from rest at the configured acceleration.
-        _v_target = 0.0; _w_target = 0.0;
-        _v_cur    = 0.0; _w_cur    = 0.0;
-    }
-    _motor_running.store(true);
-    _io = std::thread(&Motor::_loop_motor_read_write, this);
-    LOG("Motor") << "Started Motor with seed encoders: ("
-                 << seed_l[1] << ", " << seed_r[1] << ")";
-    return true;
-}
-
-void Motor::stop() {
-    if (!_motor_running.load()) return;
-    set_velocity(0.0, 0.0);
-    std::this_thread::sleep_for(
-        std::chrono::milliseconds(1000));
-    if (!_motor_running.exchange(false)) return;
-    if (_io.joinable()) _io.join();
-    // cleaning up motor io
-    MotorDataType md = {0, 0, 0, 0, 0, 0};
-    Send_Read_Motor_Data(&md);
-    LOG("Motor") << "stopped";
-}
 
 namespace {
     // Arduino SPI speed unit is "100 pulses/sec".
@@ -116,6 +57,92 @@ namespace {
     inline double pps100_to_mm_s(int16_t pps100) {
         return static_cast<double>(pps100) / PPS100_PER_MM_S;
     }
+}
+
+Motor::Motor() = default;
+
+Motor::~Motor() {
+    stop();
+}
+
+bool Motor::start() {
+    if (_motor_running.load()) return true;
+    if (wiringPiSPISetup(1, 4000000) < 0) {
+          LOGE("Motor") << "wiringPiSPISetup(1) failed";
+          return false;
+      }
+    // Bumpless transfer: the Arduino motor controller may be holding a
+    // non-zero Set_Speed across Pi reboots. Slamming Set_Speed to 0 on the
+    // first frame would brake hard against any standing PWM and visibly
+    // twitch the wheels. Instead, probe with one zero-set frame, read the
+    // Arduino's reported Act_Speed, then mirror it back on the remaining
+    // seed frames so the controller keeps its current PWM. Initialize
+    // _v_cur/_w_cur from the measured speed and let the IO-loop ramp
+    // decelerate to zero at the configured ACCEL limits.
+    std::array<int32_t, 3> seed_l{0,0,0}, seed_r{0,0,0};
+    MotorDataType md = {0, 0, 0, 0, 0, 0};
+    int16_t hold_l = 0, hold_r = 0;
+    for (int i = 0; i < 3; ++i) {
+        md.Set_Speed_M1 = hold_l;
+        md.Set_Speed_M2 = hold_r;
+        Send_Read_Motor_Data(&md);
+        seed_l[i] = md.Encoder_M1;
+        seed_r[i] = md.Encoder_M2;
+        if (i == 0) {
+            // After the first probe we know what the Arduino is doing —
+            // mirror it back on frames #2 and #3 so it doesn't decelerate
+            // between our reads.
+            hold_l = md.Act_Speed_M1;
+            hold_r = md.Act_Speed_M2;
+        }
+    }
+    std::sort(seed_l.begin(), seed_l.end());
+    std::sort(seed_r.begin(), seed_r.end());
+
+    // Invert IK from _loop_motor_read_write: right wheel is wired
+    // backwards, so its sign flips when going chassis-frame ↔ wheel-frame.
+    const double act_l_mm_s =  pps100_to_mm_s(md.Act_Speed_M1);
+    const double act_r_mm_s = -pps100_to_mm_s(md.Act_Speed_M2);
+    const double v_seed = 0.5 * (act_l_mm_s + act_r_mm_s);
+    const double w_seed = (act_r_mm_s - act_l_mm_s) / WHEELBASE_MM;
+
+    {
+        std::lock_guard<std::mutex> lock(_mutex_motor);
+        _enc_left      = seed_l[1];
+        _enc_right     = seed_r[1];
+        _last_acc_left  = seed_l[1];
+        _last_acc_right = seed_r[1];
+        _last_acc_ts    = std::chrono::steady_clock::now();
+        _act_left  = md.Act_Speed_M1;
+        _act_right = md.Act_Speed_M2;
+        // Smoother seeded from the wheels' actual current speed; target
+        // stays at zero so the IO loop ramps it down at ACCEL_V_MM_S2 /
+        // ACCEL_W_RAD_S2 instead of slamming Set_Speed to 0.
+        _v_target = 0.0;    _w_target = 0.0;
+        _v_cur    = v_seed; _w_cur    = w_seed;
+    }
+    _motor_running.store(true);
+    _io = std::thread(&Motor::_loop_motor_read_write, this);
+    LOG("Motor") << "Started Motor with seed encoders: ("
+                 << seed_l[1] << ", " << seed_r[1] << ")"
+                 << " boot Act_Speed pps100 L=" << md.Act_Speed_M1
+                 << " R=" << md.Act_Speed_M2
+                 << " → v_cur=" << v_seed << " mm/s"
+                 << " w_cur=" << w_seed << " rad/s";
+    return true;
+}
+
+void Motor::stop() {
+    if (!_motor_running.load()) return;
+    set_velocity(0.0, 0.0);
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(1000));
+    if (!_motor_running.exchange(false)) return;
+    if (_io.joinable()) _io.join();
+    // cleaning up motor io
+    MotorDataType md = {0, 0, 0, 0, 0, 0};
+    Send_Read_Motor_Data(&md);
+    LOG("Motor") << "stopped";
 }
 
 void Motor::set_velocity(double v_mm_s, double omega_rad_s) {

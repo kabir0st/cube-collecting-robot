@@ -15,6 +15,7 @@
 std::atomic<bool> app::shutdown{false};
 std::atomic<bool> app::lidar_ready{false};
 std::atomic<bool> app::lidar_stop{false};
+std::atomic<bool> app::obstacle_ahead{false};
 std::vector<std::thread> threads;
 
 
@@ -117,12 +118,15 @@ int main() {
     // dash.add_row("Cox Debug");
     threads.emplace_back(loop_localization,
         std::ref(dash), std::ref(lidar_data), std::ref(kf));
+    // waiting for cox 1st seeds to be stable
+    std::this_thread::sleep_for(std::chrono::seconds(3));
 
     dash.add_row("Vision");
     threads.emplace_back(loop_vision_tracking,
         std::ref(dash), filter, cam_cfg, std::ref(target));
-    
-        
+    dash.render();
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    dash.render();
     dash.add_row("Motor");
     dash.add_row("Odometry");
     dash.add_row("KF");

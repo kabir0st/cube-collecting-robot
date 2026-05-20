@@ -6,6 +6,7 @@
 #include <string>
 
 #include <calibrations.hpp>
+#include <global.hpp>
 #include <loggers.hpp>
 #include <servo.h>
 #include <utils.hpp>
@@ -236,9 +237,9 @@ bool StateMachine::_plan_path_home(const Pos2D& current) {
     std::vector<PathPoint> path = bcubic_spline(
         controls,
         30,
-        80.0,
+        40.0 * ROBOT_SPEED,
         40.0,
-        200.0,
+        100.0 * ROBOT_SPEED,
         30.0);
 
     if (path.empty()) {
@@ -288,7 +289,7 @@ bool StateMachine::_plan_path_to(const Pos2D& current,
         30,
         v_max_mm_s,
         margin_mm,
-        200.0,
+        100.0 * ROBOT_SPEED,
         30.0);
     if (path.empty()) {
         LOGE("Mission") << "bcubic_spline returned empty search path "

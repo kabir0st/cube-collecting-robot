@@ -20,7 +20,7 @@ camera:
   capture_distance_mm: 120.0
   capture_bearing_tol_rad: 0.12
   retention_distance_mm: 150.0
-  show_debug_view: true
+  show_debug_view: false
 
 mission:
   home_x_mm: 0.0
@@ -50,3 +50,12 @@ battery:
   # Set false on a bench without the INA219 wired — otherwise the
   # monitor shuts the whole app down after ~20 s of absent readings.
   enabled: true
+
+filter:
+  ready: true
+  has_wrap_around: false
+  dominant_color: "122.876,80.17,60.9146"
+  lower1: "101,9,0"
+  upper1: "149,126,119"
+  lower2: "0,0,0"
+  upper2: "0,0,0"

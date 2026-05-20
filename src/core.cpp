@@ -132,9 +132,24 @@ void loop_control(Dashboard& dash,
     //
     // You can re-target while a goto is in progress by calling go_to() again.
 
+    bool prev_blocked = false;
+    constexpr double OBSTACLE_AVOID_OMEGA = 0.35;
+
     while(!app::shutdown) {
         // giving time for 2 readings
         std::this_thread::sleep_for(std::chrono::milliseconds(40));
+
+        const bool blocked = app::obstacle_ahead.load();
+        if (blocked) {
+            motor.set_velocity(0.0, OBSTACLE_AVOID_OMEGA);
+            prev_blocked = true;
+            continue;
+        }
+        if (prev_blocked) {
+            pp.abort();
+            prev_blocked = false;
+        }
+
         double l_mm, r_mm;
 
         motor.get_encoders(l_mm, r_mm);
@@ -173,7 +188,7 @@ void loop_control(Dashboard& dash,
                 w_cmd = 0.0;
                 break;
         }
-        motor.set_velocity(v_cmd, w_cmd);
+        // motor.set_velocity(v_cmd, w_cmd);
 
         uint64_t rejects = 0, give_ups = 0;
         motor.get_spi_stats(rejects, give_ups);

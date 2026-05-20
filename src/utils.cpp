@@ -14,6 +14,9 @@
 #include <ctime>
 #include <iomanip>
 
+constexpr double OBSTACLE_DIST_MM      = 140.0;
+constexpr double OBSTACLE_ARC_HALF_DEG = 60.0;
+
 bool start_lidar(hh::Lidar& lidar) {
     if (lidar.connect() != LIDAR_SUCCESS) {
         LOGE("LIDAR") << "Failed to connect to lidar on " << LIDAR_SERIAL_DEVICE;
@@ -55,6 +58,7 @@ void loop_collect_frames(hh::Lidar& lidar, LidarData& lidar_data) {
     }
     if (app::shutdown) return;
     LOG("LIDAR") << "Starting frame collection";
+    bool frame_blocked = false;
     while (!app::shutdown && !app::lidar_stop)
     {
         if (lidar.readNormalScanDataPacket(&pkt) != LIDAR_SUCCESS) continue;
@@ -68,11 +72,19 @@ void loop_collect_frames(hh::Lidar& lidar, LidarData& lidar_data) {
         if (!active_ang.empty() && angle + 3.0 < active_ang.back()) {
             lidar_data.update_buffer_id();
             bid = lidar_data.buffer_id.load();
+            app::obstacle_ahead.store(frame_blocked);
+            frame_blocked = false;
         }
         // only add quality reading and remove outlier dist
         if (quality > 0 && dist > 0){
             lidar_data.frames[bid].ang.push_back(angle);
             lidar_data.frames[bid].dist.push_back(dist);
+            const bool in_forward_arc =
+                (angle <= OBSTACLE_ARC_HALF_DEG) ||
+                (angle >= 360.0 - OBSTACLE_ARC_HALF_DEG);
+            if (in_forward_arc && dist < OBSTACLE_DIST_MM) {
+                frame_blocked = true;
+            }
         }
     }
 }

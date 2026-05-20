@@ -4,7 +4,8 @@
 #include <mutex>
 #include <vector>
 
-#include <types.hpp> 
+#include <global.hpp>
+#include <types.hpp>
 
 // Four internal modes:
 //   PRE_ROLL
@@ -52,8 +53,8 @@ private:
 
     // Tunables.
     double _L_d = 250.0;  // mm, lookahead distance
-    double _v_max = 150.0;  // mm/s, absolute clamp
-    double _omega_max = 1.5;    // rad/s, absolute clamp
+    double _v_max = 75.0 * ROBOT_SPEED;   // mm/s, absolute clamp
+    double _omega_max = 1.5 * ROBOT_SPEED;    // rad/s, absolute clamp
     double _heading_done_rad = 0.05;   // ~3 deg, TERMINAL_ROTATE exit
     double _pre_roll_thresh = 0.52;   // ~30 deg, PRE_ROLL entry
     double _k_pre_roll = 2.0;    // P gain for PRE_ROLL omega target

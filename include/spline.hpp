@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 
+#include <global.hpp>
 #include <types.hpp>
 
 // Generate a B-cubic spline path from a sequence of control points.
@@ -22,7 +23,7 @@
 std::vector<PathPoint> bcubic_spline(
     const std::vector<PathPoint>& control_pts,
     int    samples_per_segment = 100,
-    double default_v_max       = 150.0,
+    double default_v_max       = 75.0 * ROBOT_SPEED,
     double default_margin      = 30.0,
     double accel_mm_s2         = 200.0,
     double min_v_mm_s          = 0.0);

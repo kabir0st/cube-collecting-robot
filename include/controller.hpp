@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 #include <dashboard.hpp>
+#include <global.hpp>
 #include <pure_pursuit.hpp>
 #include <types.hpp>
 
@@ -141,19 +142,19 @@ private:
     double _goto_y = 0.0;
     double _goto_theta = 0.0;
     bool   _goto_pending = false;
-    double _goto_v_max_mm_s = 120.0;   // a bit faster than SEARCH; tunable
+    double _goto_v_max_mm_s = 60.0 * ROBOT_SPEED;    // a bit faster than SEARCH; tunable
     double _goto_margin_mm  = 40.0;    // tighter than SEARCH for lab accuracy
 
     // Tunables. Conservative defaults; safe to tweak from main if needed.
-    double _search_omega        = 0.35;  // rad/s, ~20°/s so camera gets enough frames
+    double _search_omega        = 0.35 * ROBOT_SPEED;  // rad/s, ~20°/s so camera gets enough frames
     double _search_min_dwell_s  = 2.0;   // bounce guard between failed approaches
-    double _search_v_max_mm_s   = 80.0;  // travel speed between waypoints
+    double _search_v_max_mm_s   = 40.0 * ROBOT_SPEED;  // travel speed between waypoints
     double _waypoint_margin_mm  = 80.0;  // arrival radius + wall standoff
     double _box_detection_range_mm = 700.0;  // drives subdivision math
     double _grip_settle_s       = 1.0;   // wait for `captured` after closing servo (vision needs ~10 frames to debounce)
-    double _approach_v          = 60.0;  // mm/s, visual-servo cruise
+    double _approach_v          = 30.0 * ROBOT_SPEED;  // mm/s, visual-servo cruise
     double _approach_k_omega    = 1.8;   // rad/s per rad of bearing
-    double _approach_omega_max  = 1.2;   // clamp on steering rate
+    double _approach_omega_max  = 1.2 * ROBOT_SPEED;   // clamp on steering rate
     // While vision is dropped during APPROACH we drive toward the last
     // latched target world position. Once the robot is inside this radius
     // of that point and the target is still not visible, give up and
