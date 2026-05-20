@@ -32,8 +32,8 @@ void Servo(int Ch, int Deg) {
 	}
 }
 
-static const int OPEN_DEG    = 0;
-static const int CLOSED_DEG  = 120;
+static const int OPEN_DEG    = 140;
+static const int CLOSED_DEG  = 75;
 static const int STEP_MS     = 10;
 
 // Last commanded angle per channel

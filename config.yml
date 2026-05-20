@@ -15,8 +15,8 @@ camera:
   #     edge) that counts as the "bottom region". 0.40 ⇒ y >= 0.60 * H.
   #   grab_bottom_fill_ratio:   minimum (bbox ∩ region) / region area.
   #     0.50 ⇒ bbox must cover at least half of that bottom region.
-  grab_bottom_region_ratio: 0.40
-  grab_bottom_fill_ratio: 0.50
+  grab_bottom_region_ratio: 0.35
+  grab_bottom_fill_ratio: 0.60
   capture_distance_mm: 120.0
   capture_bearing_tol_rad: 0.12
   retention_distance_mm: 150.0
@@ -49,4 +49,4 @@ logger:
 battery:
   # Set false on a bench without the INA219 wired — otherwise the
   # monitor shuts the whole app down after ~20 s of absent readings.
-  enabled: false
+  enabled: true

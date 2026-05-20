@@ -20,7 +20,7 @@ if [ -f "$ZIP_FILE" ]; then
 fi
 
 echo "Creating zip archive $ZIP_FILE..."
-zip -r "$ZIP_FILE" main.cpp src include Makefile libraries config.yml
+zip -r "$ZIP_FILE" main.cpp servo_test.cpp src include Makefile libraries config.yml
 
 # Transfer file using scp with sshpass
 echo "Transferring to ${REMOTE_USER}@${REMOTE_HOST}..."

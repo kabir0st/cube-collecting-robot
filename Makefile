@@ -42,17 +42,31 @@ $(BUILD_DIR)/main.o: main.cpp
 $(BUILD_DIR)/test_main.o: test_main.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+# Compile servo_test.cpp
+$(BUILD_DIR)/servo_test.o: servo_test.cpp | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Compile src/servo.c (C source)
+$(BUILD_DIR)/servo.o: $(SRC_DIR)/servo.c | $(BUILD_DIR)
+	$(CC) -std=c99 -Wall -O2 -I$(INCLUDE_DIR) -c $< -o $@
+
 # Compile src/*.cpp files
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+# Minimal servo test — only servo.c + wiringPi, no app deps.
+test: $(BUILD_DIR) $(BUILD_DIR)/servo_test.o $(BUILD_DIR)/servo.o
+	$(CXX) -o servo_test $(BUILD_DIR)/servo_test.o $(BUILD_DIR)/servo.o -lwiringPi
+	@echo "Build complete: servo_test — running…"
+	./servo_test
+
 # Clean
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET)
+	rm -rf $(BUILD_DIR) $(TARGET) servo_test
 
 # for syntax check
 check: CXXFLAGS += -Istubs
 check: $(OBJS)
 	@echo "✔ Compile check successful"
 
-.PHONY: all clean run info
+.PHONY: all clean run info test check
