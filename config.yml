@@ -1,0 +1,80 @@
+camera:
+  width: 640
+  height: 480
+  fps_target: 12
+  # mounted 82 mm above the floor
+  # tilted ~1.2 deg DOWN
+  # 60 mm AHEAD of the wheelbase
+  # f_px = pixel_height_observed * known_distance_mm / BOX_HEIGHT_MM
+  # Calibrated 2026-05-20: bbox.height 87.5 px at 297 mm w/ 40 mm box.
+  focal_length_px: 650.0
+  # Near-field "grabbable" gate (TrackerResult::grabbable).
+  # Target is grabbable when its bbox fills most of the bottom region of
+  # the frame.
+  #   grab_bottom_region_ratio: fraction of frame height (from bottom
+  #     edge) that counts as the "bottom region". 0.40 ⇒ y >= 0.60 * H.
+  #   grab_bottom_fill_ratio:   minimum (bbox ∩ region) / region area.
+  #     0.50 ⇒ bbox must cover at least half of that bottom region.
+  grab_bottom_region_ratio: 0.40
+  grab_bottom_fill_ratio: 0.50
+  capture_distance_mm: 120.0
+  capture_bearing_tol_rad: 0.12
+  retention_distance_mm: 150.0
+  show_debug_view: true
+
+mission:
+  home_x_mm: 0.0
+  home_y_mm: 0.0
+  home_theta_rad: 0.0
+  home_margin_mm: 100.0
+  # robot's arms length
+  arm_length_mm: 80.0
+
+search:
+  resolution_mm: 10.0
+  # Keep search cells this far inside the map bounds.
+  grid_margin_mm: 150.0
+  # Camera horizontal field-of-view (deg) for marking tiles as searched.
+  fov_deg: 62.0
+  # Max reliable vision distance for the box (mm).
+  effective_distance_mm: 700.0
+  # Fraction of the vision cone to mark as searched (0..1).
+  coverage_ratio: 0.6
+  # Advance to the next target once this fraction is already searched.
+  direction_coverage_min: 0.6
+  # Clear this many cells around a detected target back to unknown.
+  clear_radius_cells: 5
+  # Arrival radius for each search waypoint (mm).
+  waypoint_margin_mm: 100.0
+  # Cruise speed for search paths (mm/s).
+  v_max_mm_s: 80.0
+
+logger:
+  # Lab-3 file logging (logs/<run_id>_{odom,cox,kalman}.txt).
+  files_enabled: true
+  # Lab-4 UDP stream to Matlab listener.
+  udp_enabled: true
+  out_dir: logs
+  udp_host: 127.0.0.1
+  udp_port: 5005
+  # Sample period for both file writes and UDP packets. 100 ms matches the
+  # Lab-3 spec; raise to e.g. 50 for higher-rate plotting if Matlab can keep
+  # up.
+  tick_ms: 100
+  # Take every N-th lidar beam for the UDP scan overlay. 1 = full ~360 pts,
+  # 2 = ~180 pts (default; keeps each datagram under one MTU).
+  scan_subsample: 2
+
+battery:
+  # Set false on a bench without the INA219 wired — otherwise the
+  # monitor shuts the whole app down after ~20 s of absent readings.
+  enabled: false
+
+boot:
+  # Pause after vision calibration before starting the system threads.
+  warmup_s: 3
+  # Lidar warm-up before noise estimation / wall extraction.
+  lidar_warmup_s: 2
+  # Pause after threads are up so Cox/Kalman settle on a stable pose
+  # before the mission state machine starts moving the chassis.
+  seed_wait_s: 3
