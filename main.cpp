@@ -114,10 +114,11 @@ int main() {
 
 
     dash.add_row("Motor");
-    dash.add_row("Odometry");    
+    dash.add_row("Odometry");
     dash.add_row("KF");
+    dash.add_row("Servo");
     threads.emplace_back(loop_control,
-        std::ref(dash), std::ref(lidar_data), std::ref(kf));
+        std::ref(dash), std::ref(kf), std::ref(target));
 
     dash.add_row("Cox");
     // dash.add_row("Cox Debug");

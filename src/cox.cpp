@@ -172,7 +172,7 @@ PosEstimate CoxScanMatchAlgorithm::estimate(Pos2D init_pos) {
         iters_done = iter + 1;
         if (n_in < 6) break;
 
-        // Tikhonov ridge on the Fisher-info matrix. Long corridor / single-
+        // Long corridor / single-
         // wall-orientation scans give a rank-deficient A whose LDLT either
         // fails or produces a near-singular inverse that blows the
         // covariance to Inf/NaN. A tiny diagonal ridge stabilizes both the
@@ -289,6 +289,6 @@ void loop_scan_cox_estimation(
         // dash.set("Cox Debug", "inliers", static_cast<int64_t>(est.inliers));
         // dash.set("Cox Debug", "iters", static_cast<int64_t>(est.itr));
         // dash.set("Cox Debug", "status", std::string(trusted ? "OK" : (est.converged ? "weak" : "no-conv")));
-        // dash.set("Cox Debug", "time", get_timestamp());
+        dash.set("Cox", "time", get_timestamp());
     }
 }

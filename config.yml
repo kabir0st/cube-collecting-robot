@@ -30,25 +30,6 @@ mission:
   # robot's arms length
   arm_length_mm: 80.0
 
-search:
-  resolution_mm: 10.0
-  # Keep search cells this far inside the map bounds.
-  grid_margin_mm: 150.0
-  # Camera horizontal field-of-view (deg) for marking tiles as searched.
-  fov_deg: 62.0
-  # Max reliable vision distance for the box (mm).
-  effective_distance_mm: 700.0
-  # Fraction of the vision cone to mark as searched (0..1).
-  coverage_ratio: 0.6
-  # Advance to the next target once this fraction is already searched.
-  direction_coverage_min: 0.6
-  # Clear this many cells around a detected target back to unknown.
-  clear_radius_cells: 5
-  # Arrival radius for each search waypoint (mm).
-  waypoint_margin_mm: 100.0
-  # Cruise speed for search paths (mm/s).
-  v_max_mm_s: 80.0
-
 logger:
   # Lab-3 file logging (logs/<run_id>_{odom,cox,kalman}.txt).
   files_enabled: true
@@ -69,12 +50,3 @@ battery:
   # Set false on a bench without the INA219 wired — otherwise the
   # monitor shuts the whole app down after ~20 s of absent readings.
   enabled: false
-
-boot:
-  # Pause after vision calibration before starting the system threads.
-  warmup_s: 3
-  # Lidar warm-up before noise estimation / wall extraction.
-  lidar_warmup_s: 2
-  # Pause after threads are up so Cox/Kalman settle on a stable pose
-  # before the mission state machine starts moving the chassis.
-  seed_wait_s: 3

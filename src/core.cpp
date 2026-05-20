@@ -98,9 +98,8 @@ void loop_localization(Dashboard& dash,
 }
 
 
-
 void loop_control(Dashboard& dash,
-                  LidarData& lidar_data, KalmanFilter& kf) {
+                  KalmanFilter& kf, TrackerResult& target) {
     Motor motor;
     Odometry odom;
     double total_d = 0;
@@ -140,14 +139,14 @@ void loop_control(Dashboard& dash,
         double v_sm = 0.0, w_sm = 0.0;
         total_d += step.d_mm;
         total_a += step.d_theta;
-        
+
         motor.get_current_v_w(v_sm, w_sm);
-        
 
         Pos2D p;
         Pose2DCov cov;
         kf.snapshot(p, cov);
         // logger.set_kf(p, cov);
+
         // dashboard stats
         {
             dash.set("Odometry", "d_dist", step.d_mm/10);
@@ -159,6 +158,7 @@ void loop_control(Dashboard& dash,
             dash.set("KF", "Y",      p.y/10);
             dash.set("KF", "Theta", p.theta * 180.0 / M_PI);
         }
+
     }
     motor.stop();
 }
