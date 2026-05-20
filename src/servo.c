@@ -38,27 +38,7 @@ enum {
 	STEP_MS    = 10
 };
 
-// Last commanded angle per channel
-static int s_current[2] = { OPEN_DEG, OPEN_DEG };
 
-static void smooth_move( int target) {
-	if (target < 0)   target = 0;
-	if (target > 180) target = 180;
-	int ch = 0;
-	int from = s_current[ch];
-	if (from == target) {
-		Servo(ch, target);
-		return;
-	}
-	int step = (from < target) ? 1 : -1;
-	for (int a = from; a != target; a += step) {
-		Servo(ch, a);
-		delay(STEP_MS);
-	}
-	Servo(ch, target);
-	s_current[ch] = target;
-}
-
-void servo_grab()    { smooth_move(CLOSED_DEG); }
-void servo_release() { smooth_move(OPEN_DEG); }
+void servo_grab()    { Servo(0, CLOSED_DEG); }
+void servo_release() { Servo(0, OPEN_DEG); }
 
