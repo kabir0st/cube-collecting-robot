@@ -116,16 +116,17 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
         _search_path_active = false;
         _search_last_wp_idx = static_cast<size_t>(-1);
         _search_plan.valid  = false;
-        Servo(SERVO_CHANNEL, SERVO_OPEN_DEG);
+        servo_release();
     }
 
     if (new_state == State::APPROACH) {
         // Each approach starts from a fresh grip cycle.
-        _grip_fired = false;
+        _grip_stop_sent = false;
+        _grip_fired     = false;
     }
 
     if (new_state == State::RELEASE) {
-        Servo(SERVO_CHANNEL, SERVO_OPEN_DEG);
+        servo_release();
     }
 
     if (new_state == State::TURN_AROUND) {
@@ -509,7 +510,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
             //    didn't catch; re-open, burn an attempt, go back to SEARCH.
             if (_grip_fired) {
                 if (seconds_since(_grip_fired_at) > _grip_settle_s) {
-                    Servo(SERVO_CHANNEL, SERVO_OPEN_DEG);
+                    servo_release();
                     _grip_fired = false;
                     { std::lock_guard<std::mutex> lk(_m); ++_approach_attempts; }
                     _transition(State::SEARCH, pose);
@@ -522,9 +523,20 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
                 break;
             }
 
-            // 3. Box is in the grab zone — stop, fire the servo, latch ts.
+            // 3. Box is in the grab zone. Two-tick sequence so the motor
+            //    has a control cycle to decelerate before the blocking
+            //    smooth-close runs:
+            //      tick N   — command v=0, latch _grip_stop_sent
+            //      tick N+1 — call servo_grab() (blocks ~1.2 s)
             if (snap.grabbable) {
-                Servo(SERVO_CHANNEL, SERVO_CLOSED_DEG);
+                if (!_grip_stop_sent) {
+                    _grip_stop_sent = true;
+                    out.mode = Command::Mode::DIRECT;
+                    out.v_mm_s = 0.0;
+                    out.omega_rad_s = 0.0;
+                    break;
+                }
+                servo_grab();
                 _grip_fired    = true;
                 _grip_fired_at = std::chrono::steady_clock::now();
                 out.mode = Command::Mode::DIRECT;
