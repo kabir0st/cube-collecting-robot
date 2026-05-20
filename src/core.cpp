@@ -123,6 +123,15 @@ void loop_control(Dashboard& dash,
 
     sm.start();
 
+    // --- Lab 3/4/5: drive to a single (x, y, theta) instead of the box mission ---
+    // Comment out sm.start() above and uncomment the call below. Coordinates are
+    // in mm, theta in radians. The state machine builds a B-cubic spline and
+    // runs PurePursuit; TERMINAL_ROTATE enforces the final heading.
+    //
+    //   sm.go_to(1500.0, 800.0, M_PI / 2);
+    //
+    // You can re-target while a goto is in progress by calling go_to() again.
+
     while(!app::shutdown) {
         // giving time for 2 readings
         std::this_thread::sleep_for(std::chrono::milliseconds(40));
@@ -142,6 +151,12 @@ void loop_control(Dashboard& dash,
         kf.snapshot(p, cov);
 
         const StateMachine::Command cmd = sm.step(p, dash);
+
+        // Lab mode: stop the loop once the goto completes. No effect in mission
+        // mode (sm.start() flow stays inside SEARCH/APPROACH/CARRY_HOME/... and
+        // never reaches DONE via goto_arrived()).
+        //
+        //   if (sm.goto_arrived()) break;
 
         double v_cmd = 0.0, w_cmd = 0.0;
         switch (cmd.mode) {
