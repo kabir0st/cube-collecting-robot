@@ -113,14 +113,6 @@ int main() {
     }
 
 
-    dash.add_row("Motor");
-    dash.add_row("Odometry");
-    dash.add_row("KF");
-    dash.add_row("Servo");
-    dash.add_row("Mission");
-    threads.emplace_back(loop_control,
-        std::ref(dash), std::ref(kf), std::ref(target));
-
     dash.add_row("Cox");
     // dash.add_row("Cox Debug");
     threads.emplace_back(loop_localization,
@@ -129,6 +121,16 @@ int main() {
     dash.add_row("Vision");
     threads.emplace_back(loop_vision_tracking,
         std::ref(dash), filter, cam_cfg, std::ref(target));
+    
+        
+    dash.add_row("Motor");
+    dash.add_row("Odometry");
+    dash.add_row("KF");
+    dash.add_row("Servo");
+    dash.add_row("Mission");
+    threads.emplace_back(loop_control,
+        std::ref(dash), std::ref(kf), std::ref(target));
+
     while(!app::shutdown) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         dash.render();

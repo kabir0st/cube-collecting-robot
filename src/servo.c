@@ -37,7 +37,7 @@ static const int CLOSED_DEG  = 75;
 static const int STEP_MS     = 10;
 
 // Last commanded angle per channel
-static int s_current[2] = { 0, 0 };
+static int s_current[2] = { OPEN_DEG, OPEN_DEG };
 
 static void smooth_move( int target) {
 	if (target < 0)   target = 0;

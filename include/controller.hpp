@@ -22,6 +22,10 @@ public:
         TURN_AROUND,
         DONE,
         SAFE_STOP,
+        // Bench/lab mode: drive to a single (x, y, theta) via the spline +
+        // PurePursuit pipeline, then latch DONE. Orthogonal to the
+        // SEARCH-based mission; entered via go_to(), not start().
+        GOTO,
     };
 
     // What loop_control should do with the motors this tick.
@@ -42,6 +46,17 @@ public:
     // Begin the mission: IDLE -> SEARCH. No-op from any other state.
     void start();
     void abort();
+
+    // Lab/bench entry: drive to (x, y, theta) via a B-cubic spline +
+    // PurePursuit (TERMINAL_ROTATE enforces the final heading). Allowed from
+    // IDLE / DONE / SAFE_STOP / GOTO. Latches the target and transitions to
+    // GOTO; the next step() builds the spline and starts following.
+    void go_to(double x, double y, double theta);
+    void go_to(const Pos2D& target);
+    // True once the controller has arrived at the latched goal pose (i.e.
+    // PurePursuit has reached DONE). Useful for outer loops to know when
+    // the goto completed.
+    bool goto_arrived() const;
 
     Command step(const Pos2D& pose, Dashboard& dash);
 
@@ -118,6 +133,16 @@ private:
     bool   _turn_start_set = false;
     double _turn_start_theta = 0.0;
     double _turn_accumulated = 0.0;
+
+    // GOTO state: latched single target pose. Set by go_to(), consumed once
+    // on entry to State::GOTO inside _transition() to build the spline.
+    // Protected by _m.
+    double _goto_x = 0.0;
+    double _goto_y = 0.0;
+    double _goto_theta = 0.0;
+    bool   _goto_pending = false;
+    double _goto_v_max_mm_s = 120.0;   // a bit faster than SEARCH; tunable
+    double _goto_margin_mm  = 40.0;    // tighter than SEARCH for lab accuracy
 
     // Tunables. Conservative defaults; safe to tweak from main if needed.
     double _search_omega        = 0.35;  // rad/s, ~20°/s so camera gets enough frames

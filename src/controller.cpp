@@ -43,6 +43,7 @@ const char* StateMachine::state_name(State s) {
         case State::TURN_AROUND: return "TURN_AROUND";
         case State::DONE:        return "DONE";
         case State::SAFE_STOP:   return "SAFE_STOP";
+        case State::GOTO:        return "GOTO";
     }
     return "?";
 }
@@ -73,6 +74,45 @@ void StateMachine::start() {
     LOG("Mission") << "start(): " << state_name(now) << " -> SEARCH";
 }
 
+
+void StateMachine::go_to(double x, double y, double theta) {
+    // Latch the target under the lock so _transition()'s entry side-effect
+    // sees a consistent goal even if go_to() races with a step() tick.
+    Pos2D dummy_current{};  // _transition derives the spline from the live
+                            // pose passed into step(); we only need to flip
+                            // the state here. The actual plan is built on
+                            // the first step() tick after the transition.
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        const State now = _state.load();
+        const bool allowed = (now == State::IDLE ||
+                              now == State::DONE ||
+                              now == State::SAFE_STOP ||
+                              now == State::GOTO);
+        if (!allowed) {
+            LOG("Mission") << "go_to() ignored; state = " << state_name(now);
+            return;
+        }
+        _goto_x = x;
+        _goto_y = y;
+        _goto_theta = theta;
+        _goto_pending = true;
+        _state.store(State::GOTO);
+        _state_entered = std::chrono::steady_clock::now();
+    }
+    LOG("Mission") << "go_to(" << x << ", " << y << ", "
+                   << theta << ") latched";
+}
+
+void StateMachine::go_to(const Pos2D& target) {
+    go_to(target.x, target.y, target.theta);
+}
+
+bool StateMachine::goto_arrived() const {
+    const State s = _state.load();
+    if (s != State::GOTO && s != State::DONE) return false;
+    return _controller.has_arrived();
+}
 
 void StateMachine::abort() {
     // Side-effects first so they take effect even if the lock is contended.
@@ -306,7 +346,6 @@ void StateMachine::_build_search_plan(const Pos2D& /*pose*/) {
 
 StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
     Command out;
-
     // Snapshot everything once so the state body sees a consistent view.
     // One mutex acquire per tick on each of _m and the vision lock
     const TrackerResult::Snapshot snap = _vision.get_snapshot();
@@ -489,7 +528,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
             //    Hand off to carry/release.
             if (snap.captured) {
                 { std::lock_guard<std::mutex> lk(_m); _approach_attempts = 0; }
-                // Already at home? Skip the carry phase. Decision uses the
+                // Already at home Skip the carry phase. Decision uses the
                 // BOX position (pose + arm), not the robot pose, so that we
                 // do not back up with the box still parked in the gripper
                 // outside the home zone.
@@ -584,7 +623,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
 
             if (t_in > _approach_timeout_s) {
                 // Box visible but we cannot engage it within the timeout.
-                // This is a real failed attempt — charge the budget here.
+                // This is a real failed attempt charge the budget here.
                 { std::lock_guard<std::mutex> lk(_m); ++_approach_attempts; }
                 _transition(State::SEARCH, pose);
                 out.mode = Command::Mode::STOP;
@@ -698,6 +737,38 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
             out.mode = Command::Mode::DIRECT;
             out.v_mm_s = 0.0;
             out.omega_rad_s = _search_omega;
+            break;
+        }
+
+        case State::GOTO: {
+            // First tick after go_to(): build the spline from the live pose
+            // to the latched target. (go_to() can't do this itself because
+            // the pose lives on the control thread.)
+            bool pending;
+            double tx, ty, tth, vmax, margin;
+            {
+                std::lock_guard<std::mutex> lk(_m);
+                pending = _goto_pending;
+                tx = _goto_x; ty = _goto_y; tth = _goto_theta;
+                vmax = _goto_v_max_mm_s; margin = _goto_margin_mm;
+                if (pending) _goto_pending = false;
+            }
+            if (pending) {
+                if (!_plan_path_to(pose, tx, ty, tth, margin, vmax)) {
+                    _transition(State::SAFE_STOP, pose);
+                    out.mode = Command::Mode::STOP;
+                    break;
+                }
+                LOG("Mission") << "GOTO: spline loaded, "
+                               << _controller.total() << " waypoints";
+            }
+
+            if (_controller.has_arrived()) {
+                _transition(State::DONE, pose);
+                out.mode = Command::Mode::STOP;
+                break;
+            }
+            out.mode = Command::Mode::PATH_FOLLOW;
             break;
         }
 
