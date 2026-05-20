@@ -16,6 +16,12 @@ namespace {
     // Nominal motor 4670 rpm / 6.6 gear * 4096 quad ticks/rev ≈ 319,000 ticks/s.
     // 400,000 sits comfortably above that.
     constexpr double MAX_TICKS_PER_SEC = 400000.0;
+    // Hard ceiling on commanded per-wheel pps sent to the Arduino.
+    // 17% of the physical max ≈ 68,000 pps ≈ 400 mm/s — leaves ~54%
+    // headroom over the controller's worst-case wheel-frame speed
+    // (~260 mm/s from v=75 mm/s + omega·b/2) so a runaway command can
+    // never ship more than ~1.5x normal operating speed.
+    constexpr double MAX_CMD_PPS100    = 0.17 * MAX_TICKS_PER_SEC / 100.0;
     // jitter margin
     constexpr double SAFETY_FACTOR     = 2.0;
     constexpr int    MAX_RETRIES       = 4;
@@ -49,6 +55,9 @@ namespace {
         // std::lround gives a well-defined integer result that we then
         // clamp with integer arithmetic.
         long rounded = std::lround(mm_s * PPS100_PER_MM_S);
+        const long cap = static_cast<long>(MAX_CMD_PPS100);
+        if (rounded >  cap) rounded =  cap;
+        if (rounded < -cap) rounded = -cap;
         if (rounded >  32767L) rounded =  32767L;
         if (rounded < -32768L) rounded = -32768L;
         return static_cast<int16_t>(rounded);
