@@ -118,12 +118,7 @@ static constexpr float HUE_MARGIN  = 10.f;  // hue is sensitive
 static constexpr float SAT_MARGIN  = 40.f;  // sat can vary a lot in lighting
 static constexpr float VAL_MARGIN  = 40.f;  // val changes with shadows/light
 
-// ---- Target box geometry ------------------------------------------------
-// Physical dimensions of the box we're picking up, in millimetres.
-// The pinhole-size distance method matches BOX_HEIGHT_MM against the image
-// bounding-box's *vertical* extent — that's the dimension that stays
-// consistent regardless of how the box is rotated about the vertical axis
-// (assuming the box sits upright on the floor).
+// ---- Target box geometry ---------------------------------------
 static constexpr double BOX_WIDTH_MM  = 80.0;  // long horizontal side
 static constexpr double BOX_LENGTH_MM = 80.0;  // short horizontal side
 static constexpr double BOX_HEIGHT_MM = 40.0;  // vertical (used for distance)
@@ -132,47 +127,14 @@ struct CameraConfig {
     int width;
     int height;
     int fps_target;
-
-    // Pinhole-camera optics for distance estimation.
-    //
-    // focal_length_px is camera-specific; calibrate once by holding the box
-    // at a known distance and computing:
-    //     f_px = (pixel_height_observed * distance_mm) / BOX_HEIGHT_MM
-    // 650 matches the current rig (bbox.height=87.5 px at 297 mm with a
-    // 40 mm box). Re-measure when swapping cameras.
     double focal_length_px = 650.0;
 
-    // Distance/bearing thresholds for the capture state machine.
-    // Capture entry: distance_mm <= capture_distance_mm AND
-    //   |bearing_rad| <= capture_bearing_tol_rad, sustained for the
-    //   capture-frame debounce. Lateral alignment matters at entry —
-    //   the servo needs the box in the claw mouth, not off to a side.
-    // Retention: once captured, the servo is mechanically holding the
-    //   box, so vision only needs a loose "still close-ish" check.
-    //   distance_mm > retention_distance_mm for the retention-frame
-    //   debounce (or sustained no-detection) clears captured. No
-    //   bearing check during retention — claw arms can partially
-    //   occlude the box during drag and skew the centroid.
     double capture_distance_mm     = 120.0;   // grab-pose distance
     double capture_bearing_tol_rad = 0.12;    // ~7°
     double retention_distance_mm   = 150.0;   // matches claw reach
 
-    // When true, the tracker pops an OpenCV window with the live frame
-    // and a values HUD for tuning. Disable when running headless
-    // (no DISPLAY / no X-forwarding over SSH).
     bool show_debug_view = true;
 
-    // Near-field "grabbable" gate — used to set TrackerResult::grabbable.
-    // Grabbable when the target bbox occupies most of the bottom region
-    // of the frame:
-    //   bottom_region = the lower `grab_bottom_region_ratio` of the image
-    //                   (y in [(1 - r) * H, H], full image width).
-    //   grabbable when  area(bbox ∩ bottom_region)
-    //                 / area(bottom_region)  >=  grab_bottom_fill_ratio.
-    // Independent of focal length / pinhole distance; the bbox simply
-    // has to physically fill the part of the frame the claw will close
-    // on. A high fill ratio implicitly demands horizontal coverage too,
-    // so no separate lateral-centering gate is needed.
     double grab_bottom_region_ratio = 0.40;
     double grab_bottom_fill_ratio   = 0.50;
 
@@ -197,10 +159,7 @@ struct TrackerResult {
     std::atomic<bool> running{true};
     std::atomic<bool> captured{false};
     std::atomic<bool> lost{true};
-    // Instantaneous near-field signal: true while the bbox fills most
-    // of the bottom region of the frame, with brief hysteresis. Distinct
-    // from `captured`, which is sticky across the drag phase. See
-    // CameraConfig::grab_bottom_fill_ratio.
+
     std::atomic<bool> grabbable{false};
 
     bool is_captured()  const { return captured.load(); }
@@ -238,7 +197,7 @@ struct TrackerResult {
     struct Snapshot {
     bool   has_target;
     double bearing_rad;
-    double distance_mm;          // pinhole-size estimate (Method A)
+    double distance_mm;
     double area_px;
     int    fps;
     bool   captured;
@@ -259,4 +218,13 @@ struct TrackerResult {
     cv::Mat get_frame() const;
     void stop() { running.store(false); }
     bool is_running() const { return running.load(); }
+};
+
+
+struct PathPoint {
+    double x      = 0.0;     // mm, world frame
+    double y      = 0.0;     // mm
+    double theta  = 0.0;     // rad
+    double v_max  = 150.0;   // mm/s, max cruise speed approaching this point
+    double margin = 30.0;    // mm, "arrived" radius for this waypoint
 };

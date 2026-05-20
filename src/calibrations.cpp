@@ -2,6 +2,9 @@
 #include <numeric>
 #include <cmath>
 #include <algorithm>
+#include <atomic>
+#include <limits>
+#include <mutex>
 #include <random>
 #include <cctype>
 #include <cstdio>
@@ -590,3 +593,41 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data) {
     LOG("MAP") << "Found " << walls.size() << " Walls.";
     return walls;
 }
+
+namespace calib {
+namespace {
+std::atomic<bool> g_bounds_ready{false};
+std::mutex        g_bounds_m;
+ArenaBounds       g_bounds;
+}  // namespace
+
+void compute_arena_bounds(const std::vector<LineSeg>& walls) {
+    if (walls.empty()) return;
+    ArenaBounds b;
+    b.min_x =  std::numeric_limits<double>::max();
+    b.max_x =  std::numeric_limits<double>::lowest();
+    b.min_y =  std::numeric_limits<double>::max();
+    b.max_y =  std::numeric_limits<double>::lowest();
+    for (const auto& seg : walls) {
+        b.min_x = std::min({b.min_x, (double)seg.ax, (double)seg.bx});
+        b.max_x = std::max({b.max_x, (double)seg.ax, (double)seg.bx});
+        b.min_y = std::min({b.min_y, (double)seg.ay, (double)seg.by});
+        b.max_y = std::max({b.max_y, (double)seg.ay, (double)seg.by});
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_bounds_m);
+        g_bounds = b;
+    }
+    g_bounds_ready.store(true, std::memory_order_release);
+    LOG("Calib") << "Arena bbox: (" << b.min_x << "," << b.min_y
+                 << ") to (" << b.max_x << "," << b.max_y << ")";
+}
+
+bool get_arena_bounds(ArenaBounds& out) {
+    if (!g_bounds_ready.load(std::memory_order_acquire)) return false;
+    std::lock_guard<std::mutex> lk(g_bounds_m);
+    out = g_bounds;
+    return true;
+}
+
+}  // namespace calib

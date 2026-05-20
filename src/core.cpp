@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 
+#include <controller.hpp>
 #include <loggers.hpp>
 #include <Lidar.hpp>
 #include <utils.hpp>
@@ -14,6 +15,7 @@
 #include <cox.hpp>
 #include <motor.hpp>
 #include <odometry.hpp>
+#include <pure_pursuit.hpp>
 #include <kalman.hpp>
 
 
@@ -84,6 +86,7 @@ void loop_localization(Dashboard& dash,
         return;
     }
     LOG("Main") << "Built reference map (" << ref_map.size() << " walls).";
+    calib::compute_arena_bounds(ref_map);
 
     // starting cox estimation
     std::thread thread_loop_scan_cox(
@@ -102,6 +105,8 @@ void loop_control(Dashboard& dash,
                   KalmanFilter& kf, TrackerResult& target) {
     Motor motor;
     Odometry odom;
+    PurePursuitController pp;
+    StateMachine sm(target, pp);
     double total_d = 0;
     double total_a = 0;
     if (!motor.start())
@@ -115,6 +120,9 @@ void loop_control(Dashboard& dash,
         motor.get_encoders(l0_mm, r0_mm);
         odom.reset(l0_mm, r0_mm);
     }
+
+    sm.start();
+
     while(!app::shutdown) {
         // giving time for 2 readings
         std::this_thread::sleep_for(std::chrono::milliseconds(40));
@@ -128,9 +136,28 @@ void loop_control(Dashboard& dash,
                        step.var_d, step.var_theta,
                        step.cov_d_theta);
         }
-        
+
+        Pos2D p;
+        Pose2DCov cov;
+        kf.snapshot(p, cov);
+
+        const StateMachine::Command cmd = sm.step(p, dash);
+
         double v_cmd = 0.0, w_cmd = 0.0;
-        
+        switch (cmd.mode) {
+            case StateMachine::Command::Mode::DIRECT:
+                v_cmd = cmd.v_mm_s;
+                w_cmd = cmd.omega_rad_s;
+                break;
+            case StateMachine::Command::Mode::PATH_FOLLOW:
+                pp.compute(p, v_cmd, w_cmd);
+                break;
+            case StateMachine::Command::Mode::STOP:
+            default:
+                v_cmd = 0.0;
+                w_cmd = 0.0;
+                break;
+        }
         motor.set_velocity(v_cmd, w_cmd);
 
         uint64_t rejects = 0, give_ups = 0;
@@ -142,23 +169,13 @@ void loop_control(Dashboard& dash,
 
         motor.get_current_v_w(v_sm, w_sm);
 
-        Pos2D p;
-        Pose2DCov cov;
-        kf.snapshot(p, cov);
-        // logger.set_kf(p, cov);
-
-        // dashboard stats
-        {
-            dash.set("Odometry", "d_dist", step.d_mm/10);
-            dash.set("Odometry", "d_ang", step.d_theta* 180.0 / M_PI);
-            dash.set("Odometry", "Total D", total_d/10);
-            dash.set("Odometry", "Total A", total_a* 180.0 / M_PI);
-            // for kalman
-            dash.set("KF", "X",      p.x/10);
-            dash.set("KF", "Y",      p.y/10);
-            dash.set("KF", "Theta", p.theta * 180.0 / M_PI);
-        }
-
+        dash.set("Odometry", "d_dist", step.d_mm/10);
+        dash.set("Odometry", "d_ang",  step.d_theta * 180.0 / M_PI);
+        dash.set("Odometry", "Total D", total_d/10);
+        dash.set("Odometry", "Total A", total_a * 180.0 / M_PI);
+        dash.set("KF", "X",     p.x/10);
+        dash.set("KF", "Y",     p.y/10);
+        dash.set("KF", "Theta", p.theta * 180.0 / M_PI);
     }
     motor.stop();
 }

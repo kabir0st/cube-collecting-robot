@@ -53,7 +53,7 @@ int main() {
         cfg.get_int("camera.height",     480),
         cfg.get_int("camera.fps_target",  15));
     cam_cfg.focal_length_px = cfg.get_dbl(
-        "camera.focal_length_px", 600.0);
+        "camera.focal_length_px", 650.0);
     cam_cfg.grab_bottom_region_ratio = cfg.get_dbl(
         "camera.grab_bottom_region_ratio", cam_cfg.grab_bottom_region_ratio);
     cam_cfg.grab_bottom_fill_ratio = cfg.get_dbl(
@@ -117,6 +117,7 @@ int main() {
     dash.add_row("Odometry");
     dash.add_row("KF");
     dash.add_row("Servo");
+    dash.add_row("Mission");
     threads.emplace_back(loop_control,
         std::ref(dash), std::ref(kf), std::ref(target));
 

@@ -69,3 +69,14 @@ bool save_filter_result(const std::string& path, const FilterResult& result);
 double get_lidar_sensor_noise(LidarData &lidar_data);
 
 std::vector<LineSeg> find_walls(LidarData &lidar_data);
+
+namespace calib {
+
+struct ArenaBounds {
+    double min_x = 0.0, max_x = 0.0, min_y = 0.0, max_y = 0.0;
+};
+
+void compute_arena_bounds(const std::vector<LineSeg>& walls);
+bool get_arena_bounds(ArenaBounds& out);
+
+}  // namespace calib
