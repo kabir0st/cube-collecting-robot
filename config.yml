@@ -2,19 +2,7 @@ camera:
   width: 640
   height: 480
   fps_target: 12
-  # mounted 82 mm above the floor
-  # tilted ~1.2 deg DOWN
-  # 60 mm AHEAD of the wheelbase
-  # f_px = pixel_height_observed * known_distance_mm / BOX_HEIGHT_MM
-  # Calibrated 2026-05-20: bbox.height 87.5 px at 297 mm w/ 40 mm box.
   focal_length_px: 650.0
-  # Near-field "grabbable" gate (TrackerResult::grabbable).
-  # Target is grabbable when its bbox fills most of the bottom region of
-  # the frame.
-  #   grab_bottom_region_ratio: fraction of frame height (from bottom
-  #     edge) that counts as the "bottom region". 0.40 ⇒ y >= 0.60 * H.
-  #   grab_bottom_fill_ratio:   minimum (bbox ∩ region) / region area.
-  #     0.50 ⇒ bbox must cover at least half of that bottom region.
   grab_bottom_region_ratio: 0.35
   grab_bottom_fill_ratio: 0.60
   capture_distance_mm: 120.0
@@ -31,15 +19,7 @@ mission:
   arm_length_mm: 80.0
 
 arena:
-  # When true, ignore the RANSAC map and register Cox against the hard-coded
-  # 2.4 x 3.6 m rectangle below. RANSAC still runs once at boot, but only to
-  # validate that the extracted walls are consistent with the analytical
-  # geometry. Set false to fall back to the legacy "build a fresh map from
-  # the calibration scan" behaviour.
-  in_arena: true
-  # Rectangle dimensions. width = y-extent (the 2.4 m wall behind/ahead of
-  # the robot at home); length = x-extent (the 3.6 m walls to the left/right
-  # of the start pose).
+  in_arena: false
   arena_width_mm: 2400.0
   arena_length_mm: 3600.0
   # Wall match tolerance for the validator.

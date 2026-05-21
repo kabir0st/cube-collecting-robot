@@ -201,17 +201,20 @@ void loop_control(Dashboard& dash,
 
         double v_sm = 0.0, w_sm = 0.0;
         motor.get_current_v_w(v_sm, w_sm);
-        dash.set("Motor", "v", v_sm);
-        dash.set("Motor", "w", w_sm);
+        dash.set("Motor", "v_mm_s", v_sm);
+        dash.set("Motor", "w_deg_s", w_sm * 180.0 / M_PI);
 
         const OdomStep step = odom.update(l_mm, r_mm);
         if (step.valid) {
             total_d += step.d_mm;
             total_a += step.d_theta;
-            dash.set("Odometry", "d_dist", step.d_mm);
-            dash.set("Odometry", "d_ang",  step.d_theta * 180.0 / M_PI);
-            dash.set("Odometry", "Total D", total_d);
-            dash.set("Odometry", "Total A", total_a * 180.0 / M_PI);
+            dash.set("Odometry", "d_mm",  step.d_mm);
+            dash.set("Odometry", "d_deg", step.d_theta * 180.0 / M_PI);
+            dash.set("Odometry", "D_mm",  total_d);
+            dash.set("Odometry", "A_deg", total_a * 180.0 / M_PI);
+            dash.set("Odometry", "sD_mm", std::sqrt(step.var_d));
+            dash.set("Odometry", "sA_deg",
+                     std::sqrt(step.var_theta) * 180.0 / M_PI);
             kf.predict(step.d_mm, step.d_theta,
                        step.var_d, step.var_theta,
                        step.cov_d_theta);
@@ -241,9 +244,32 @@ void loop_control(Dashboard& dash,
         uint64_t rejects = 0;
         motor.get_spi_stats(rejects);
         dash.set("Motor", "spi_rej", rejects);
-        dash.set("KF", "X",     p.x/10);
-        dash.set("KF", "Y",     p.y/10);
-        dash.set("KF", "Theta", p.theta * 180.0 / M_PI);
+        dash.set("Motor", "v_cmd",  v_cmd);
+        dash.set("Motor", "w_cmd_deg_s", w_cmd * 180.0 / M_PI);
+
+        // Fused pose + uncertainties (1σ).
+        dash.set("KF", "X_cm",    p.x / 10);
+        dash.set("KF", "Y_cm",    p.y / 10);
+        dash.set("KF", "Th_deg",  p.theta * 180.0 / M_PI);
+        dash.set("KF", "sX_mm",   std::sqrt(std::max(0.0, cov.xx)));
+        dash.set("KF", "sY_mm",   std::sqrt(std::max(0.0, cov.yy)));
+        dash.set("KF", "sTh_deg",
+                 std::sqrt(std::max(0.0, cov.tt)) * 180.0 / M_PI);
+
+        // Mission state + goto progress.
+        const double err_x  = GOTO_X - p.x;
+        const double err_y  = GOTO_Y - p.y;
+        const double err_th = std::atan2(std::sin(GOTO_THETA - p.theta),
+                                         std::cos(GOTO_THETA - p.theta));
+        dash.set("Mission", "state",
+                 std::string(StateMachine::state_name(sm.state())));
+        dash.set("Mission", "goal_X_cm",   GOTO_X / 10.0);
+        dash.set("Mission", "goal_Y_cm",   GOTO_Y / 10.0);
+        dash.set("Mission", "goal_Th_deg", GOTO_THETA * 180.0 / M_PI);
+        dash.set("Mission", "err_d_cm",    std::hypot(err_x, err_y) / 10.0);
+        dash.set("Mission", "err_th_deg",  err_th * 180.0 / M_PI);
+        dash.set("Mission", "arrived",
+                 std::string(sm.goto_arrived() ? "yes" : "no"));
     }
     motor.stop();
 }

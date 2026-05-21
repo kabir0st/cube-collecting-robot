@@ -23,6 +23,18 @@ namespace {
     const float MAX_GATE_MM = 150.0f;
     const float MIN_GATE_MM  = 8.0f;
 
+    // LiDAR mount offset: angle from the robot's +x (forward) to the
+    // LiDAR's 0° scan direction, measured CCW. Added to every ray's CCW
+    // angle before the cartesian conversion so pts_lidar ends up in the
+    // robot's body frame — matching the convention used by the KF and
+    // odometry (forward = +x, left = +y, θ CCW). Adjust this if pushing
+    // the robot forward does *not* make Cox.X increase.
+    //   0      : LiDAR's 0° already points forward
+    //   -π/2   : LiDAR's 0° points to the robot's right (LiDAR rotated 90° CW)
+    //   +π/2   : LiDAR's 0° points to the robot's left  (LiDAR rotated 90° CCW)
+    //    π     : LiDAR's 0° points backward
+    constexpr float LIDAR_MOUNT_OFFSET_RAD = -static_cast<float>(M_PI) / 2.0f;
+
     // Find the wall whose perpendicular distance to (pwx, pwy) is smallest.
     // Returns the wall index or -1 if no wall qualifies. y_signed is set to
     // the residual on success.
@@ -108,8 +120,9 @@ PosEstimate CoxScanMatchAlgorithm::estimate(Pos2D init_pos) {
         pts_world.resize(2, N);
     }
     for (int i = 0; i < N; ++i) {
-        // LiDAR CW → math CCW
-        const float a = -angles[i] * (M_PI / 180.0f);
+        // LiDAR CW → math CCW, then rotate into the robot body frame so
+        // forward = +x. See LIDAR_MOUNT_OFFSET_RAD above for the sign.
+        const float a = -angles[i] * (M_PI / 180.0f) + LIDAR_MOUNT_OFFSET_RAD;
         pts_lidar(0, i) = dist_s[i] * std::cos(a);
         pts_lidar(1, i) = dist_s[i] * std::sin(a);
     }
@@ -404,15 +417,16 @@ void loop_scan_cox_estimation(
         // Publish scan-match result to the dashboard. Published every cycle
         // (trusted or not) so a stale value never appears to be current; the
         // "status" column reflects whether the pose was accepted.
-        dash.set("Cox", "X", est.pos.x/10);
-        dash.set("Cox", "Y", est.pos.y/10);
-        dash.set("Cox", "theta_deg", est.pos.theta * 180.0f / static_cast<float>(M_PI));
-        dash.set("Cox", "Sig_X", est.sigma_x);
-        dash.set("Cox", "Sig_Y", est.sigma_y);
-        dash.set("Cox", "sig_th_deg", est.sigma_a * 180.0f / static_cast<float>(M_PI));
-        // dash.set("Cox Debug", "inliers", static_cast<int64_t>(est.inliers));
-        // dash.set("Cox Debug", "iters", static_cast<int64_t>(est.itr));
-        // dash.set("Cox Debug", "status", std::string(trusted ? "OK" : (est.converged ? "weak" : "no-conv")));
-        dash.set("Cox", "time", get_timestamp());
+        dash.set("Cox", "X_cm", est.pos.x/10);
+        dash.set("Cox", "Y_cm", est.pos.y/10);
+        dash.set("Cox", "Th_deg", est.pos.theta * 180.0f / static_cast<float>(M_PI));
+        dash.set("Cox", "sX_mm", est.sigma_x);
+        dash.set("Cox", "sY_mm", est.sigma_y);
+        dash.set("Cox", "sTh_deg", est.sigma_a * 180.0f / static_cast<float>(M_PI));
+        dash.set("Cox", "inliers", static_cast<int64_t>(est.inliers));
+        dash.set("Cox", "iters",   static_cast<int64_t>(est.itr));
+        dash.set("Cox", "status",
+                 std::string(trusted ? "OK" : (est.converged ? "weak" : "no-conv")));
+        dash.set("Cox", "rejects", static_cast<int64_t>(consecutive_rejects));
     }
 }

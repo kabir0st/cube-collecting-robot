@@ -116,8 +116,8 @@ int main() {
 
 
     // ENCODER-TEST: skip 3-second pre-start wait (no camera to clear)
-    // std::cout << "Waiting 3 seconds before starting . ..\n";
-    // std::this_thread::sleep_for(std::chrono::seconds(3));
+    std::cout << "Waiting 3 seconds before starting . ..\n";
+    std::this_thread::sleep_for(std::chrono::seconds(3));
 
     // start rest of the system
     INA219 power_interface = configure_voltage_interface();
@@ -127,7 +127,7 @@ int main() {
     LidarData lidar_data;
     KalmanFilter kf;
     // 9 panels × 4 lines each = 36 lines (+ slack).
-    dash.start(40);
+    dash.start(48);
 
     // ENCODER-TEST: battery monitor disabled
     if (cfg.get_bool("battery.enabled", true)) {
@@ -144,7 +144,7 @@ int main() {
         std::ref(dash), std::ref(lidar_data), std::ref(kf),
         std::cref(arena_cfg), mission_home_theta);
     // waiting for cox 1st seeds to be stable
-    std::this_thread::sleep_for(std::chrono::seconds(3));
+    std::this_thread::sleep_for(std::chrono::seconds(5));
 
     // ENCODER-TEST: vision tracking disabled
     // dash.add_row("Vision");
@@ -155,10 +155,8 @@ int main() {
     // dash.render();
     dash.add_row("Motor");
     dash.add_row("Odometry");
-    // ENCODER-TEST: KF / Servo / Mission rows unused without state machine
-    // dash.add_row("KF");
-    // dash.add_row("Servo");
-    // dash.add_row("Mission");
+    dash.add_row("KF");
+    dash.add_row("Mission");
     threads.emplace_back(loop_control,
         std::ref(dash), std::ref(kf), std::ref(target));
 
