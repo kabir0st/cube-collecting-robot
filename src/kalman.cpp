@@ -26,10 +26,9 @@ namespace {
 }
 
 Pose2DCov KalmanFilter::default_cov() {
-    // Used (a) at boot, before the home sanity-check, and (b) right after
-    // sanity-check passes (re-pin to exact home). After (b) we know we're
-    // at home within arena.home_sanity_tol_mm / _deg, so initial sigma is
-    // about half the sanity tolerance.
+    // Boot seed when we *expect* the robot is at home. If it isn't,
+    // loop_scan_cox_estimation's first untrusted estimate triggers a
+    // relocalize sweep which re-pins the KF with moderate_recovery_cov().
     Pose2DCov c;
     c.xx = 25.0 * 25.0; // sigma_x = 25 mm
     c.yy = 25.0 * 25.0; // sigma_y = 25 mm

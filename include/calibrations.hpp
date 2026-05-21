@@ -69,7 +69,8 @@ bool save_filter_result(const std::string& path, const FilterResult& result);
 
 double get_lidar_sensor_noise(LidarData &lidar_data);
 
-std::vector<LineSeg> find_walls(LidarData &lidar_data);
+std::vector<LineSeg> find_walls(LidarData &lidar_data,
+                                const RansacParams& params);
 
 // POD bag for all `arena:` config keys. Loaded once in main and passed by
 // const ref into loop_localization. Tolerances are stored already in mm/rad
@@ -80,11 +81,33 @@ struct ArenaConfig {
     double length_mm             = 3600.0;
     double validation_tol_mm     = 100.0;
     double validation_tol_rad    = 5.0 * M_PI / 180.0;
-    double home_sanity_tol_mm    = 50.0;
-    double home_sanity_tol_rad   = 3.0 * M_PI / 180.0;
-    int    kidnap_threshold      = 5;
-    double relocalize_grid_mm    = 300.0;
-    double relocalize_grid_rad   = 30.0 * M_PI / 180.0;
+
+    // Two RANSAC presets, picked by `in_arena`:
+    //   - ransac_arena: clean rectangular arena, ~4 long walls, robot
+    //     sitting inside. Tight gates, high inlier requirement, hard cap
+    //     at 4 lines.
+    //   - ransac_room: real-room operation with furniture / clutter
+    //     occluding the walls. Looser gates, lower inlier requirement,
+    //     extract more candidates and filter by minimum segment length
+    //     so chair / desk edges are rejected.
+    RansacParams ransac_arena = []{
+        RansacParams p;
+        p.inlier_thresh_mm    = 25.0;
+        p.inlier_points_req   = 20;
+        p.min_inlier_fraction = 0.10;
+        p.max_lines           = 4;
+        p.min_segment_len_mm  = 500.0;
+        return p;
+    }();
+    RansacParams ransac_room = []{
+        RansacParams p;
+        p.inlier_thresh_mm    = 40.0;
+        p.inlier_points_req   = 10;
+        p.min_inlier_fraction = 0.02;
+        p.max_lines           = 10;
+        p.min_segment_len_mm  = 800.0;
+        return p;
+    }();
 };
 
 // Build the four-segment analytical rectangle: home wall behind the robot at

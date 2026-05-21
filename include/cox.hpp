@@ -32,7 +32,4 @@ class CoxScanMatchAlgorithm {
 
 void loop_scan_cox_estimation(
     std::vector<LineSeg>& ref_map, LidarData& lidar_data,
-    Dashboard& dash, KalmanFilter& kf,
-    int kidnap_threshold,
-    double relocalize_grid_mm,
-    double relocalize_grid_rad);
+    Dashboard& dash, KalmanFilter& kf);

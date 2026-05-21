@@ -10,4 +10,5 @@ void loop_localization(Dashboard& dash,
                        const ArenaConfig& arena, double home_theta);
 void loop_control(Dashboard &dash,
                 KalmanFilter& kf,
-                TrackerResult& target);
+                TrackerResult& target,
+                LidarData& lidar_data);

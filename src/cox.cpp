@@ -87,21 +87,8 @@ CoxScanMatchAlgorithm::CoxScanMatchAlgorithm(const std::vector<LineSeg> &map,
 
 
 PosEstimate CoxScanMatchAlgorithm::estimate(Pos2D init_pos) {
-    PosEstimate out = {
-        current_pos,  // pos
-        {1.0f, 0.0f, 0.0f,   // row 0: variance x, covariance xy, 0
-        0.0f, 1.0f, 0.0f,   // row 1: covariance yx, variance y, 0
-        0.0f, 0.0f, 0.0f},  // row 2: orientation terms (if 3x3)
-        0, 0, 0,  // sigma values
-        0, 0, false  // itr, inliers, converged
-    };
+    PosEstimate out{};
     out.pos = init_pos;
-    out.sigma_x = 0.0f;
-    out.sigma_y = 0.0f;
-    out.sigma_a = 0.0f;
-    out.itr = 0;
-    out.inliers = 0;
-    out.converged = false;
 
     // 1. Snapshot the latest scan
     
@@ -341,24 +328,18 @@ Pose2DCov moderate_recovery_cov() {
 
 void loop_scan_cox_estimation(
     std::vector<LineSeg>& ref_map, LidarData& lidar_data,
-    Dashboard& dash, KalmanFilter& kf,
-    int kidnap_threshold,
-    double relocalize_grid_mm,
-    double relocalize_grid_rad) {
+    Dashboard& dash, KalmanFilter& kf) {
+    // Hardcoded grid sweep resolution -- coarse enough to cover the arena
+    // in a couple of seconds, fine enough that cox can converge from one
+    // of the seeds.
+    constexpr double RELOCALIZE_GRID_MM  = 300.0;
+    constexpr double RELOCALIZE_GRID_RAD = 30.0 * M_PI / 180.0;
+
     Pos2D current_pos {
         0.0,0.0,0.0
     };
     CoxScanMatchAlgorithm scan_cox(ref_map, current_pos, lidar_data);
-    // can't do empty init in C++11
-    PosEstimate est = {
-        current_pos,  // pos
-        {1.0f, 0.0f, 0.0f,   // row 0: variance x, covariance xy, 0
-        0.0f, 1.0f, 0.0f,   // row 1: covariance yx, variance y, 0
-        0.0f, 0.0f, 0.0f},  // row 2: orientation terms (if 3x3)
-        0, 0, 0,  // sigma values
-        0, 0, false  // itr, inliers, converged
-    };
-    int consecutive_rejects = 0;
+    PosEstimate est{};
     while (!app::shutdown && !app::lidar_stop)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -370,7 +351,7 @@ void loop_scan_cox_estimation(
         current_pos = seed;
         est = scan_cox.estimate(current_pos);
 
-        const bool trusted = cox_trusted(est);
+        bool trusted = cox_trusted(est);
         if (trusted) {
             // Fuse the scan-match into the KF as a full-pose measurement.
             Pos2D z;
@@ -383,33 +364,31 @@ void loop_scan_cox_estimation(
             R.tt = est.cov[8];
             kf.correct(z, R);
             current_pos = est.pos;
-            consecutive_rejects = 0;
         } else {
-            ++consecutive_rejects;
-        }
-
-        if (kidnap_threshold > 0 && consecutive_rejects >= kidnap_threshold) {
-            LOGE("Cox") << "Kidnap suspected: " << consecutive_rejects
-                        << " consecutive rejected scans -- starting "
+            // Lost: halt the wheels (via app::relocalizing) and grid-sweep
+            // until we find a trusted pose, then resume.
+            LOGE("Cox") << "Cox untrusted -- halting motors, running "
                         << "relocalize sweep.";
             app::relocalizing.store(true);
-            PosEstimate winner{};
-            const bool found = relocalize_grid_sweep(
-                scan_cox, relocalize_grid_mm, relocalize_grid_rad, winner);
-            if (found) {
-                kf.reset(winner.pos, moderate_recovery_cov());
-                current_pos = winner.pos;
-                est = winner;
-                consecutive_rejects = 0;
-                app::relocalizing.store(false);
-                LOG("Cox") << "Relocalize OK -- KF re-pinned, resuming.";
-            } else {
-                app::relocalizing.store(false);
-                LOGE("Cox") << "Relocalize failed -- robot is lost. "
-                            << "Shutting down.";
-                app::shutdown.store(true);
-                break;
+            while (!app::shutdown && !app::lidar_stop) {
+                PosEstimate winner{};
+                if (relocalize_grid_sweep(scan_cox,
+                                          RELOCALIZE_GRID_MM,
+                                          RELOCALIZE_GRID_RAD,
+                                          winner)) {
+                    kf.reset(winner.pos, moderate_recovery_cov());
+                    current_pos = winner.pos;
+                    est         = winner;
+                    trusted     = true;
+                    LOG("Cox") << "Relocalize OK -- KF re-pinned, resuming.";
+                    break;
+                }
+                LOGE("Cox") << "Relocalize sweep found nothing -- "
+                            << "retrying with fresh scan.";
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
+            app::relocalizing.store(false);
+            if (app::shutdown || app::lidar_stop) break;
         }
 
         // using both trusted and untrusted to logger
@@ -427,6 +406,5 @@ void loop_scan_cox_estimation(
         dash.set("Cox", "iters",   static_cast<int64_t>(est.itr));
         dash.set("Cox", "status",
                  std::string(trusted ? "OK" : (est.converged ? "weak" : "no-conv")));
-        dash.set("Cox", "rejects", static_cast<int64_t>(consecutive_rejects));
     }
 }

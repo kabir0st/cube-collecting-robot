@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <utils.hpp>
+#include <telemetry.hpp>
 
 namespace {
     inline PathPoint default_target() {
@@ -16,19 +17,22 @@ namespace {
 PurePursuitController::PurePursuitController() = default;
 
 void PurePursuitController::set_path(const std::vector<PathPoint>& path) {
-    std::lock_guard<std::mutex> lk(_m);
-    _path = path;
-    _closest_idx = 0;
-    _active_target = _path.empty() ? default_target() : _path.front();
-    if (_path.empty()) {
-        _mode = Mode::IDLE;
-        _arrived = true;
-    } else {
-        // Defer the PRE_ROLL-vs-PURSUIT choice to the first compute() — we
-        // need a pose to know the heading error.
-        _mode = Mode::PRE_ROLL;
-        _arrived = false;
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _path = path;
+        _closest_idx = 0;
+        _active_target = _path.empty() ? default_target() : _path.front();
+        if (_path.empty()) {
+            _mode = Mode::IDLE;
+            _arrived = true;
+        } else {
+            // Defer the PRE_ROLL-vs-PURSUIT choice to the first compute() — we
+            // need a pose to know the heading error.
+            _mode = Mode::PRE_ROLL;
+            _arrived = false;
+        }
     }
+    telemetry::send_path(path);
 }
 
 void PurePursuitController::abort() {

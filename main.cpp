@@ -11,6 +11,7 @@
 #include <core.hpp>
 #include <tracker.hpp>
 #include <kalman.hpp>
+#include <telemetry.hpp>
 
 std::atomic<bool> app::shutdown{false};
 std::atomic<bool> app::lidar_ready{false};
@@ -76,7 +77,7 @@ int main() {
     // loop_control is re-enabled.
     const double mission_home_theta = cfg.get_dbl("mission.home_theta_rad", 0.0);
 
-    // Arena geometry + kidnap-recovery tunables. Degrees in the YAML are
+    // Arena geometry + validation tolerances. Degrees in the YAML are
     // converted to radians here so the rest of the codebase only deals in
     // mm/rad.
     ArenaConfig arena_cfg;
@@ -85,14 +86,30 @@ int main() {
     arena_cfg.length_mm          = cfg.get_dbl ("arena.arena_length_mm",    arena_cfg.length_mm);
     arena_cfg.validation_tol_mm  = cfg.get_dbl ("arena.validation_tol_mm",  arena_cfg.validation_tol_mm);
     arena_cfg.validation_tol_rad = cfg.get_dbl ("arena.validation_tol_deg", 5.0) * M_PI / 180.0;
-    arena_cfg.home_sanity_tol_mm = cfg.get_dbl ("arena.home_sanity_tol_mm", arena_cfg.home_sanity_tol_mm);
-    arena_cfg.home_sanity_tol_rad= cfg.get_dbl ("arena.home_sanity_tol_deg", 3.0) * M_PI / 180.0;
-    arena_cfg.kidnap_threshold   = cfg.get_int ("arena.kidnap_threshold",   arena_cfg.kidnap_threshold);
-    arena_cfg.relocalize_grid_mm = cfg.get_dbl ("arena.relocalize_grid_step_mm",  arena_cfg.relocalize_grid_mm);
-    arena_cfg.relocalize_grid_rad= cfg.get_dbl ("arena.relocalize_grid_step_deg", 30.0) * M_PI / 180.0;
+
+    // RANSAC presets -- the one used is selected at runtime in core.cpp by
+    // `in_arena`. Both blocks parsed unconditionally so the dashboard /
+    // logs surface whichever one is active.
+    auto load_ransac = [&](const std::string& prefix, RansacParams& p) {
+        p.inlier_thresh_mm    = cfg.get_dbl(prefix + ".inlier_thresh_mm",    p.inlier_thresh_mm);
+        p.max_iters_per_line  = cfg.get_int(prefix + ".max_iters_per_line",  p.max_iters_per_line);
+        p.inlier_points_req   = cfg.get_int(prefix + ".inlier_points_req",   p.inlier_points_req);
+        p.min_inlier_fraction = cfg.get_dbl(prefix + ".min_inlier_fraction", p.min_inlier_fraction);
+        p.max_lines           = cfg.get_int(prefix + ".max_lines",           p.max_lines);
+        p.endpoint_padding_mm = cfg.get_dbl(prefix + ".endpoint_padding_mm", p.endpoint_padding_mm);
+        p.min_segment_len_mm  = cfg.get_dbl(prefix + ".min_segment_len_mm",  p.min_segment_len_mm);
+    };
+    load_ransac("arena.ransac_arena", arena_cfg.ransac_arena);
+    load_ransac("arena.ransac_room",  arena_cfg.ransac_room);
+
     LOG("Main") << "Arena: in_arena=" << (arena_cfg.in_arena ? "yes" : "no")
-                << " size=" << arena_cfg.width_mm << "x" << arena_cfg.length_mm << " mm"
-                << " kidnap_threshold=" << arena_cfg.kidnap_threshold;
+                << " size=" << arena_cfg.width_mm << "x" << arena_cfg.length_mm << " mm";
+
+    telemetry::init(
+        cfg.get_str ("logger.udp_host",      "127.0.0.1"),
+        cfg.get_int ("logger.udp_port",      5005),
+        cfg.get_bool("logger.udp_enabled",   false),
+        cfg.get_int ("logger.scan_subsample", 2));
 
     // ENCODER-TEST: skip camera filter calibration (camera not used in encoder-only mode)
     // FilterResult filter;
@@ -158,7 +175,8 @@ int main() {
     dash.add_row("KF");
     dash.add_row("Mission");
     threads.emplace_back(loop_control,
-        std::ref(dash), std::ref(kf), std::ref(target));
+        std::ref(dash), std::ref(kf), std::ref(target),
+        std::ref(lidar_data));
 
     while(!app::shutdown) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -166,4 +184,5 @@ int main() {
     }
     // shutdown
     wait_for_threads();
+    telemetry::shutdown();
 }

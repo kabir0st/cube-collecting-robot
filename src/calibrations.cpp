@@ -488,10 +488,11 @@ void erase_inliers(std::vector<Point>& pts,
 // Method: form the 2x2 sample covariance about the centroid; the
 // eigenvector of the smaller eigenvalue is the line normal, the
 // eigenvector of the larger eigenvalue is the line direction.
-std::vector<LineSeg> find_walls(LidarData& lidar_data) {
+std::vector<LineSeg> find_walls(LidarData& lidar_data,
+                                const RansacParams& params_in) {
     std::vector<LineSeg> walls;
     std::vector<Point> points;
-    RansacParams params;
+    RansacParams params = params_in;
 
     std::map<double, std::vector<double>> pts_map = get_angle_mapped_lidar_data(
         lidar_data);
@@ -586,6 +587,18 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data) {
         seg.ay = static_cast<float>(fit.cy + t_min * fit.dy);
         seg.bx = static_cast<float>(fit.cx + t_max * fit.dx);
         seg.by = static_cast<float>(fit.cy + t_max * fit.dy);
+
+        // Reject too-short segments (chair/desk edges in room mode).
+        // Erase inliers either way so the next RANSAC round doesn't re-find
+        // the same short line.
+        const double seg_len = std::hypot(
+            static_cast<double>(seg.bx - seg.ax),
+            static_cast<double>(seg.by - seg.ay));
+        if (params.min_segment_len_mm > 0.0
+            && seg_len < params.min_segment_len_mm) {
+            erase_inliers(points, refined);
+            continue;
+        }
         walls.push_back(seg);
 
         erase_inliers(points, refined);

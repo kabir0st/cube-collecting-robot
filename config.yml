@@ -25,17 +25,31 @@ arena:
   # Wall match tolerance for the validator.
   validation_tol_mm: 100.0
   validation_tol_deg: 5.0
-  # Home sanity-check: after boot, Cox is run once from (0,0,home_theta);
-  # if the converged pose drifts by more than these tolerances the run is
-  # aborted (robot was placed somewhere other than home).
-  home_sanity_tol_mm: 50.0
-  home_sanity_tol_deg: 3.0
-  # Kidnap recovery: number of consecutive Cox rejections that triggers a
-  # full-arena coarse-grid re-localization sweep. While the sweep runs, the
-  # motor loop holds the wheels still.
-  kidnap_threshold: 5
-  relocalize_grid_step_mm: 300.0
-  relocalize_grid_step_deg: 30.0
+
+  # RANSAC presets. The active one is picked at boot by `in_arena`.
+  # Tune these without touching code.
+  ransac_arena:
+    # Clean rectangular arena, ~4 long walls, robot inside.
+    # Tight gates, high inlier requirement, hard cap at 4 lines.
+    inlier_thresh_mm: 25.0
+    max_iters_per_line: 200
+    inlier_points_req: 20
+    min_inlier_fraction: 0.10
+    max_lines: 4
+    endpoint_padding_mm: 50.0
+    min_segment_len_mm: 500.0
+  ransac_room:
+    # Real-room operation: walls partially occluded by chairs, desks,
+    # PCs. Loose gates, lower inlier requirement, extract more
+    # candidates and reject short segments so furniture edges don't
+    # masquerade as walls.
+    inlier_thresh_mm: 40.0
+    max_iters_per_line: 300
+    inlier_points_req: 10
+    min_inlier_fraction: 0.02
+    max_lines: 10
+    endpoint_padding_mm: 50.0
+    min_segment_len_mm: 800.0
 
 logger:
   # Lab-3 file logging (logs/<run_id>_{odom,cox,kalman}.txt).
@@ -54,9 +68,7 @@ logger:
   scan_subsample: 2
 
 battery:
-  # Set false on a bench without the INA219 wired — otherwise the
-  # monitor shuts the whole app down after ~20 s of absent readings.
-  enabled: true
+  enabled: false
 
 filter:
   ready: true

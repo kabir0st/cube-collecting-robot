@@ -60,12 +60,16 @@ struct RansacParams {
     // %age limit that should be inlier
     double min_inlier_fraction = 0.015;
     // hard cap on walls extracted
-    int max_lines = 16; 
+    int max_lines = 16;
     // extend segments past min/max inlier projection by this much
     // so endpoint slack covers gaps
     double endpoint_padding_mm = 50.0;
+    // Drop extracted segments shorter than this. 0 = no filter. In a
+    // cluttered room the back edge of a chair / desk is short and produces
+    // false "walls"; setting this to ~800 mm keeps only real walls.
+    double min_segment_len_mm = 0.0;
     // 0 -> std::random_device
-    uint32_t seed = 0xC0FFEEu; 
+    uint32_t seed = 0xC0FFEEu;
 };
 
 struct Pos2D {
@@ -79,17 +83,17 @@ struct Pos2D {
 };
 
 struct PosEstimate {
-    Pos2D pos;
+    Pos2D pos{};
     // 3x3 cov matrix for x,y, theta
-    float cov[9];
-    float sigma_x;
-    float sigma_y;
-    float sigma_a;
+    float cov[9]{};
+    float sigma_x = 0.0f;
+    float sigma_y = 0.0f;
+    float sigma_a = 0.0f;
 
-    int itr;
-    // number of lidar points 
-    int inliers;
-    bool converged;
+    int itr = 0;
+    // number of lidar points
+    int inliers = 0;
+    bool converged = false;
 };
 
 

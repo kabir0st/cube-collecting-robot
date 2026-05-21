@@ -17,6 +17,7 @@
 #include <odometry.hpp>
 #include <pure_pursuit.hpp>
 #include <kalman.hpp>
+#include <telemetry.hpp>
 
 
 void loop_check_battery(INA219& power_interface, Dashboard& dash) {
@@ -81,7 +82,8 @@ void loop_localization(Dashboard& dash,
 
     std::vector<LineSeg> ref_map;
     if (arena.in_arena) {
-        const std::vector<LineSeg> observed = find_walls(lidar_data);
+        const std::vector<LineSeg> observed = find_walls(lidar_data,
+                                                         arena.ransac_arena);
         const std::vector<LineSeg> expected = build_arena_map(
             arena.width_mm, arena.length_mm);
         if (!validate_arena_walls(expected, observed,
@@ -95,7 +97,7 @@ void loop_localization(Dashboard& dash,
         }
         ref_map = expected;
     } else {
-        ref_map = find_walls(lidar_data);
+        ref_map = find_walls(lidar_data, arena.ransac_room);
         if (ref_map.empty()) {
             LOGE("Main") << "find_walls produced an empty reference map; "
                             "Cox has nothing to register against. Aborting.";
@@ -107,52 +109,22 @@ void loop_localization(Dashboard& dash,
     }
     LOG("Main") << "Built reference map (" << ref_map.size() << " walls).";
     calib::compute_arena_bounds(ref_map);
+    telemetry::send_map(ref_map);
 
-    // Home sanity-check: only meaningful when we're operating against the
-    // analytical map (otherwise the RANSAC map was just extracted from
-    // wherever the robot is sitting; matching it against itself is
-    // tautological). Run Cox once seeded at home; if the converged pose
-    // drifts beyond tolerance the robot is somewhere else.
+    // Seed the KF at the expected home pose. If the robot was actually
+    // placed elsewhere the seed is wrong, cox will return an untrusted
+    // estimate on the first cycle, and loop_scan_cox_estimation's
+    // relocalize sweep will find the real pose and re-pin the KF. No
+    // abort -- "I'm somewhere unknown" is recoverable, not fatal.
     if (arena.in_arena) {
-        const Pos2D home_pose(0.0, 0.0, home_theta);
-        kf.reset(home_pose, KalmanFilter::default_cov());
-        CoxScanMatchAlgorithm probe(ref_map, home_pose, lidar_data);
-        const PosEstimate sanity = probe.estimate(home_pose);
-        const double drift_xy   = std::hypot(sanity.pos.x, sanity.pos.y);
-        const double drift_theta = std::fabs(
-            std::atan2(std::sin(sanity.pos.theta - home_theta),
-                       std::cos(sanity.pos.theta - home_theta)));
-        const bool ok = sanity.converged
-                     && sanity.inliers >= 10
-                     && drift_xy   <= arena.home_sanity_tol_mm
-                     && drift_theta <= arena.home_sanity_tol_rad;
-        if (!ok) {
-            LOGE("Main") << "Home sanity-check failed: pose drift ("
-                         << sanity.pos.x << ", " << sanity.pos.y << ", "
-                         << sanity.pos.theta << " rad), inliers="
-                         << sanity.inliers << ", converged="
-                         << (sanity.converged ? "yes" : "no")
-                         << " -- robot is not at home.";
-            app::shutdown.store(true);
-            stop_lidar(lidar);
-            thread_loop_collect_frames.join();
-            return;
-        }
-        // Re-pin to the exact home pose: we trust the placement, not the
-        // single scan-match.
-        kf.reset(home_pose, KalmanFilter::default_cov());
-        LOG("Main") << "Home sanity-check OK (drift " << drift_xy << " mm, "
-                    << (drift_theta * 180.0 / M_PI) << " deg).";
+        kf.reset(Pos2D(0.0, 0.0, home_theta), KalmanFilter::default_cov());
     }
 
     // starting cox estimation
     std::thread thread_loop_scan_cox(
         loop_scan_cox_estimation, std::ref(ref_map),
         std::ref(lidar_data),
-        std::ref(dash), std::ref(kf),
-        arena.kidnap_threshold,
-        arena.relocalize_grid_mm,
-        arena.relocalize_grid_rad
+        std::ref(dash), std::ref(kf)
     );
     // joining threads
     thread_loop_scan_cox.join();
@@ -162,7 +134,8 @@ void loop_localization(Dashboard& dash,
 
 
 void loop_control(Dashboard& dash,
-                  KalmanFilter& kf, TrackerResult& target) {
+                  KalmanFilter& kf, TrackerResult& target,
+                  LidarData& lidar_data) {
     Motor motor;
     Odometry odom;
     PurePursuitController pp;
@@ -239,6 +212,12 @@ void loop_control(Dashboard& dash,
                 w_cmd = 0.0;
                 break;
         }
+        // Hold motors while cox is running a relocalize sweep --
+        // driving on a stale pose is worse than standing still.
+        if (app::relocalizing.load()) {
+            v_cmd = 0.0;
+            w_cmd = 0.0;
+        }
         motor.set_velocity(v_cmd, w_cmd);
 
         uint64_t rejects = 0;
@@ -270,6 +249,17 @@ void loop_control(Dashboard& dash,
         dash.set("Mission", "err_th_deg",  err_th * 180.0 / M_PI);
         dash.set("Mission", "arrived",
                  std::string(sm.goto_arrived() ? "yes" : "no"));
+
+        // Gated telemetry: ~10 Hz regardless of the 25 Hz control loop.
+        static auto last_send = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_send >= std::chrono::milliseconds(100)) {
+            last_send = now;
+            telemetry::send_state(p, cov,
+                                  Pos2D(GOTO_X, GOTO_Y, GOTO_THETA),
+                                  pp.get_active_target(),
+                                  lidar_data);
+        }
     }
     motor.stop();
 }
