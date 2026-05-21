@@ -1,0 +1,22 @@
+Part	Type	Teeth / Diameter
+LEGO Z40 gear	Gear	40 teeth
+LEGO Z24 gear	Gear	24 teeth
+LEGO wheel 3482 (marked “5 07”)	Wheel	~30.4 mm rolling diameter
+
+For LEGO gears, the rolling diameter in millimeters matches the tooth count:
+
+Z40 → 40 mm rolling diameter
+Z24 → 24 mm rolling diameter
+
+The wheel part 3482 is the classic small LEGO wheel used with tires around the 30.4 × 14 size family, giving an overall rolling diameter close to 30 mm.
+
+You can also calculate gear ratios:
+
+40T driving 24T → ratio = 1.67:1
+24T driving 40T → ratio = 0.6:1
+
+And the wheel circumference (for ~30.4 mm diameter) is approximately:
+
+C=πd≈π×30.4≈95.5 mm
+
+So the wheel rolls about 95.5 mm per full rotation.

@@ -120,8 +120,7 @@ int main() {
     // std::this_thread::sleep_for(std::chrono::seconds(3));
 
     // start rest of the system
-    // ENCODER-TEST: skip INA219 init (battery monitor disabled below)
-    // INA219 power_interface = configure_voltage_interface();
+    INA219 power_interface = configure_voltage_interface();
     Dashboard dash;
     // shared datas
     TrackerResult target;
@@ -131,13 +130,13 @@ int main() {
     dash.start(40);
 
     // ENCODER-TEST: battery monitor disabled
-    // if (cfg.get_bool("battery.enabled", true)) {
-    //     dash.add_row("Battery");
-    //     threads.emplace_back(loop_check_battery,
-    //         std::ref(power_interface), std::ref(dash));
-    // } else {
-    //     LOG("Main") << "Battery monitor disabled via config.";
-    // }
+    if (cfg.get_bool("battery.enabled", true)) {
+        dash.add_row("Battery");
+        threads.emplace_back(loop_check_battery,
+            std::ref(power_interface), std::ref(dash));
+    } else {
+        LOG("Main") << "Battery monitor disabled via config.";
+    }
 
 
     dash.add_row("Cox");

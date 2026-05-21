@@ -28,6 +28,7 @@ void loop_check_battery(INA219& power_interface, Dashboard& dash) {
         float mA = power_interface.current();
         dash.set("Battery", "Voltage", v);
         dash.set("Battery", "Current", mA);
+        dash.set("Battery", "SoC %", lipo_soc_pct(v));
         if (!std::isfinite(v) || !std::isfinite(mA)) {
             LOGE("Battery") << "INA219 returned non-finite reading "
                             << "(v=" << v << " mA=" << mA
@@ -164,9 +165,8 @@ void loop_control(Dashboard& dash,
                   KalmanFilter& kf, TrackerResult& target) {
     Motor motor;
     Odometry odom;
-    // ENCODER-TEST: state machine + path follower disabled
-    // PurePursuitController pp;
-    // StateMachine sm(target, pp);
+    PurePursuitController pp;
+    StateMachine sm(target, pp);
     double total_d = 0;
     double total_a = 0;
     if (!motor.start())
@@ -174,20 +174,21 @@ void loop_control(Dashboard& dash,
         LOGE("Main") << "Motor start failed";
         return;
     }
-    double walk_l0 = 0.0, walk_r0 = 0.0;
     {
         // resetting
-        motor.get_encoders(walk_l0, walk_r0);
-        odom.reset(walk_l0, walk_r0);
+        double l0_mm, r0_mm;
+        motor.get_encoders(l0_mm, r0_mm);
+        odom.reset(l0_mm, r0_mm);
     }
 
-    // STRAIGHT-WALK TEST: drive forward WALK_TARGET_MM once, then hold at rest.
-    constexpr double WALK_TARGET_MM = 100.0;
-    constexpr double WALK_V_MM_S    = 50.0;
-    bool walk_done = false;
-    motor.set_velocity(WALK_V_MM_S, 0.0);
-    LOG("Walk") << "Starting " << WALK_TARGET_MM << " mm straight walk at "
-                << WALK_V_MM_S << " mm/s";
+    // GO-TO TEST: drive to a single (x, y, theta) world-frame pose via
+    // spline + PurePursuit. The SEARCH/APPROACH/CARRY_HOME mission is *not*
+    // started; we use the lab-mode go_to() entry directly, which is
+    // orthogonal to the vision-driven mission and latches DONE on arrival.
+    constexpr double GOTO_X     = 300.0;  // mm
+    constexpr double GOTO_Y     = 0.0;    // mm
+    constexpr double GOTO_THETA = 0.0;    // rad
+    sm.go_to(GOTO_X, GOTO_Y, GOTO_THETA);
 
     while(!app::shutdown) {
         // giving time for 2 readings
@@ -195,10 +196,8 @@ void loop_control(Dashboard& dash,
 
         double l_mm, r_mm;
         motor.get_encoders(l_mm, r_mm);
-        const double dist = 0.5 * ((l_mm - walk_l0) + (r_mm - walk_r0));
-        dash.set("Motor", "L_mm", l_mm );
-        dash.set("Motor", "R_mm", r_mm );
-        dash.set("Motor", "Dist_cm", dist / 10);
+        dash.set("Motor", "L_mm", l_mm);
+        dash.set("Motor", "R_mm", r_mm);
 
         double v_sm = 0.0, w_sm = 0.0;
         motor.get_current_v_w(v_sm, w_sm);
@@ -213,46 +212,38 @@ void loop_control(Dashboard& dash,
             dash.set("Odometry", "d_ang",  step.d_theta * 180.0 / M_PI);
             dash.set("Odometry", "Total D", total_d);
             dash.set("Odometry", "Total A", total_a * 180.0 / M_PI);
+            kf.predict(step.d_mm, step.d_theta,
+                       step.var_d, step.var_theta,
+                       step.cov_d_theta);
         }
 
-        if (!walk_done && dist >= WALK_TARGET_MM) {
-            motor.set_velocity(0.0, 0.0);
-            walk_done = true;
-            LOG("Walk") << "Brake at dist=" << dist
-                        << " mm (target " << WALK_TARGET_MM << " mm)";
+        Pos2D p;
+        Pose2DCov cov;
+        kf.snapshot(p, cov);
+        const StateMachine::Command cmd = sm.step(p, dash);
+        double v_cmd = 0.0, w_cmd = 0.0;
+        switch (cmd.mode) {
+            case StateMachine::Command::Mode::DIRECT:
+                v_cmd = cmd.v_mm_s;
+                w_cmd = cmd.omega_rad_s;
+                break;
+            case StateMachine::Command::Mode::PATH_FOLLOW:
+                pp.compute(p, v_cmd, w_cmd);
+                break;
+            case StateMachine::Command::Mode::STOP:
+            default:
+                v_cmd = 0.0;
+                w_cmd = 0.0;
+                break;
         }
+        motor.set_velocity(v_cmd, w_cmd);
 
-        // ENCODER-TEST: Kalman, state machine, motor commands, KF dashboard all disabled
-        // if (step.valid) {
-        //     kf.predict(step.d_mm, step.d_theta,
-        //                step.var_d, step.var_theta,
-        //                step.cov_d_theta);
-        // }
-        // Pos2D p;
-        // Pose2DCov cov;
-        // kf.snapshot(p, cov);
-        // const StateMachine::Command cmd = sm.step(p, dash);
-        // double v_cmd = 0.0, w_cmd = 0.0;
-        // switch (cmd.mode) {
-        //     case StateMachine::Command::Mode::DIRECT:
-        //         v_cmd = cmd.v_mm_s;
-        //         w_cmd = cmd.omega_rad_s;
-        //         break;
-        //     case StateMachine::Command::Mode::PATH_FOLLOW:
-        //         pp.compute(p, v_cmd, w_cmd);
-        //         break;
-        //     case StateMachine::Command::Mode::STOP:
-        //     default:
-        //         v_cmd = 0.0;
-        //         w_cmd = 0.0;
-        //         break;
-        // }
-        // // motor.set_velocity(v_cmd, w_cmd);
-        // uint64_t rejects = 0, give_ups = 0;
-        // motor.get_spi_stats(rejects, give_ups);
-        // dash.set("KF", "X",     p.x/10);
-        // dash.set("KF", "Y",     p.y/10);
-        // dash.set("KF", "Theta", p.theta * 180.0 / M_PI);
+        uint64_t rejects = 0;
+        motor.get_spi_stats(rejects);
+        dash.set("Motor", "spi_rej", rejects);
+        dash.set("KF", "X",     p.x/10);
+        dash.set("KF", "Y",     p.y/10);
+        dash.set("KF", "Theta", p.theta * 180.0 / M_PI);
     }
     motor.stop();
 }

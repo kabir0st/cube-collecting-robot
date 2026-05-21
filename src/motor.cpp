@@ -11,16 +11,17 @@
 #include <wiringPiSPI.h>
 
 namespace {
-    // Physical ceiling on encoder ticks/sec for either wheel.
-    // Nominal motor 4670 rpm / 6.6 gear * 4096 quad ticks/rev ≈ 319,000 ticks/s.
+    // Physical ceiling on encoder ticks/sec at the motor shaft.
+    // Nominal motor 4670 rpm × 4096 quad ticks/rev ≈ 319,000 ticks/s.
     // 400,000 sits comfortably above that.
+    // (Gearing: motor → Z24 → Z40 on wheel shaft, 5/3 reduction.)
     constexpr double MAX_TICKS_PER_SEC = 400000.0;
     // Hard ceiling on commanded per-wheel pps sent to the Arduino.
-    // 17% of the physical max ≈ 68,000 pps ≈ 400 mm/s — leaves ~54%
-    // headroom over the controller's worst-case wheel-frame speed
-    // (~260 mm/s from v=75 mm/s + omega·b/2) so a runaway command can
-    // never ship more than ~1.5x normal operating speed.
-    constexpr double MAX_CMD_PPS100    = 0.17 * MAX_TICKS_PER_SEC / 100.0;
+    // Calibrated to cap wheel-frame speed at ~400 mm/s under the
+    // current TICKS_PER_MM (71.48), leaving ~54 % headroom over the
+    // controller's worst-case wheel-frame speed (~260 mm/s).
+    //   pps cap = 400 mm/s × TICKS_PER_MM = 28,592 ticks/s = 286 pps100.
+    constexpr double MAX_CMD_PPS100    = 286.0;
     // jitter margin
     constexpr double SAFETY_FACTOR     = 2.0;
     // Cap on the time window used for max_delta. Prevents the per-tick
