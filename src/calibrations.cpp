@@ -594,6 +594,125 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data) {
     return walls;
 }
 
+std::vector<LineSeg> build_arena_map(double width_mm, double length_mm) {
+    // Frame: home at midpoint of the back wall (x=0), robot faces +x.
+    // Normals point INTO the arena so y = nx*pwx + ny*pwy - r is positive
+    // for interior points (Cox convention, src/cox.cpp:45).
+    const float half_w = static_cast<float>(0.5 * width_mm);
+    const float L      = static_cast<float>(length_mm);
+
+    std::vector<LineSeg> walls;
+    walls.reserve(4);
+
+    // Back wall (home wall, behind robot at boot): x = 0, normal +x.
+    LineSeg back;
+    back.nx = 1.0f; back.ny = 0.0f; back.r = 0.0f;
+    back.ax = 0.0f; back.ay = -half_w;
+    back.bx = 0.0f; back.by = +half_w;
+    walls.push_back(back);
+
+    // Front wall: x = L, normal -x. r = -L so y = -pwx - (-L) = L - pwx > 0.
+    LineSeg front;
+    front.nx = -1.0f; front.ny = 0.0f; front.r = -L;
+    front.ax = L; front.ay = -half_w;
+    front.bx = L; front.by = +half_w;
+    walls.push_back(front);
+
+    // Right wall (+y side): y = +half_w, normal -y. r = -half_w.
+    LineSeg right;
+    right.nx = 0.0f; right.ny = -1.0f; right.r = -half_w;
+    right.ax = 0.0f; right.ay = +half_w;
+    right.bx = L;    right.by = +half_w;
+    walls.push_back(right);
+
+    // Left wall (-y side): y = -half_w, normal +y. r = -half_w.
+    LineSeg left;
+    left.nx = 0.0f; left.ny = 1.0f; left.r = -half_w;
+    left.ax = 0.0f; left.ay = -half_w;
+    left.bx = L;    left.by = -half_w;
+    walls.push_back(left);
+
+    LOG("MAP") << "Built analytical arena map: " << width_mm << " x "
+               << length_mm << " mm (4 walls).";
+    return walls;
+}
+
+namespace {
+
+// True if (n_obs, r_obs) describes the same infinite line as
+// (n_exp, r_exp), allowing for opposite-sign normal conventions
+// (RANSAC emits positive r; the analytical map has negative r on two
+// walls).
+bool same_line(const LineSeg& obs, const LineSeg& exp,
+               double tol_mm, double tol_rad,
+               double& signed_match_sign) {
+    // Angle between normals, modulo orientation.
+    const double dot = obs.nx * exp.nx + obs.ny * exp.ny;
+    const double abs_dot = std::min(1.0, std::fabs(dot));
+    const double ang = std::acos(abs_dot);
+    if (ang > tol_rad) return false;
+
+    // Sign that makes the normals point the same way.
+    const double sgn = (dot >= 0.0) ? 1.0 : -1.0;
+    // r in the obs frame, expressed in the exp frame's normal direction.
+    const double r_obs_adj = sgn * obs.r;
+    if (std::fabs(r_obs_adj - exp.r) > tol_mm) return false;
+
+    signed_match_sign = sgn;
+    return true;
+}
+
+// True if both endpoints of `obs` lie within tol_mm of the infinite line
+// defined by `exp.n, exp.r` (using exp's sign convention).
+bool endpoints_on_line(const LineSeg& obs, const LineSeg& exp, double tol_mm) {
+    const double d_a = std::fabs(exp.nx * obs.ax + exp.ny * obs.ay - exp.r);
+    const double d_b = std::fabs(exp.nx * obs.bx + exp.ny * obs.by - exp.r);
+    return d_a <= tol_mm && d_b <= tol_mm;
+}
+
+}  // namespace
+
+bool validate_arena_walls(const std::vector<LineSeg>& expected,
+                          const std::vector<LineSeg>& observed,
+                          double tol_mm, double tol_rad) {
+    if (expected.empty()) {
+        LOGE("MAP") << "validate_arena_walls: expected map is empty";
+        return false;
+    }
+    if (observed.empty()) {
+        LOGE("MAP") << "validate_arena_walls: RANSAC found no walls";
+        return false;
+    }
+
+    size_t unmatched = 0;
+    for (const LineSeg& obs : observed) {
+        bool matched = false;
+        for (const LineSeg& exp : expected) {
+            double sgn = 1.0;
+            if (!same_line(obs, exp, tol_mm, tol_rad, sgn)) continue;
+            if (!endpoints_on_line(obs, exp, tol_mm)) continue;
+            matched = true;
+            break;
+        }
+        if (!matched) {
+            ++unmatched;
+            LOGE("MAP") << "Unmatched observed wall: n=(" << obs.nx << ", "
+                        << obs.ny << ") r=" << obs.r
+                        << " endpoints (" << obs.ax << ", " << obs.ay
+                        << ") -> (" << obs.bx << ", " << obs.by << ")";
+        }
+    }
+    if (unmatched > 0) {
+        LOGE("MAP") << "Arena validation: " << unmatched << "/"
+                    << observed.size()
+                    << " observed walls did not match expected geometry";
+        return false;
+    }
+    LOG("MAP") << "Arena validation OK: all " << observed.size()
+               << " observed walls match expected rectangle";
+    return true;
+}
+
 namespace calib {
 namespace {
 std::atomic<bool> g_bounds_ready{false};

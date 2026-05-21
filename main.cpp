@@ -16,6 +16,7 @@ std::atomic<bool> app::shutdown{false};
 std::atomic<bool> app::lidar_ready{false};
 std::atomic<bool> app::lidar_stop{false};
 std::atomic<bool> app::obstacle_ahead{false};
+std::atomic<bool> app::relocalizing{false};
 std::vector<std::thread> threads;
 
 
@@ -68,32 +69,59 @@ int main() {
     cam_cfg.show_debug_view = cfg.get_bool(
         "camera.show_debug_view", cam_cfg.show_debug_view);
 
-    FilterResult filter;
-    if (load_filter_result(cfg, filter)) {
-        LOG("Main") << "Loaded filter calibration from " << config_path;
-    } else {
-        LOG("Main") << "No filter calibration in config — running calibration.";
-        CalibrateCamera calibrator(cam_cfg);
-        filter = calibrator.start_filter_calibration();
-        if (filter.ready) {
-            if (save_filter_result(config_path, filter)) {
-                LOG("Main") << "Saved filter calibration to " << config_path;
-            } else {
-                LOG("Main") << "Failed to write filter calibration to " << config_path;
-            }
-        } else {
-            LOG("Main") << "Calibration aborted; filter not saved.";
-        }
-    }
+    // Mission geometry: only home_theta is needed right now (for the
+    // localization sanity-check + the seed pose). The remaining mission.*
+    // keys (home_x/y_mm, home_margin_mm, arm_length_mm) are read by
+    // StateMachine::configure() once the state-machine path in
+    // loop_control is re-enabled.
+    const double mission_home_theta = cfg.get_dbl("mission.home_theta_rad", 0.0);
+
+    // Arena geometry + kidnap-recovery tunables. Degrees in the YAML are
+    // converted to radians here so the rest of the codebase only deals in
+    // mm/rad.
+    ArenaConfig arena_cfg;
+    arena_cfg.in_arena           = cfg.get_bool("arena.in_arena",           arena_cfg.in_arena);
+    arena_cfg.width_mm           = cfg.get_dbl ("arena.arena_width_mm",     arena_cfg.width_mm);
+    arena_cfg.length_mm          = cfg.get_dbl ("arena.arena_length_mm",    arena_cfg.length_mm);
+    arena_cfg.validation_tol_mm  = cfg.get_dbl ("arena.validation_tol_mm",  arena_cfg.validation_tol_mm);
+    arena_cfg.validation_tol_rad = cfg.get_dbl ("arena.validation_tol_deg", 5.0) * M_PI / 180.0;
+    arena_cfg.home_sanity_tol_mm = cfg.get_dbl ("arena.home_sanity_tol_mm", arena_cfg.home_sanity_tol_mm);
+    arena_cfg.home_sanity_tol_rad= cfg.get_dbl ("arena.home_sanity_tol_deg", 3.0) * M_PI / 180.0;
+    arena_cfg.kidnap_threshold   = cfg.get_int ("arena.kidnap_threshold",   arena_cfg.kidnap_threshold);
+    arena_cfg.relocalize_grid_mm = cfg.get_dbl ("arena.relocalize_grid_step_mm",  arena_cfg.relocalize_grid_mm);
+    arena_cfg.relocalize_grid_rad= cfg.get_dbl ("arena.relocalize_grid_step_deg", 30.0) * M_PI / 180.0;
+    LOG("Main") << "Arena: in_arena=" << (arena_cfg.in_arena ? "yes" : "no")
+                << " size=" << arena_cfg.width_mm << "x" << arena_cfg.length_mm << " mm"
+                << " kidnap_threshold=" << arena_cfg.kidnap_threshold;
+
+    // ENCODER-TEST: skip camera filter calibration (camera not used in encoder-only mode)
+    // FilterResult filter;
+    // if (load_filter_result(cfg, filter)) {
+    //     LOG("Main") << "Loaded filter calibration from " << config_path;
+    // } else {
+    //     LOG("Main") << "No filter calibration in config — running calibration.";
+    //     CalibrateCamera calibrator(cam_cfg);
+    //     filter = calibrator.start_filter_calibration();
+    //     if (filter.ready) {
+    //         if (save_filter_result(config_path, filter)) {
+    //             LOG("Main") << "Saved filter calibration to " << config_path;
+    //         } else {
+    //             LOG("Main") << "Failed to write filter calibration to " << config_path;
+    //         }
+    //     } else {
+    //         LOG("Main") << "Calibration aborted; filter not saved.";
+    //     }
+    // }
     // ------------------------------------------------------------------------
 
 
-    // time to remove the box if it's in the frame
-    std::cout << "Waiting 3 seconds before starting . ..\n";
-    std::this_thread::sleep_for(std::chrono::seconds(3));
+    // ENCODER-TEST: skip 3-second pre-start wait (no camera to clear)
+    // std::cout << "Waiting 3 seconds before starting . ..\n";
+    // std::this_thread::sleep_for(std::chrono::seconds(3));
 
     // start rest of the system
-    INA219 power_interface = configure_voltage_interface();
+    // ENCODER-TEST: skip INA219 init (battery monitor disabled below)
+    // INA219 power_interface = configure_voltage_interface();
     Dashboard dash;
     // shared datas
     TrackerResult target;
@@ -102,36 +130,36 @@ int main() {
     // 9 panels × 4 lines each = 36 lines (+ slack).
     dash.start(40);
 
-    // Battery monitor will shut the whole app down if the INA219 rail
-    // reads below 1 V for ~20 s — disable for bench testing without
-    // the sensor wired.
-    if (cfg.get_bool("battery.enabled", true)) {
-        dash.add_row("Battery");
-        threads.emplace_back(loop_check_battery,
-            std::ref(power_interface), std::ref(dash));
-    } else {
-        LOG("Main") << "Battery monitor disabled via config.";
-    }
+    // ENCODER-TEST: battery monitor disabled
+    // if (cfg.get_bool("battery.enabled", true)) {
+    //     dash.add_row("Battery");
+    //     threads.emplace_back(loop_check_battery,
+    //         std::ref(power_interface), std::ref(dash));
+    // } else {
+    //     LOG("Main") << "Battery monitor disabled via config.";
+    // }
 
 
     dash.add_row("Cox");
-    // dash.add_row("Cox Debug");
     threads.emplace_back(loop_localization,
-        std::ref(dash), std::ref(lidar_data), std::ref(kf));
+        std::ref(dash), std::ref(lidar_data), std::ref(kf),
+        std::cref(arena_cfg), mission_home_theta);
     // waiting for cox 1st seeds to be stable
     std::this_thread::sleep_for(std::chrono::seconds(3));
 
-    dash.add_row("Vision");
-    threads.emplace_back(loop_vision_tracking,
-        std::ref(dash), filter, cam_cfg, std::ref(target));
-    dash.render();
-    std::this_thread::sleep_for(std::chrono::seconds(3));
-    dash.render();
+    // ENCODER-TEST: vision tracking disabled
+    // dash.add_row("Vision");
+    // threads.emplace_back(loop_vision_tracking,
+    //     std::ref(dash), filter, cam_cfg, std::ref(target));
+    // dash.render();
+    // std::this_thread::sleep_for(std::chrono::seconds(3));
+    // dash.render();
     dash.add_row("Motor");
     dash.add_row("Odometry");
-    dash.add_row("KF");
-    dash.add_row("Servo");
-    dash.add_row("Mission");
+    // ENCODER-TEST: KF / Servo / Mission rows unused without state machine
+    // dash.add_row("KF");
+    // dash.add_row("Servo");
+    // dash.add_row("Mission");
     threads.emplace_back(loop_control,
         std::ref(dash), std::ref(kf), std::ref(target));
 

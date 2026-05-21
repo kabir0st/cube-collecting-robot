@@ -23,6 +23,9 @@ CXXFLAGS += -isystem /usr/include/eigen3 $(OPENCV_CFLAGS)
 
 SRCS = main.cpp $(wildcard $(SRC_DIR)/*.cpp)
 OBJS = $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(notdir $(SRCS)))
+# servo.c is C, not C++, so it's not picked up by the .cpp wildcard above.
+# It has its own compile rule below, but must be linked explicitly.
+OBJS += $(BUILD_DIR)/servo.o
 
 
 all: $(BUILD_DIR) $(TARGET)

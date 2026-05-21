@@ -1,0 +1,63 @@
+How the hard-coded map works
+A wall is a LineSeg (include/types.hpp:35-38) carrying a unit normal (nx, ny), a signed distance r from the origin along that normal, and two endpoints. Cox computes the residual for a world point P as y = nx·Px + ny·Py − r (src/cox.cpp:45). With normals pointing into the arena, that residual is positive everywhere inside.
+
+Frame I chose: origin at the midpoint of the home wall, +x into the arena (along the 3.6 m axis), +y to the robot's right. Robot starts at (0, 0, 0).
+
+Wall	Line	(nx, ny)	r	Endpoints
+Back / home	x = 0	(+1, 0)	0	(0, −1200) → (0, +1200)
+Front	x = 3600	(−1, 0)	−3600	(3600, −1200) → (3600, +1200)
+Right	y = +1200	(0, −1)	−1200	(0, +1200) → (3600, +1200)
+Left	y = −1200	(0, +1)	−1200	(0, −1200) → (3600, −1200)
+Quick sanity check for a robot at the arena center (1800, 0):
+
+back: 1·1800 + 0·0 − 0 = 1800 ✓ (1.8 m from back wall)
+front: −1·1800 + 0·0 − (−3600) = 1800 ✓
+right: 0·1800 + (−1)·0 − (−1200) = 1200 ✓
+left: 0·1800 + 1·0 − (−1200) = 1200 ✓
+All residuals positive, all magnitudes are the actual perpendicular distance. Math is consistent with Cox's convention.
+
+validate_arena_walls() accepts an observed RANSAC wall as a match if (a) its normal is parallel to an expected wall within tol_deg, (b) r_obs equals r_exp (after accounting for (n, r) ≡ (−n, −r) because RANSAC flips its normal so r > 0), and (c) both observed endpoints lie within tol_mm of the expected segment's infinite line. Extra observed walls that match nothing → fail. Missing expected walls → OK (corner occlusion).
+
+Tuning the uncertainties
+Now to the actual tuning. Your current odometry noise is structurally wrong — let me read what I've got and rebuild it.
+
+The current odometry model (src/odometry.cpp:59-68) treats wheel noise as a random walk: var_W = k · |dW| with k = 0.001. That gives σ_W = √(0.001·600) ≈ 0.77 mm for 600 mm of travel. You're observing 10–20 mm of error at 600 mm — that's 13–26× higher. The model is off because real wheel slip + radius miscalibration scales with distance, not with √distance. Also, the var_d = 0.08 · (var_L + var_R) factor is wrong: the diff-drive inverse Jacobian J = [[½, ½], [−1/b, 1/b]] gives var_d = ¼·(var_L + var_R) — the 0.08 was undercounting d-noise by ~3×.
+
+Here's the model that matches your observation:
+
+
+
+
+Tuning rationale (numbers you can sanity-check against runs)
+Odometry noise: scale-error model
+Source	Constant	Affects	At d = 600 mm
+Per-wheel independent slip	K_WHEEL_INDEP = 0.010	both d and θ	σ_L = σ_R ≈ 6 mm
+Common-mode (both wheels same slip)	K_COMMON = 0.025	only d	σ_d_common ≈ 15 mm
+Rotation scale error	K_ROT = 0.030	only θ during turn	σ_θ_rot at 90° turn ≈ 2.7°
+So for a 600 mm straight run: σ_d = √(0.25·(36+36) + 15²) = √(18 + 225) ≈ 15.6 mm, which matches your observed 10–20 mm range. And σ_θ ≈ √((36+36)/185²) = 0.046 rad ≈ 2.6° / m of forward travel — that's the typical drift for diff-drive without IMU, and Cox will hammer it down fast.
+
+If your actual slip is different on the lab floor, the only knob is K_WHEEL_INDEP / K_COMMON / K_ROT at the top of src/odometry.cpp:60-65. A quick calibration drive (e.g. 1 m straight, measure with a ruler vs encoder) tells you K_COMMON directly: K_COMMON = |encoder − truth| / encoder.
+
+Cox trust gate
+Threshold	Before	After	Why
+MAX_SIGMA_XY	100 mm	30 mm	Analytical map gives much tighter Cox; 100 mm was for noisy RANSAC walls
+MAX_SIGMA_THETA	0.087 rad (5°)	0.035 rad (2°)	Same reason
+MIN_INLIERS	10	10 (unchanged)	Good floor for ~360-point scans
+Side effect: tighter gate = faster kidnap detection. A genuine shove now needs 5 cycles (0.5 s at 10 Hz) of σ > 30 mm before recovery kicks in.
+
+KF initial covariance
+Before	After	Why
+σ_x = σ_y	50 mm	25 mm	After home sanity-check passes we know we're within 50 mm; init at half that
+σ_θ	5°	2°	Same logic against the 3° sanity tolerance
+Initial cov doesn't change steady-state behavior — Cox correction overwhelms it within seconds either way. Tighter init just stops the first few prediction-only ticks (before Cox has its first trusted lock) from making the EKF overconfident in nonsense.
+
+What I didn't touch
+sigma_r inside Cox (cox.cpp:65) — std::max(5, lidar_data.sensor_noise). Welford's calibration measurement is already accurate; the 5 mm floor protects against weird boot conditions.
+Cox gate-shrinking schedule (cox.cpp:121-127). Already well-tuned for tens of mm of initial error.
+The ridge regularizer (RIDGE = 1e-3) on the Hessian — important for the corridor degeneracy case, not worth touching.
+What I can't verify without running on the Pi
+Per your standing rule I didn't compile. Two things to watch for on the first push:
+
+Cox σ floor: If your real σ_xy lands below ~3 mm (very clean LIDAR), the 30 mm gate is fine. If it lands at 25 mm because of close-range chassis returns, you may need to bump back up to 50 mm. Tail logs/<run>_cox.txt and look at the steady-state Sig_X / Sig_Y on the dashboard.
+Validator false negatives: RANSAC sometimes returns walls slightly outside the 100 mm tolerance because of chassis-return rays at near-zero range. If validation aborts spuriously, raise arena.validation_tol_mm to 150 — the underlying geometry is still right.
+If you want me to expose K_WHEEL_INDEP / K_COMMON / K_ROT to config.yml so you can A/B them without rebuilding, say the word — it's a 10-line change.

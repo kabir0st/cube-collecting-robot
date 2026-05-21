@@ -1,7 +1,6 @@
 #include <motor.hpp>
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -24,7 +23,11 @@ namespace {
     constexpr double MAX_CMD_PPS100    = 0.17 * MAX_TICKS_PER_SEC / 100.0;
     // jitter margin
     constexpr double SAFETY_FACTOR     = 2.0;
-    constexpr int    MAX_RETRIES       = 4;
+    // Cap on the time window used for max_delta. Prevents the per-tick
+    // physical-travel threshold from growing without bound across a
+    // burst of bad SPI reads — otherwise bit-flipped values eventually
+    // fit under the threshold and corrupt the encoder accumulator.
+    constexpr double MAX_DT_S          = 0.200;
     constexpr auto   LOOP_PERIOD       = std::chrono::milliseconds(20);
 
     // Acceleration limits — robot ramps toward set_velocity() target at these rates.
@@ -32,7 +35,7 @@ namespace {
     // (velocity caps + accel ramps) speeds up or slows down together.
     constexpr double ACCEL_V_MM_S2     = 150.0 * ROBOT_SPEED;  // forward accel
     constexpr double ACCEL_W_RAD_S2    = 1.5   * ROBOT_SPEED;  // yaw accel
-    constexpr double DT_S              = 0.020;  // matches LOOP_PERIOD
+    constexpr double DT_S              = std::chrono::duration<double>(LOOP_PERIOD).count();
     constexpr double V_STEP_PER_TICK   = ACCEL_V_MM_S2  * DT_S;
     constexpr double W_STEP_PER_TICK   = ACCEL_W_RAD_S2 * DT_S;
 }
@@ -46,26 +49,22 @@ namespace {
     //   pps100         = pulses_per_sec / 100 = mm/s * TICKS_PER_MM / 100
     constexpr double PPS100_PER_MM_S = Motor::TICKS_PER_MM / 100.0;
 
+    // Chassis-level reach derived from the per-wheel pps ceiling.
+    // Used to clamp _v_target/_w_target and the integrator so a stuck-high
+    // command can't wind _v_cur up past what the wheels can physically do.
+    constexpr double MAX_V_MM_S  = MAX_CMD_PPS100 / PPS100_PER_MM_S;
+    constexpr double MAX_W_RAD_S = 2.0 * MAX_V_MM_S / Motor::WHEELBASE_MM;
+
     inline int16_t mm_s_to_pps100(double mm_s) {
-        // Round first, then clamp into int16 range. The original
-        //     clamp -> add 0.5 -> cast
-        // overflowed the int16 cast for inputs at the very negative end
-        // (e.g. pps100 = -32768.0 → -32768.5 → cast is UB), and for
-        // positive overflow above 32767 → 32767.5 → cast also UB. Using
-        // std::lround gives a well-defined integer result that we then
-        // clamp with integer arithmetic.
+        // Hard per-wheel pps ceiling — MAX_CMD_PPS100 (~680) is far below
+        // int16 range, so this clamp also keeps the cast well-defined.
         long rounded = std::lround(mm_s * PPS100_PER_MM_S);
         const long cap = static_cast<long>(MAX_CMD_PPS100);
         if (rounded >  cap) rounded =  cap;
         if (rounded < -cap) rounded = -cap;
-        if (rounded >  32767L) rounded =  32767L;
-        if (rounded < -32768L) rounded = -32768L;
         return static_cast<int16_t>(rounded);
     }
 
-    inline double pps100_to_mm_s(int16_t pps100) {
-        return static_cast<double>(pps100) / PPS100_PER_MM_S;
-    }
 }
 
 Motor::Motor() = default;
@@ -76,68 +75,29 @@ Motor::~Motor() {
 
 bool Motor::start() {
     if (_motor_running.load()) return true;
-    if (wiringPiSPISetup(1, 4000000) < 0) {
+    if (wiringPiSPISetup(1, 1000000) < 0) {
           LOGE("Motor") << "wiringPiSPISetup(1) failed";
           return false;
       }
-    // Bumpless transfer: the Arduino motor controller may be holding a
-    // non-zero Set_Speed across Pi reboots. Slamming Set_Speed to 0 on the
-    // first frame would brake hard against any standing PWM and visibly
-    // twitch the wheels. Instead, probe with one zero-set frame, read the
-    // Arduino's reported Act_Speed, then mirror it back on the remaining
-    // seed frames so the controller keeps its current PWM. Initialize
-    // _v_cur/_w_cur from the measured speed and let the IO-loop ramp
-    // decelerate to zero at the configured ACCEL limits.
-    std::array<int32_t, 3> seed_l{0,0,0}, seed_r{0,0,0};
     MotorDataType md = {0, 0, 0, 0, 0, 0};
-    int16_t hold_l = 0, hold_r = 0;
-    for (int i = 0; i < 3; ++i) {
-        md.Set_Speed_M1 = hold_l;
-        md.Set_Speed_M2 = hold_r;
-        Send_Read_Motor_Data(&md);
-        seed_l[i] = md.Encoder_M1;
-        seed_r[i] = md.Encoder_M2;
-        if (i == 0) {
-            // After the first probe we know what the Arduino is doing —
-            // mirror it back on frames #2 and #3 so it doesn't decelerate
-            // between our reads.
-            hold_l = md.Act_Speed_M1;
-            hold_r = md.Act_Speed_M2;
-        }
-    }
-    std::sort(seed_l.begin(), seed_l.end());
-    std::sort(seed_r.begin(), seed_r.end());
-
-    // Invert IK from _loop_motor_read_write: right wheel is wired
-    // backwards, so its sign flips when going chassis-frame ↔ wheel-frame.
-    const double act_l_mm_s =  pps100_to_mm_s(md.Act_Speed_M1);
-    const double act_r_mm_s = -pps100_to_mm_s(md.Act_Speed_M2);
-    const double v_seed = 0.5 * (act_l_mm_s + act_r_mm_s);
-    const double w_seed = (act_r_mm_s - act_l_mm_s) / WHEELBASE_MM;
+    Send_Read_Motor_Data(&md);
+    const int32_t seed_l = md.Encoder_M1;
+    const int32_t seed_r = md.Encoder_M2;
 
     {
         std::lock_guard<std::mutex> lock(_mutex_motor);
-        _enc_left      = seed_l[1];
-        _enc_right     = seed_r[1];
-        _last_acc_left  = seed_l[1];
-        _last_acc_right = seed_r[1];
+        _last_acc_left  = seed_l;
+        _last_acc_right = seed_r;
         _last_acc_ts    = std::chrono::steady_clock::now();
-        _act_left  = md.Act_Speed_M1;
-        _act_right = md.Act_Speed_M2;
-        // Smoother seeded from the wheels' actual current speed; target
-        // stays at zero so the IO loop ramps it down at ACCEL_V_MM_S2 /
-        // ACCEL_W_RAD_S2 instead of slamming Set_Speed to 0.
-        _v_target = 0.0;    _w_target = 0.0;
-        _v_cur    = v_seed; _w_cur    = w_seed;
+        _v_target = 0.0; _w_target = 0.0;
+        _v_cur    = 0.0; _w_cur    = 0.0;
     }
     _motor_running.store(true);
     _io = std::thread(&Motor::_loop_motor_read_write, this);
     LOG("Motor") << "Started Motor with seed encoders: ("
-                 << seed_l[1] << ", " << seed_r[1] << ")"
-                 << " boot Act_Speed pps100 L=" << md.Act_Speed_M1
-                 << " R=" << md.Act_Speed_M2
-                 << " → v_cur=" << v_seed << " mm/s"
-                 << " w_cur=" << w_seed << " rad/s";
+                 << seed_l << ", " << seed_r
+                 << ") TICKS_PER_MM=" << TICKS_PER_MM
+                 << " WHEELBASE_MM=" << WHEELBASE_MM;
     return true;
 }
 
@@ -155,9 +115,14 @@ void Motor::stop() {
 }
 
 void Motor::set_velocity(double v_mm_s, double omega_rad_s) {
+    if (!std::isfinite(v_mm_s) || !std::isfinite(omega_rad_s)) {
+        LOGE("Motor") << "set_velocity rejected non-finite input: v="
+                      << v_mm_s << " w=" << omega_rad_s;
+        return;
+    }
     std::lock_guard<std::mutex> lock(_mutex_motor);
-    _v_target = v_mm_s;
-    _w_target = omega_rad_s;
+    _v_target = std::max(-MAX_V_MM_S,  std::min(v_mm_s,      MAX_V_MM_S));
+    _w_target = std::max(-MAX_W_RAD_S, std::min(omega_rad_s, MAX_W_RAD_S));
 }
 
 void Motor::get_current_v_w(double& v_mm_s, double& omega_rad_s) const {
@@ -168,8 +133,8 @@ void Motor::get_current_v_w(double& v_mm_s, double& omega_rad_s) const {
 
 void Motor::get_encoders(double& left_mm, double& right_mm) const {
     std::lock_guard<std::mutex> lock(_mutex_motor);
-    const int64_t l_ticks =   _enc_left_acc  - _enc_left_noise;
-    const int64_t r_ticks = -(_enc_right_acc - _enc_right_noise);
+    const int64_t l_ticks =   _enc_left_acc;
+    const int64_t r_ticks = -_enc_right_acc;
     left_mm  = static_cast<double>(l_ticks) / TICKS_PER_MM;
     right_mm = static_cast<double>(r_ticks) / TICKS_PER_MM;
 }
@@ -193,53 +158,42 @@ void Motor::_loop_motor_read_write() {
             // Nudge current command toward target by at most one accel step per tick.
             _v_cur += std::max(-V_STEP_PER_TICK, std::min(_v_target - _v_cur, V_STEP_PER_TICK));
             _w_cur += std::max(-W_STEP_PER_TICK, std::min(_w_target - _w_cur, W_STEP_PER_TICK));
+            // Anti-windup: keep the integrator within physical chassis reach.
+            _v_cur = std::max(-MAX_V_MM_S,  std::min(_v_cur, MAX_V_MM_S));
+            _w_cur = std::max(-MAX_W_RAD_S, std::min(_w_cur, MAX_W_RAD_S));
 
             // Diff-drive IK; right wheel is wired backwards, so invert its sign.
             const double half_b = 0.5 * WHEELBASE_MM;
-            _set_left  =  mm_s_to_pps100(_v_cur - _w_cur * half_b);
-            _set_right = -mm_s_to_pps100(_v_cur + _w_cur * half_b);
+            set_l =  mm_s_to_pps100(_v_cur - _w_cur * half_b);
+            set_r = -mm_s_to_pps100(_v_cur + _w_cur * half_b);
 
             last_l  = _last_acc_left;
             last_r  = _last_acc_right;
             last_ts = _last_acc_ts;
-            set_l   = _set_left;
-            set_r   = _set_right;
         }
 
         auto now = std::chrono::steady_clock::now();
         double dt_s = std::chrono::duration<double>(now - last_ts).count();
-        // Clamp dt to a sane floor so the first cycle (or a paused thread)
-        // doesn't yield an absurdly small threshold.
-        if (dt_s < 0.001) dt_s = 0.001;
+        // Floor prevents the first cycle (or a paused thread) from yielding
+        // an absurdly small threshold; ceiling prevents max_delta from
+        // ballooning across sustained bad reads.
+        if (dt_s < 0.001)    dt_s = 0.001;
+        if (dt_s > MAX_DT_S) dt_s = MAX_DT_S;
         const int32_t max_delta = static_cast<int32_t>(
             MAX_TICKS_PER_SEC * dt_s * SAFETY_FACTOR);
 
         MotorDataType md = {0, 0, 0, 0, 0, 0};
-        bool accepted = false;
-        int32_t last_dl = 0, last_dr = 0;
-        for (int attempt = 0; attempt < MAX_RETRIES; ++attempt) {
-            md.Set_Speed_M1 = set_l;
-            md.Set_Speed_M2 = set_r;
-            Send_Read_Motor_Data(&md);
-            last_dl = md.Encoder_M1 - last_l;
-            last_dr = md.Encoder_M2 - last_r;
-            if (std::abs(last_dl) <= max_delta &&
-                std::abs(last_dr) <= max_delta) {
-                accepted = true;
-                break;
-            }
-            // got bad read count it and re-issue immediately
-            std::lock_guard<std::mutex> lock(_mutex_motor);
-            ++_spi_reject_count;
-        }
+        md.Set_Speed_M1 = set_l;
+        md.Set_Speed_M2 = set_r;
+        Send_Read_Motor_Data(&md);
+        const int32_t last_dl = md.Encoder_M1 - last_l;
+        const int32_t last_dr = md.Encoder_M2 - last_r;
+        const bool accepted = (std::abs(last_dl) <= max_delta &&
+                               std::abs(last_dr) <= max_delta);
 
         if (accepted) {
             auto accept_ts = std::chrono::steady_clock::now();
             std::lock_guard<std::mutex> lock(_mutex_motor);
-            _act_left       = md.Act_Speed_M1;
-            _act_right      = md.Act_Speed_M2;
-            _enc_left       = md.Encoder_M1;
-            _enc_right      = md.Encoder_M2;
             // last_dl/last_dr were computed as a signed int32 subtraction
             // (md.Encoder_M{1,2} - last_{l,r}); under two's-complement
             // arithmetic this is the correct signed delta even when the
@@ -252,12 +206,9 @@ void Motor::_loop_motor_read_write() {
             _last_acc_right = md.Encoder_M2;
             _last_acc_ts    = accept_ts;
         } else {
-            {
-                std::lock_guard<std::mutex> lock(_mutex_motor);
-                ++_spi_give_up_count;
-            }
-            LOGE("Motor") << "SPI giveup after " << MAX_RETRIES
-                          << " bad reads (last dL=" << last_dl
+            std::lock_guard<std::mutex> lock(_mutex_motor);
+            ++_spi_reject_count;
+            LOGE("Motor") << "SPI bad read (dL=" << last_dl
                           << " dR=" << last_dr
                           << " max=" << max_delta
                           << "); holding previous encoder values.";
@@ -266,9 +217,8 @@ void Motor::_loop_motor_read_write() {
     }
 }
 
-void Motor::get_spi_stats(uint64_t& rejects, uint64_t& give_ups) const {
+void Motor::get_spi_stats(uint64_t& rejects) const {
     std::lock_guard<std::mutex> lock(_mutex_motor);
     rejects = _spi_reject_count;
-    give_ups = _spi_give_up_count;
 }
 

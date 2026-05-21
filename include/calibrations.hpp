@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -69,6 +70,38 @@ bool save_filter_result(const std::string& path, const FilterResult& result);
 double get_lidar_sensor_noise(LidarData &lidar_data);
 
 std::vector<LineSeg> find_walls(LidarData &lidar_data);
+
+// POD bag for all `arena:` config keys. Loaded once in main and passed by
+// const ref into loop_localization. Tolerances are stored already in mm/rad
+// (degrees in the YAML are converted at load time).
+struct ArenaConfig {
+    bool   in_arena              = true;
+    double width_mm              = 2400.0;
+    double length_mm             = 3600.0;
+    double validation_tol_mm     = 100.0;
+    double validation_tol_rad    = 5.0 * M_PI / 180.0;
+    double home_sanity_tol_mm    = 50.0;
+    double home_sanity_tol_rad   = 3.0 * M_PI / 180.0;
+    int    kidnap_threshold      = 5;
+    double relocalize_grid_mm    = 300.0;
+    double relocalize_grid_rad   = 30.0 * M_PI / 180.0;
+};
+
+// Build the four-segment analytical rectangle: home wall behind the robot at
+// x=0, far wall at x=length_mm, side walls at y=±width_mm/2. Normals point
+// into the arena so Cox's residual is positive for interior points (matches
+// the convention in src/cox.cpp:45).
+std::vector<LineSeg> build_arena_map(double width_mm, double length_mm);
+
+// Compare observed RANSAC walls against the analytical rectangle. Returns
+// true iff every observed wall matches one of the expected walls within
+// the given tolerances. Accepts (n, r) == (-n, -r) (RANSAC always emits
+// positive r, two expected walls have negative r). A *missing* expected
+// wall is OK (corner occlusion); an *extra* observed wall that matches
+// nothing is a fail. Logs unmatched walls.
+bool validate_arena_walls(const std::vector<LineSeg>& expected,
+                          const std::vector<LineSeg>& observed,
+                          double tol_mm, double tol_rad);
 
 namespace calib {
 

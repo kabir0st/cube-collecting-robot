@@ -12,4 +12,9 @@ namespace app {
     extern std::atomic<bool> lidar_ready;
     extern std::atomic<bool> lidar_stop;
     extern std::atomic<bool> obstacle_ahead;
+    // Set true while loop_scan_cox_estimation is running a kidnap-recovery
+    // grid sweep. loop_control reads this and halts the motors for the
+    // duration of the sweep so we don't drive blind while the KF is being
+    // re-pinned.
+    extern std::atomic<bool> relocalizing;
 }

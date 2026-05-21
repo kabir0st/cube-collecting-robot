@@ -48,6 +48,11 @@ public:
     void start();
     void abort();
 
+    // Load mission geometry from config (overrides constructor defaults).
+    // Must be called from the owner thread before start() or go_to().
+    void configure(double home_x, double home_y, double home_theta,
+                   double home_margin, double arm_length);
+
     // Lab/bench entry: drive to (x, y, theta) via a B-cubic spline +
     // PurePursuit (TERMINAL_ROTATE enforces the final heading). Allowed from
     // IDLE / DONE / SAFE_STOP / GOTO. Latches the target and transitions to

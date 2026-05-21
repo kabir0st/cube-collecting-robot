@@ -30,6 +30,33 @@ mission:
   # robot's arms length
   arm_length_mm: 80.0
 
+arena:
+  # When true, ignore the RANSAC map and register Cox against the hard-coded
+  # 2.4 x 3.6 m rectangle below. RANSAC still runs once at boot, but only to
+  # validate that the extracted walls are consistent with the analytical
+  # geometry. Set false to fall back to the legacy "build a fresh map from
+  # the calibration scan" behaviour.
+  in_arena: true
+  # Rectangle dimensions. width = y-extent (the 2.4 m wall behind/ahead of
+  # the robot at home); length = x-extent (the 3.6 m walls to the left/right
+  # of the start pose).
+  arena_width_mm: 2400.0
+  arena_length_mm: 3600.0
+  # Wall match tolerance for the validator.
+  validation_tol_mm: 100.0
+  validation_tol_deg: 5.0
+  # Home sanity-check: after boot, Cox is run once from (0,0,home_theta);
+  # if the converged pose drifts by more than these tolerances the run is
+  # aborted (robot was placed somewhere other than home).
+  home_sanity_tol_mm: 50.0
+  home_sanity_tol_deg: 3.0
+  # Kidnap recovery: number of consecutive Cox rejections that triggers a
+  # full-arena coarse-grid re-localization sweep. While the sweep runs, the
+  # motor loop holds the wheels still.
+  kidnap_threshold: 5
+  relocalize_grid_step_mm: 300.0
+  relocalize_grid_step_deg: 30.0
+
 logger:
   # Lab-3 file logging (logs/<run_id>_{odom,cox,kalman}.txt).
   files_enabled: true

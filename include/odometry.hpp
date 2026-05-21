@@ -32,6 +32,4 @@ private:
     int     _buf_idx = 0;
     double  _last_l_med = 0.0;
     double  _last_r_med = 0.0;
-    double  _k_left  = 0.001;
-    double  _k_right = 0.001;
 };

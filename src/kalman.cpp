@@ -26,10 +26,14 @@ namespace {
 }
 
 Pose2DCov KalmanFilter::default_cov() {
+    // Used (a) at boot, before the home sanity-check, and (b) right after
+    // sanity-check passes (re-pin to exact home). After (b) we know we're
+    // at home within arena.home_sanity_tol_mm / _deg, so initial sigma is
+    // about half the sanity tolerance.
     Pose2DCov c;
-    c.xx = 50.0 * 50.0; // sigma_x = 50 mm
-    c.yy = 50.0 * 50.0; // sigma_y = 50 mm
-    const double st = 5.0 * M_PI / 180.0; // sigma_theta = 5 deg
+    c.xx = 25.0 * 25.0; // sigma_x = 25 mm
+    c.yy = 25.0 * 25.0; // sigma_y = 25 mm
+    const double st = 2.0 * M_PI / 180.0; // sigma_theta = 2 deg
     c.tt = st * st;
     return c;
 }

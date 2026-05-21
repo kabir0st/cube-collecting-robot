@@ -57,6 +57,21 @@ StateMachine::StateMachine(TrackerResult& vision,
     _last_replan_at = now;
 }
 
+void StateMachine::configure(double home_x, double home_y, double home_theta,
+                             double home_margin, double arm_length) {
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _home_x        = home_x;
+        _home_y        = home_y;
+        _home_theta    = home_theta;
+        _home_margin   = home_margin;
+        _arm_length_mm = arm_length;
+    }
+    LOG("Mission") << "configure(): home=(" << home_x << ", " << home_y
+                   << ", " << home_theta << " rad), margin=" << home_margin
+                   << " mm, arm=" << arm_length << " mm";
+}
+
 void StateMachine::start() {
     // Allow start() from any terminal state (IDLE / DONE / SAFE_STOP) so the
     // mission can be re-run without restarting the process.

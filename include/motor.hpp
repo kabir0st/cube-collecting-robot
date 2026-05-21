@@ -11,7 +11,7 @@
 class Motor {
     public:
         // Drive-train constants
-        static constexpr double TICKS_PER_MM = 169.82;
+        static constexpr double TICKS_PER_MM = 70.4;
         static constexpr double WHEELBASE_MM = 185.0;
 
         Motor();
@@ -38,22 +38,17 @@ class Motor {
         // actually seeing, not the upstream target.
         void get_current_v_w(double& v_mm_s, double& omega_rad_s) const;
 
-        void get_spi_stats(uint64_t& rejects, uint64_t& give_ups) const;
+        void get_spi_stats(uint64_t& rejects) const;
 
     private:
         void _loop_motor_read_write();
         mutable std::mutex _mutex_motor;
-        int16_t _set_left = 0,  _set_right = 0;
-        int16_t _act_left = 0,  _act_right = 0;
-        int32_t _enc_left = 0,  _enc_right = 0;
-        int32_t _enc_left_noise = 0,  _enc_right_noise = 0;
-
         int64_t _enc_left_acc  = 0;
         int64_t _enc_right_acc = 0;
 
         int32_t _last_acc_left = 0, _last_acc_right = 0;
         std::chrono::steady_clock::time_point _last_acc_ts;
-        uint64_t _spi_reject_count = 0, _spi_give_up_count = 0;
+        uint64_t _spi_reject_count = 0;
 
         // Setpoint smoother. _v_target/_w_target are the upstream request;
         // _v_cur/_w_cur are what the IO loop ramps and actually sends.

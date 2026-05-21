@@ -2,11 +2,14 @@
 #include <cmath>
 #include <map>
 #include <cstring>
+#include <limits>
 
+#include <calibrations.hpp>
 #include <cox.hpp>
 #include <types.hpp>
 #include <utils.hpp>
 #include <global.hpp>
+#include <loggers.hpp>
 #include <thread>
 #include <iostream>
 #include <Eigen/Cholesky>
@@ -226,9 +229,109 @@ PosEstimate CoxScanMatchAlgorithm::estimate(Pos2D init_pos) {
     return out;
 }
 
+namespace {
+
+// Trust gate for Cox measurements before they're fused into the EKF.
+// Against the analytical 4-segment map, well-formed scans typically converge
+// to sigma_xy ~ 5-15 mm and sigma_theta ~ 0.5-1.5 deg. Numbers above this
+// gate indicate a bad initial seed, a shove in progress, or a degenerate
+// scan (e.g. corridor view of just one wall) and should be rejected. Looser
+// values were appropriate against the noisy RANSAC map -- with an exact
+// map we can be much stricter, which also makes the kidnap-detection
+// counter trigger faster.
+constexpr int   MIN_INLIERS     = 10;
+constexpr float MAX_SIGMA_XY    = 30.0f;   // mm  (~3 cm 1sigma)
+constexpr float MAX_SIGMA_THETA = 0.035f;  // rad (~2 deg)
+
+bool cox_trusted(const PosEstimate& est) {
+    return est.converged
+        && est.inliers >= MIN_INLIERS
+        && est.sigma_x <  MAX_SIGMA_XY
+        && est.sigma_y <  MAX_SIGMA_XY
+        && est.sigma_a <  MAX_SIGMA_THETA;
+}
+
+// Coarse grid search across the arena. Iterate every (x, y, theta) seed and
+// keep the Cox result with the most inliers (tie-break: smallest combined
+// sigma) that still passes the standard trust gate. Returns true on success
+// and writes the winning estimate to `out`. The arena bounding box comes
+// from calib::get_arena_bounds() which was populated when the reference
+// map was built.
+bool relocalize_grid_sweep(CoxScanMatchAlgorithm& scan_cox,
+                           double grid_mm, double grid_rad,
+                           PosEstimate& out) {
+    calib::ArenaBounds ab;
+    if (!calib::get_arena_bounds(ab)) {
+        LOGE("Cox") << "relocalize sweep: arena bounds not published";
+        return false;
+    }
+    // Pull in slightly from the wall so seeds aren't on the boundary.
+    const double margin = 100.0;
+    const double x_min = ab.min_x + margin;
+    const double x_max = ab.max_x - margin;
+    const double y_min = ab.min_y + margin;
+    const double y_max = ab.max_y - margin;
+    if (x_max <= x_min || y_max <= y_min || grid_mm <= 0.0 || grid_rad <= 0.0) {
+        LOGE("Cox") << "relocalize sweep: degenerate grid (bounds "
+                    << x_min << ".." << x_max << ", " << y_min << ".." << y_max
+                    << ", step " << grid_mm << " mm / " << grid_rad << " rad)";
+        return false;
+    }
+
+    int    best_inliers = -1;
+    float  best_sigma   = std::numeric_limits<float>::infinity();
+    PosEstimate best{};
+    int    tested = 0;
+
+    for (double x = x_min; x <= x_max + 1e-6; x += grid_mm) {
+        for (double y = y_min; y <= y_max + 1e-6; y += grid_mm) {
+            for (double th = -M_PI; th < M_PI - 1e-6; th += grid_rad) {
+                Pos2D seed(x, y, th);
+                PosEstimate est = scan_cox.estimate(seed);
+                ++tested;
+                if (!cox_trusted(est)) continue;
+                const float sig_sum = est.sigma_x + est.sigma_y;
+                if (est.inliers > best_inliers ||
+                    (est.inliers == best_inliers && sig_sum < best_sigma)) {
+                    best_inliers = est.inliers;
+                    best_sigma   = sig_sum;
+                    best         = est;
+                }
+                if (app::shutdown.load()) return false;
+            }
+        }
+    }
+    if (best_inliers < 0) {
+        LOGE("Cox") << "relocalize sweep: no trusted result across "
+                    << tested << " seeds";
+        return false;
+    }
+    LOG("Cox") << "relocalize sweep: winner at ("
+               << best.pos.x << ", " << best.pos.y << ", "
+               << (best.pos.theta * 180.0 / M_PI) << " deg) inliers="
+               << best.inliers << " sigma=(" << best.sigma_x << ", "
+               << best.sigma_y << ")  -- tested " << tested << " seeds";
+    out = best;
+    return true;
+}
+
+Pose2DCov moderate_recovery_cov() {
+    Pose2DCov R;
+    R.xx = 100.0 * 100.0;
+    R.yy = 100.0 * 100.0;
+    const double st = 5.0 * M_PI / 180.0;
+    R.tt = st * st;
+    return R;
+}
+
+}  // namespace
+
 void loop_scan_cox_estimation(
     std::vector<LineSeg>& ref_map, LidarData& lidar_data,
-    Dashboard& dash, KalmanFilter& kf) {
+    Dashboard& dash, KalmanFilter& kf,
+    int kidnap_threshold,
+    double relocalize_grid_mm,
+    double relocalize_grid_rad) {
     Pos2D current_pos {
         0.0,0.0,0.0
     };
@@ -242,6 +345,7 @@ void loop_scan_cox_estimation(
         0, 0, 0,  // sigma values
         0, 0, false  // itr, inliers, converged
     };
+    int consecutive_rejects = 0;
     while (!app::shutdown && !app::lidar_stop)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -253,14 +357,7 @@ void loop_scan_cox_estimation(
         current_pos = seed;
         est = scan_cox.estimate(current_pos);
 
-        constexpr int   MIN_INLIERS     = 10;
-        constexpr float MAX_SIGMA_XY    = 100.0f;  // mm  (~10 cm 1sigma)
-        constexpr float MAX_SIGMA_THETA = 0.087f;  // rad (~5 deg)
-        const bool trusted = est.converged
-                          && est.inliers >= MIN_INLIERS
-                          && est.sigma_x <  MAX_SIGMA_XY
-                          && est.sigma_y <  MAX_SIGMA_XY
-                          && est.sigma_a <  MAX_SIGMA_THETA;
+        const bool trusted = cox_trusted(est);
         if (trusted) {
             // Fuse the scan-match into the KF as a full-pose measurement.
             Pos2D z;
@@ -273,6 +370,33 @@ void loop_scan_cox_estimation(
             R.tt = est.cov[8];
             kf.correct(z, R);
             current_pos = est.pos;
+            consecutive_rejects = 0;
+        } else {
+            ++consecutive_rejects;
+        }
+
+        if (kidnap_threshold > 0 && consecutive_rejects >= kidnap_threshold) {
+            LOGE("Cox") << "Kidnap suspected: " << consecutive_rejects
+                        << " consecutive rejected scans -- starting "
+                        << "relocalize sweep.";
+            app::relocalizing.store(true);
+            PosEstimate winner{};
+            const bool found = relocalize_grid_sweep(
+                scan_cox, relocalize_grid_mm, relocalize_grid_rad, winner);
+            if (found) {
+                kf.reset(winner.pos, moderate_recovery_cov());
+                current_pos = winner.pos;
+                est = winner;
+                consecutive_rejects = 0;
+                app::relocalizing.store(false);
+                LOG("Cox") << "Relocalize OK -- KF re-pinned, resuming.";
+            } else {
+                app::relocalizing.store(false);
+                LOGE("Cox") << "Relocalize failed -- robot is lost. "
+                            << "Shutting down.";
+                app::shutdown.store(true);
+                break;
+            }
         }
 
         // using both trusted and untrusted to logger
