@@ -35,7 +35,7 @@ arena:
     max_iters_per_line: 200
     inlier_points_req: 20
     min_inlier_fraction: 0.10
-    max_lines: 4
+    max_lines: 5
     endpoint_padding_mm: 50.0
     min_segment_len_mm: 500.0
   ransac_room:

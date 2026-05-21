@@ -70,7 +70,8 @@ class TelemetryState:
                 if scan and self.pose is not None:
                     a = np.asarray([s[0] for s in scan], dtype=float)
                     r = np.asarray([s[1] for s in scan], dtype=float)
-                    mask = np.isfinite(a) & np.isfinite(r) & (r > 0) & (r < SCAN_MAX_R_MM)
+                    mask = (np.isfinite(a) & np.isfinite(r)
+                            & (r > 0) & (r < SCAN_MAX_R_MM))
                     a = a[mask]
                     r = r[mask]
                     px, py, pth = self.pose
@@ -108,14 +109,6 @@ def udp_thread(state: TelemetryState):
         buf = b""
 
 
-def fit_axes_to_map(ax, walls):
-    xs = np.concatenate([walls[:, 0], walls[:, 2]])
-    ys = np.concatenate([walls[:, 1], walls[:, 3]])
-    pad = 300.0
-    ax.set_xlim(xs.min() - pad, xs.max() + pad)
-    ax.set_ylim(ys.min() - pad, ys.max() + pad)
-
-
 def main():
     state = TelemetryState()
     t = threading.Thread(target=udp_thread, args=(state,), daemon=True)
@@ -127,8 +120,9 @@ def main():
     ax.set_ylabel("y [mm]")
     ax.grid(True, alpha=0.3)
     ax.set_title("Robot telemetry — waiting for data…")
-    ax.set_xlim(-2000, 2000)
-    ax.set_ylim(-2000, 2000)
+    # Fixed 3 m x 3 m window centered on origin (mm).
+    ax.set_xlim(-1500, 1500)
+    ax.set_ylim(-1500, 1500)
 
     walls_artist = LineCollection([], colors="gray", linewidths=2.0, zorder=1)
     ax.add_collection(walls_artist)
@@ -156,8 +150,6 @@ def main():
 
     ax.legend(loc="upper right", fontsize=8)
 
-    axes_fitted = [False]
-
     def update(_frame):
         with state.lock:
             walls = state.map_walls
@@ -174,9 +166,6 @@ def main():
         if have_map and walls is not None:
             segs = walls.reshape(-1, 2, 2)  # (N,2,2): [[ax,ay],[bx,by]]
             walls_artist.set_segments(segs)
-            if not axes_fitted[0]:
-                fit_axes_to_map(ax, walls)
-                axes_fitted[0] = True
 
         if scan is not None and len(scan):
             scan_artist.set_data(scan[:, 0], scan[:, 1])
@@ -231,8 +220,9 @@ def main():
         return (walls_artist, scan_artist, path_artist, target_artist,
                 goal_artist, robot_artist, trail_artist, ellipse_artist)
 
-    _anim = FuncAnimation(fig, update, interval=50, blit=False,
-                          cache_frame_data=False)
+    anim = FuncAnimation(fig, update, interval=50, blit=False,
+                         cache_frame_data=False)
+    fig._anim = anim  # keep a reference so GC doesn't drop the animation
     plt.tight_layout()
     plt.show()
 
