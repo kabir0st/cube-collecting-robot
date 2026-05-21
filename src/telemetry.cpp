@@ -23,7 +23,7 @@ std::mutex g_send_mtx;
 int  g_sock        = -1;
 bool g_enabled     = false;
 int  g_subsample   = 2;
-sockaddr_in g_dst{};
+sockaddr_in g_dst;
 
 std::mutex g_map_mtx;
 std::vector<LineSeg> g_last_map;

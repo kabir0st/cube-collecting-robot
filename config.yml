@@ -57,7 +57,7 @@ logger:
   # Lab-4 UDP stream to Matlab listener.
   udp_enabled: true
   out_dir: logs
-  udp_host: 127.0.0.1
+  udp_host: 169.254.6.52
   udp_port: 5005
   # Sample period for both file writes and UDP packets. 100 ms matches the
   # Lab-3 spec; raise to e.g. 50 for higher-rate plotting if Matlab can keep
