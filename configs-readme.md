@@ -47,15 +47,17 @@ Home is centered on the robot's **starting pose** (world origin). The home zone 
 
 The reference map for cox localization is built from ~50 lidar frames at boot using RANSAC. There is no hardcoded arena geometry — walls are whatever the lidar finds.
 
+Defaults are tuned for a **rectangular arena with 1-2 other robots inside**: tight inlier gates keep walls straight, high inlier requirements reject robot-body clusters, and the segment-length filter discards anything shorter than a real wall.
+
 | Key | Default | What it does | Increase / Decrease effect |
 |---|---|---|---|
-| `map.ransac.inlier_thresh_mm` | `40.0` | Perpendicular distance gate for line inliers. | **Increase:** tolerates more clutter/noise. **Decrease:** stricter. |
-| `map.ransac.max_iters_per_line` | `300` | RANSAC trials per line. | **Increase:** more robust, slower. **Decrease:** faster. |
-| `map.ransac.inlier_points_req` | `10` | Minimum inliers for a line. | **Increase:** stricter. **Decrease:** accepts weaker lines. |
-| `map.ransac.min_inlier_fraction` | `0.02` | Minimum fraction of points that must be inliers. | **Increase:** stricter, may fail in clutter. **Decrease:** permissive. |
-| `map.ransac.max_lines` | `10` | Cap on walls extracted. | **Increase:** allows more candidates. **Decrease:** fewer lines. |
+| `map.ransac.inlier_thresh_mm` | `25.0` | Perpendicular distance gate for line inliers. | **Increase:** tolerates more noise; risks fitting around obstacles. **Decrease:** tighter fits, may drop noisy wall points. |
+| `map.ransac.max_iters_per_line` | `400` | RANSAC trials per line. | **Increase:** more robust under robot occlusion, slower. **Decrease:** faster. |
+| `map.ransac.inlier_points_req` | `30` | Minimum inliers (angle-averaged points) for a line. | **Increase:** stricter, rejects robots more aggressively but may miss partially-occluded walls. **Decrease:** accepts weaker lines (may mis-fit robots). |
+| `map.ransac.min_inlier_fraction` | `0.06` | Minimum fraction of points that must be inliers. | **Increase:** stricter; stops RANSAC sooner. **Decrease:** more permissive. |
+| `map.ransac.max_lines` | `6` | Cap on walls extracted. 4 walls + 2 slack for occlusion-split walls. | **Increase:** allows more candidates (risk clutter). **Decrease:** fewer lines. |
 | `map.ransac.endpoint_padding_mm` | `50.0` | Extends wall endpoints for downstream matching. | **Increase:** more forgiving endpoints. **Decrease:** tighter endpoints. |
-| `map.ransac.min_segment_len_mm` | `800.0` | Reject segments shorter than this. | **Increase:** filters furniture edges more aggressively. **Decrease:** allows shorter segments. |
+| `map.ransac.min_segment_len_mm` | `600.0` | Reject segments shorter than this. Robot bodies are ≤ 400 mm wide. | **Increase:** filters robots more aggressively, may drop short walls. **Decrease:** allows shorter segments (risk fitting robot edges). |
 
 ### `logger`
 

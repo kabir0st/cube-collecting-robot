@@ -78,17 +78,17 @@ int main() {
     mission.arm_length_mm = cfg.get_dbl("mission.arm_length_mm",   mission.arm_length_mm);
     const double mission_home_theta = mission.home_theta;
 
-    // RANSAC parameters for the boot-time lidar map build. Defaults match
-    // the looser room-style preset since the analytical arena map has been
-    // retired.
+    // RANSAC parameters for the boot-time lidar map build. Defaults tuned
+    // for a rectangular arena with 1-2 other robots inside (see config.yml
+    // map.ransac block for the rationale per key).
     RansacParams map_ransac;
-    map_ransac.inlier_thresh_mm    = cfg.get_dbl("map.ransac.inlier_thresh_mm",    40.0);
-    map_ransac.max_iters_per_line  = cfg.get_int("map.ransac.max_iters_per_line",  300);
-    map_ransac.inlier_points_req   = cfg.get_int("map.ransac.inlier_points_req",   10);
-    map_ransac.min_inlier_fraction = cfg.get_dbl("map.ransac.min_inlier_fraction", 0.02);
-    map_ransac.max_lines           = cfg.get_int("map.ransac.max_lines",           10);
+    map_ransac.inlier_thresh_mm    = cfg.get_dbl("map.ransac.inlier_thresh_mm",    25.0);
+    map_ransac.max_iters_per_line  = cfg.get_int("map.ransac.max_iters_per_line",  400);
+    map_ransac.inlier_points_req   = cfg.get_int("map.ransac.inlier_points_req",   30);
+    map_ransac.min_inlier_fraction = cfg.get_dbl("map.ransac.min_inlier_fraction", 0.06);
+    map_ransac.max_lines           = cfg.get_int("map.ransac.max_lines",           6);
     map_ransac.endpoint_padding_mm = cfg.get_dbl("map.ransac.endpoint_padding_mm", 50.0);
-    map_ransac.min_segment_len_mm  = cfg.get_dbl("map.ransac.min_segment_len_mm",  800.0);
+    map_ransac.min_segment_len_mm  = cfg.get_dbl("map.ransac.min_segment_len_mm",  600.0);
 
     LOG("Main") << "Map RANSAC: max_lines=" << map_ransac.max_lines
                 << " min_seg=" << map_ransac.min_segment_len_mm

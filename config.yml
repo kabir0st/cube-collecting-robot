@@ -34,16 +34,34 @@ mission:
 
 map:
   # The reference map is built from ~50 lidar frames at boot via RANSAC.
-  # No hardcoded geometry — walls are whatever the lidar finds. Tune these
-  # for the actual operating environment.
+  # No hardcoded geometry — walls are whatever the lidar finds.
+  #
+  # Tuned for a RECTANGULAR ARENA with 1-2 other robots inside:
+  #   - Walls are long & straight: tight inlier gate, high inlier req.
+  #   - Other robots span ~5-15 angle bins (300-500 mm of arc); we don't
+  #     want them mis-fit as walls. Long min_segment_len + high
+  #     inlier_points_req filters them out.
+  #   - Robots can occlude wall sections; max_lines > 4 gives slack so a
+  #     wall split into two visible pieces still both fit.
   ransac:
-    inlier_thresh_mm: 40.0
-    max_iters_per_line: 300
-    inlier_points_req: 10
-    min_inlier_fraction: 0.02
-    max_lines: 10
+    # Tight gate — arena walls are straight; tolerate a couple cm of
+    # lidar noise but no more.
+    inlier_thresh_mm: 25.0
+    # More trials per line so the partial-occlusion case (robot blocking
+    # the middle of a wall) still finds the dominant line.
+    max_iters_per_line: 400
+    # A small robot contributes ~5-15 angle-averaged points. Requiring 30
+    # rejects robot bodies while passing partially-occluded walls.
+    inlier_points_req: 30
+    # ~360 angle bins; a wall ≈ 60-100 bins (≈ 17-28% of points). 6%
+    # rejects robots (≈ 1-4%) and stops RANSAC once walls are exhausted.
+    min_inlier_fraction: 0.06
+    # 4 walls expected, +2 slack for occlusion-split walls.
+    max_lines: 6
     endpoint_padding_mm: 50.0
-    min_segment_len_mm: 800.0
+    # Robot body footprint ≤ ~400 mm. 600 mm rejects robot edges while
+    # accepting any plausible arena wall.
+    min_segment_len_mm: 600.0
 
 logger:
   # Lab-3 file logging (logs/<run_id>_{odom,cox,kalman}.txt).
