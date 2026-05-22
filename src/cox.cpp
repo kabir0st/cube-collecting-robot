@@ -23,17 +23,11 @@ namespace {
     const float MAX_GATE_MM = 150.0f;
     const float MIN_GATE_MM  = 8.0f;
 
-    // LiDAR mount offset: angle from the robot's +x (forward) to the
-    // LiDAR's 0° scan direction, measured CCW. Added to every ray's CCW
-    // angle before the cartesian conversion so pts_lidar ends up in the
-    // robot's body frame — matching the convention used by the KF and
-    // odometry (forward = +x, left = +y, θ CCW). Adjust this if pushing
-    // the robot forward does *not* make Cox.X increase.
-    //   0      : LiDAR's 0° already points forward
-    //   -π/2   : LiDAR's 0° points to the robot's right (LiDAR rotated 90° CW)
-    //   +π/2   : LiDAR's 0° points to the robot's left  (LiDAR rotated 90° CCW)
-    //    π     : LiDAR's 0° points backward
-    constexpr float LIDAR_MOUNT_OFFSET_RAD = -static_cast<float>(M_PI) / 2.0f;
+    // Shared with calibrations.cpp::find_walls via include/global.hpp so
+    // the reference map and the per-tick scans use the same body-frame
+    // transform.
+    constexpr float LIDAR_MOUNT_OFFSET_F =
+        static_cast<float>(::LIDAR_MOUNT_OFFSET_RAD);
 
     // Find the wall whose perpendicular distance to (pwx, pwy) is smallest.
     // Returns the wall index or -1 if no wall qualifies. y_signed is set to
@@ -108,8 +102,8 @@ PosEstimate CoxScanMatchAlgorithm::estimate(Pos2D init_pos) {
     }
     for (int i = 0; i < N; ++i) {
         // LiDAR CW → math CCW, then rotate into the robot body frame so
-        // forward = +x. See LIDAR_MOUNT_OFFSET_RAD above for the sign.
-        const float a = -angles[i] * (M_PI / 180.0f) + LIDAR_MOUNT_OFFSET_RAD;
+        // forward = +x. See LIDAR_MOUNT_OFFSET_RAD in global.hpp for the sign.
+        const float a = -angles[i] * (M_PI / 180.0f) + LIDAR_MOUNT_OFFSET_F;
         pts_lidar(0, i) = dist_s[i] * std::cos(a);
         pts_lidar(1, i) = dist_s[i] * std::sin(a);
     }
@@ -231,65 +225,64 @@ PosEstimate CoxScanMatchAlgorithm::estimate(Pos2D init_pos) {
 
 namespace {
 
-// Trust gate for Cox measurements before they're fused into the EKF.
-// Against the analytical 4-segment map, well-formed scans typically converge
-// to sigma_xy ~ 5-15 mm and sigma_theta ~ 0.5-1.5 deg. Numbers above this
-// gate indicate a bad initial seed, a shove in progress, or a degenerate
-// scan (e.g. corridor view of just one wall) and should be rejected. Looser
-// values were appropriate against the noisy RANSAC map -- with an exact
-// map we can be much stricter, which also makes the kidnap-detection
-// counter trigger faster.
-constexpr int   MIN_INLIERS     = 10;
-constexpr float MAX_SIGMA_XY    = 30.0f;   // mm  (~3 cm 1sigma)
-constexpr float MAX_SIGMA_THETA = 0.035f;  // rad (~2 deg)
+// Two gates, used in different places:
+//
+//   cox_can_fuse(): loose sanity floor. If true, we hand the estimate to
+//   kf.correct() and let the KF's R-weighted gain do the work -- a noisy
+//   cox (large sigma) automatically produces a weak correction, so we
+//   gain nothing by gatekeeping ourselves. We only refuse if cox didn't
+//   converge or came back with almost no inliers (genuine garbage).
+//
+//   cox_strong_fix(): strict gate, used only to accept a relocalize sweep
+//   winner. Because we're about to kf.reset() to it (blowing away prior
+//   state), we need high confidence.
+constexpr int   MIN_INLIERS_FUSE     = 6;
 
-bool cox_trusted(const PosEstimate& est) {
-    return est.converged
-        && est.inliers >= MIN_INLIERS
-        && est.sigma_x <  MAX_SIGMA_XY
-        && est.sigma_y <  MAX_SIGMA_XY
-        && est.sigma_a <  MAX_SIGMA_THETA;
+constexpr int   MIN_INLIERS_FIX      = 15;
+constexpr float MAX_SIGMA_XY_FIX     = 30.0f;   // mm  (~3 cm 1sigma)
+constexpr float MAX_SIGMA_THETA_FIX  = 0.035f;  // rad (~2 deg)
+
+bool cox_can_fuse(const PosEstimate& est) {
+    return est.converged && est.inliers >= MIN_INLIERS_FUSE;
 }
 
-// Coarse grid search across the arena. Iterate every (x, y, theta) seed and
-// keep the Cox result with the most inliers (tie-break: smallest combined
-// sigma) that still passes the standard trust gate. Returns true on success
-// and writes the winning estimate to `out`. The arena bounding box comes
-// from calib::get_arena_bounds() which was populated when the reference
-// map was built.
-bool relocalize_grid_sweep(CoxScanMatchAlgorithm& scan_cox,
-                           double grid_mm, double grid_rad,
-                           PosEstimate& out) {
-    calib::ArenaBounds ab;
-    if (!calib::get_arena_bounds(ab)) {
-        LOGE("Cox") << "relocalize sweep: arena bounds not published";
-        return false;
-    }
-    // Pull in slightly from the wall so seeds aren't on the boundary.
-    const double margin = 100.0;
-    const double x_min = ab.min_x + margin;
-    const double x_max = ab.max_x - margin;
-    const double y_min = ab.min_y + margin;
-    const double y_max = ab.max_y - margin;
-    if (x_max <= x_min || y_max <= y_min || grid_mm <= 0.0 || grid_rad <= 0.0) {
-        LOGE("Cox") << "relocalize sweep: degenerate grid (bounds "
-                    << x_min << ".." << x_max << ", " << y_min << ".." << y_max
-                    << ", step " << grid_mm << " mm / " << grid_rad << " rad)";
-        return false;
-    }
+bool cox_strong_fix(const PosEstimate& est) {
+    return est.converged
+        && est.inliers >= MIN_INLIERS_FIX
+        && est.sigma_x <  MAX_SIGMA_XY_FIX
+        && est.sigma_y <  MAX_SIGMA_XY_FIX
+        && est.sigma_a <  MAX_SIGMA_THETA_FIX;
+}
+
+// LOCAL relocalize sweep. The professor only nudges the robot a bit, so
+// the true pose stays within a small window around the current KF pose.
+// We sweep a ±HALF_XY_MM by ±HALF_THETA_RAD box centered on the KF pose,
+// run cox from each seed, and keep the strongest fix (most inliers,
+// tie-break = smallest combined sigma). Returns false if no seed yields a
+// strong fix; caller should keep predicting and try again next cycle.
+bool relocalize_local_sweep(CoxScanMatchAlgorithm& scan_cox,
+                            const Pos2D& center,
+                            PosEstimate& out) {
+    // Window large enough to absorb a meaningful shove but small enough
+    // to finish in ~1-2 s. Grid step picked to fit inside cox's basin of
+    // convergence on the arena map (~100 mm / ~15 deg).
+    constexpr double HALF_XY_MM    = 300.0;
+    constexpr double GRID_MM       = 100.0;
+    constexpr double HALF_THETA    = M_PI / 4.0;        // ±45°
+    constexpr double GRID_RAD      = 15.0 * M_PI / 180.0;
 
     int    best_inliers = -1;
     float  best_sigma   = std::numeric_limits<float>::infinity();
     PosEstimate best{};
     int    tested = 0;
 
-    for (double x = x_min; x <= x_max + 1e-6; x += grid_mm) {
-        for (double y = y_min; y <= y_max + 1e-6; y += grid_mm) {
-            for (double th = -M_PI; th < M_PI - 1e-6; th += grid_rad) {
-                Pos2D seed(x, y, th);
+    for (double dx = -HALF_XY_MM; dx <= HALF_XY_MM + 1e-6; dx += GRID_MM) {
+        for (double dy = -HALF_XY_MM; dy <= HALF_XY_MM + 1e-6; dy += GRID_MM) {
+            for (double dth = -HALF_THETA; dth <= HALF_THETA + 1e-6; dth += GRID_RAD) {
+                Pos2D seed(center.x + dx, center.y + dy, center.theta + dth);
                 PosEstimate est = scan_cox.estimate(seed);
                 ++tested;
-                if (!cox_trusted(est)) continue;
+                if (!cox_strong_fix(est)) continue;
                 const float sig_sum = est.sigma_x + est.sigma_y;
                 if (est.inliers > best_inliers ||
                     (est.inliers == best_inliers && sig_sum < best_sigma)) {
@@ -302,11 +295,13 @@ bool relocalize_grid_sweep(CoxScanMatchAlgorithm& scan_cox,
         }
     }
     if (best_inliers < 0) {
-        LOGE("Cox") << "relocalize sweep: no trusted result across "
-                    << tested << " seeds";
+        LOGE("Cox") << "relocalize local sweep: no strong fix in "
+                    << tested << " seeds around ("
+                    << center.x << ", " << center.y << ", "
+                    << (center.theta * 180.0 / M_PI) << " deg)";
         return false;
     }
-    LOG("Cox") << "relocalize sweep: winner at ("
+    LOG("Cox") << "relocalize local sweep: winner at ("
                << best.pos.x << ", " << best.pos.y << ", "
                << (best.pos.theta * 180.0 / M_PI) << " deg) inliers="
                << best.inliers << " sigma=(" << best.sigma_x << ", "
@@ -329,31 +324,35 @@ Pose2DCov moderate_recovery_cov() {
 void loop_scan_cox_estimation(
     std::vector<LineSeg>& ref_map, LidarData& lidar_data,
     Dashboard& dash, KalmanFilter& kf) {
-    // Hardcoded grid sweep resolution -- coarse enough to cover the arena
-    // in a couple of seconds, fine enough that cox can converge from one
-    // of the seeds.
-    constexpr double RELOCALIZE_GRID_MM  = 300.0;
-    constexpr double RELOCALIZE_GRID_RAD = 30.0 * M_PI / 180.0;
+    // KF-covariance thresholds for "I'm genuinely lost". This is the
+    // principled signal: cumulative odometry drift + missing or weak cox
+    // corrections push the KF's own confidence past safety. Stricter than
+    // these and a brief cox dropout false-triggers a sweep; looser and
+    // the robot drives blind for too long before recovering.
+    constexpr double KF_LOST_SIGMA_XY_MM = 200.0;
+    constexpr double KF_LOST_SIGMA_TH    = 15.0 * M_PI / 180.0;
 
-    Pos2D current_pos {
-        0.0,0.0,0.0
-    };
+    Pos2D current_pos{0.0, 0.0, 0.0};
     CoxScanMatchAlgorithm scan_cox(ref_map, current_pos, lidar_data);
     PosEstimate est{};
-    while (!app::shutdown && !app::lidar_stop)
-    {
+
+    while (!app::shutdown && !app::lidar_stop) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        // Seed cox from the current KF pose.
         const Pos2D kf_pose = kf.pose();
         Pos2D seed;
         seed.x     = static_cast<float>(kf_pose.x);
         seed.y     = static_cast<float>(kf_pose.y);
         seed.theta = static_cast<float>(kf_pose.theta);
-        current_pos = seed;
-        est = scan_cox.estimate(current_pos);
+        est = scan_cox.estimate(seed);
 
-        bool trusted = cox_trusted(est);
-        if (trusted) {
-            // Fuse the scan-match into the KF as a full-pose measurement.
+        // 1. ALWAYS-FUSE policy. If cox even minimally converged with a
+        //    handful of inliers, hand it to the KF. A noisy cox produces a
+        //    large R, the KF gain shrinks, the correction is weak -- exactly
+        //    what we want. Hard binary trust gates were the old mistake.
+        const bool fuse = cox_can_fuse(est);
+        if (fuse) {
             Pos2D z;
             z.x     = est.pos.x;
             z.y     = est.pos.y;
@@ -363,48 +362,53 @@ void loop_scan_cox_estimation(
             R.yy = est.cov[4]; R.yt = est.cov[5];
             R.tt = est.cov[8];
             kf.correct(z, R);
-            current_pos = est.pos;
-        } else {
-            // Lost: halt the wheels (via app::relocalizing) and grid-sweep
-            // until we find a trusted pose, then resume.
-            LOGE("Cox") << "Cox untrusted -- halting motors, running "
-                        << "relocalize sweep.";
-            app::relocalizing.store(true);
-            while (!app::shutdown && !app::lidar_stop) {
-                PosEstimate winner{};
-                if (relocalize_grid_sweep(scan_cox,
-                                          RELOCALIZE_GRID_MM,
-                                          RELOCALIZE_GRID_RAD,
-                                          winner)) {
-                    kf.reset(winner.pos, moderate_recovery_cov());
-                    current_pos = winner.pos;
-                    est         = winner;
-                    trusted     = true;
-                    LOG("Cox") << "Relocalize OK -- KF re-pinned, resuming.";
-                    break;
-                }
-                LOGE("Cox") << "Relocalize sweep found nothing -- "
-                            << "retrying with fresh scan.";
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            }
-            app::relocalizing.store(false);
-            if (app::shutdown || app::lidar_stop) break;
         }
 
-        // using both trusted and untrusted to logger
-        // logger.on_cox_estimate(est, trusted);
-        // Publish scan-match result to the dashboard. Published every cycle
-        // (trusted or not) so a stale value never appears to be current; the
-        // "status" column reflects whether the pose was accepted.
-        dash.set("Cox", "X_cm", est.pos.x/10);
-        dash.set("Cox", "Y_cm", est.pos.y/10);
-        dash.set("Cox", "Th_deg", est.pos.theta * 180.0f / static_cast<float>(M_PI));
-        dash.set("Cox", "sX_mm", est.sigma_x);
-        dash.set("Cox", "sY_mm", est.sigma_y);
-        dash.set("Cox", "sTh_deg", est.sigma_a * 180.0f / static_cast<float>(M_PI));
-        dash.set("Cox", "inliers", static_cast<int64_t>(est.inliers));
-        dash.set("Cox", "iters",   static_cast<int64_t>(est.itr));
+        // 2. KF-COV-TRIGGERED RELOCALIZE. After the correct above, check
+        //    whether the KF's *own* covariance still says we're lost. A
+        //    single good cox fix above will have pulled cov back down and
+        //    short-circuited this path; only sustained dead reckoning +
+        //    bad/missing cox lets us reach here.
+        Pos2D     kf_now;
+        Pose2DCov cov;
+        kf.snapshot(kf_now, cov);
+        const double sigma_xy = std::sqrt(std::max(cov.xx, cov.yy));
+        const double sigma_th = std::sqrt(std::max(0.0, cov.tt));
+        const bool   kf_lost  = sigma_xy > KF_LOST_SIGMA_XY_MM
+                             || sigma_th > KF_LOST_SIGMA_TH;
+
+        if (kf_lost) {
+            LOGE("Cox") << "KF lost (sigma_xy=" << sigma_xy
+                        << " mm, sigma_th=" << (sigma_th * 180.0 / M_PI)
+                        << " deg) -- halting motors, running local sweep "
+                        << "around (" << kf_now.x << ", " << kf_now.y << ").";
+            app::relocalizing.store(true);
+            PosEstimate winner{};
+            if (relocalize_local_sweep(scan_cox, kf_now, winner)) {
+                kf.reset(winner.pos, moderate_recovery_cov());
+                est = winner;
+                LOG("Cox") << "Relocalize OK -- KF re-pinned, resuming.";
+                app::relocalizing.store(false);
+            } else {
+                // Stay halted; next iteration tries another sweep with a
+                // fresh scan. Don't reset `relocalizing` -- motors stay
+                // down until we have a fix.
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+        }
+
+        // Dashboard. Always publish so a stale value never looks live.
+        dash.set("Cox", "X_cm",     est.pos.x / 10);
+        dash.set("Cox", "Y_cm",     est.pos.y / 10);
+        dash.set("Cox", "Th_deg",   est.pos.theta * 180.0f / static_cast<float>(M_PI));
+        dash.set("Cox", "sX_mm",    est.sigma_x);
+        dash.set("Cox", "sY_mm",    est.sigma_y);
+        dash.set("Cox", "sTh_deg",  est.sigma_a * 180.0f / static_cast<float>(M_PI));
+        dash.set("Cox", "inliers",  static_cast<int64_t>(est.inliers));
+        dash.set("Cox", "iters",    static_cast<int64_t>(est.itr));
         dash.set("Cox", "status",
-                 std::string(trusted ? "OK" : (est.converged ? "weak" : "no-conv")));
+                 std::string(fuse ? "fused"
+                                  : (est.converged ? "weak" : "no-conv")));
+        dash.set("Cox", "kf_lost",  std::string(kf_lost ? "yes" : "no"));
     }
 }

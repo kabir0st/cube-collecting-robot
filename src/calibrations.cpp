@@ -18,6 +18,7 @@
 #include <loggers.hpp>
 #include <utils.hpp>
 #include <types.hpp>
+#include <global.hpp>
 
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
@@ -505,8 +506,11 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
                            static_cast<double>(pts.second.size());
         // Closer than ~8 cm is typically the LIDAR seeing its own chassis/mount.
         if (avg < 80) continue;
-        // converting to radian
-        const double a = pts.first * M_PI / 180.0;
+        // LiDAR CW → math CCW, then rotate into the robot body frame so
+        // forward = +x. Must match cox.cpp's per-scan transform exactly
+        // (otherwise scan and map end up in mirrored frames and Cox can't
+        // converge from any seed). See global.hpp.
+        const double a = -pts.first * M_PI / 180.0 + LIDAR_MOUNT_OFFSET_RAD;
         points.emplace_back(avg * std::cos(a), avg * std::sin(a));
     }
     LOG("MAP") << "Usable Points for MAP : " << points.size();

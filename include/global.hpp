@@ -1,5 +1,17 @@
 #pragma once
 #include <atomic>
+#include <cmath>
+
+// Angle from the robot's +x (forward) to the LIDAR's 0° scan direction,
+// measured CCW. Used both by the scan-matcher (cox.cpp) and by the wall
+// extractor (find_walls in calibrations.cpp) so the reference map and the
+// per-tick scans live in the same body frame.
+//   0      : LiDAR's 0° already points forward
+//   -π/2   : LiDAR's 0° points to the robot's right (LiDAR rotated 90° CW)
+//   +π/2   : LiDAR's 0° points to the robot's left  (LiDAR rotated 90° CCW)
+//    π     : LiDAR's 0° points backward
+// Adjust this if pushing the robot forward does *not* make Cox.X increase.
+constexpr double LIDAR_MOUNT_OFFSET_RAD = -M_PI / 2.0;
 
 // Global speed multiplier applied to every linear/angular velocity cap and
 // acceleration limit. 1.0 = the tuned baseline. Bump up to make the robot
