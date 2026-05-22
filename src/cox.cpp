@@ -66,16 +66,19 @@ namespace {
 }  // namespace
 
 CoxScanMatchAlgorithm::CoxScanMatchAlgorithm(const std::vector<LineSeg> &map,
-                                            Pos2D initial_pos,
                                             LidarData& lidar_data_)
         : walls(map),
-            current_pos(initial_pos),
-            max_itr(30),
+            // 50 iters with tol_d_xy=3 mm: covers cold-seed cases without
+            // wasting cycles on already-tight matches (typical hot-seed
+            // convergence is ~5-10 iters).
+            max_itr(50),
             lidar_data(lidar_data_),
             sigma_r(std::max(5.0f, static_cast<float>(lidar_data_.sensor_noise.load()))),
             gate_k(4.0f),
-            tol_d_xy(1.5f),
-            tol_d_a(1.0e-3f) {
+            // Realistic tolerances: lidar noise is ~10-20 mm so demanding
+            // < 1.5 mm step convergence just exhausts the iter budget.
+            tol_d_xy(3.0f),
+            tol_d_a(2.0e-3f) {
         pts_lidar.resize(2, 4096);
         pts_world.resize(2, 4096);
 }
@@ -128,8 +131,11 @@ PosEstimate CoxScanMatchAlgorithm::estimate(Pos2D init_pos) {
     bool converged  = false;
 
     for (int iter = 0; iter < max_itr; ++iter) {
+        // Slower decay (0.75) so the gate stays wide for the first few
+        // iterations — gives a cold seed (50-100 mm off) room to find the
+        // right correspondences before tightening for accuracy.
         const float gate = std::max(final_gate,
-                                    start_gate * std::pow(0.6f,
+                                    start_gate * std::pow(0.75f,
                                                           static_cast<float>(iter)));
         const float c = std::cos(pose.theta);
         const float s = std::sin(pose.theta);
@@ -233,7 +239,6 @@ PosEstimate CoxScanMatchAlgorithm::estimate(Pos2D init_pos) {
                 out.cond_number = lam_max / lam_min;
             }
         }
-        current_pos = pose;
     }
     return out;
 }
@@ -245,13 +250,16 @@ namespace {
 //   cox_can_fuse(): loose sanity floor. If true, we hand the estimate to
 //   kf.correct() and let the KF's R-weighted gain do the work -- a noisy
 //   cox (large sigma) automatically produces a weak correction, so we
-//   gain nothing by gatekeeping ourselves. We only refuse if cox didn't
-//   converge or came back with almost no inliers (genuine garbage).
+//   gain nothing by gatekeeping ourselves on `converged`. The estimate's
+//   covariance grows with ssq, so a poor-fit pose enters the KF with a
+//   large R and barely moves the state. We only refuse on actual garbage:
+//   too few inliers, or a rank-deficient information matrix (degenerate
+//   geometry like single-wall view).
 //
 //   cox_strong_fix(): strict gate, used only to accept a relocalize sweep
 //   winner. Because we're about to kf.reset() to it (blowing away prior
-//   state), we need high confidence.
-constexpr int   MIN_INLIERS_FUSE     = 6;
+//   state), we need high confidence — there `converged` IS required.
+constexpr int   MIN_INLIERS_FUSE     = 30;
 // Reject rank-deficient information matrices. With the ridge term (1e-3)
 // floor on the smallest eigenvalue, a well-observed scan typically has
 // cond ~ 1e2-1e3; a long-corridor / single-wall scan blows past 1e6. Set
@@ -259,14 +267,16 @@ constexpr int   MIN_INLIERS_FUSE     = 6;
 // rejects while still catching geometric degeneracy.
 constexpr float MAX_COND_FUSE        = 1.0e5f;
 
-constexpr int   MIN_INLIERS_FIX      = 15;
+constexpr int   MIN_INLIERS_FIX      = 30;
 constexpr float MAX_SIGMA_XY_FIX     = 30.0f;   // mm  (~3 cm 1sigma)
 constexpr float MAX_SIGMA_THETA_FIX  = 0.035f;  // rad (~2 deg)
 constexpr float MAX_COND_FIX         = 1.0e4f;
 
 bool cox_can_fuse(const PosEstimate& est) {
-    return est.converged
-        && est.inliers >= MIN_INLIERS_FUSE
+    // Note: `converged` is intentionally NOT in this gate. See block
+    // comment above — a not-quite-converged estimate with healthy inliers
+    // and finite cond is still useful information for the KF.
+    return est.inliers >= MIN_INLIERS_FUSE
         && std::isfinite(est.cond_number)
         && est.cond_number <= MAX_COND_FUSE;
 }
@@ -359,8 +369,7 @@ void loop_scan_cox_estimation(
     constexpr double KF_LOST_SIGMA_XY_MM = 200.0;
     constexpr double KF_LOST_SIGMA_TH    = 15.0 * M_PI / 180.0;
 
-    Pos2D current_pos{0.0, 0.0, 0.0};
-    CoxScanMatchAlgorithm scan_cox(ref_map, current_pos, lidar_data);
+    CoxScanMatchAlgorithm scan_cox(ref_map, lidar_data);
     PosEstimate est{};
 
     while (!app::shutdown && !app::lidar_stop) {
