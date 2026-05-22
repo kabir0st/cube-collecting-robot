@@ -8,7 +8,7 @@ camera:
   capture_distance_mm: 120.0
   capture_bearing_tol_rad: 0.12
   retention_distance_mm: 150.0
-  show_debug_view: false
+  show_debug_view: true
 
 robot:
   # All extents measured from the LIDAR mount point (= the tracked pose
@@ -45,7 +45,7 @@ mission:
   arm_length_mm: 80.0
 
 arena:
-  in_arena: true
+  in_arena: false
   arena_width_mm: 2400.0
   arena_length_mm: 3600.0
   # Wall match tolerance for the validator.
@@ -91,4 +91,4 @@ logger:
   scan_subsample: 2
 
 battery:
-  enabled: true
+  enabled: false
