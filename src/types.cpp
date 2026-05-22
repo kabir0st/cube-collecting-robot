@@ -1,7 +1,7 @@
 #include <types.hpp>
 
 LidarData::LidarData(double noise) {
-    sensor_noise = noise;
+    sensor_noise.store(noise);
     buffer_id.store(0);
     int i = 0;
     for (Frame &f : frames)

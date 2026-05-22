@@ -13,6 +13,7 @@
 #include <thread>
 #include <iostream>
 #include <Eigen/Cholesky>
+#include <Eigen/Eigenvalues>
 #include <Eigen/LU>
 #include <dashboard.hpp>
 #include <kalman.hpp>
@@ -71,7 +72,7 @@ CoxScanMatchAlgorithm::CoxScanMatchAlgorithm(const std::vector<LineSeg> &map,
             current_pos(initial_pos),
             max_itr(30),
             lidar_data(lidar_data_),
-            sigma_r(std::max(5.0f, static_cast<float>(lidar_data_.sensor_noise))),
+            sigma_r(std::max(5.0f, static_cast<float>(lidar_data_.sensor_noise.load()))),
             gate_k(4.0f),
             tol_d_xy(1.5f),
             tol_d_a(1.0e-3f) {
@@ -218,6 +219,20 @@ PosEstimate CoxScanMatchAlgorithm::estimate(Pos2D init_pos) {
         out.sigma_x = std::sqrt(std::max(0.0f, cov(0, 0)));
         out.sigma_y = std::sqrt(std::max(0.0f, cov(1, 1)));
         out.sigma_a = std::sqrt(std::max(0.0f, cov(2, 2)));
+
+        // Information-matrix condition number. A is symmetric PSD; the
+        // SelfAdjointEigenSolver gives sorted real eigenvalues. A long
+        // corridor (one wall visible) produces an A whose smallest
+        // eigenvalue is dominated by the ridge -- so the ratio explodes
+        // and cox_can_fuse() refuses to mix that estimate into the KF.
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> esolve(A);
+        if (esolve.info() == Eigen::Success) {
+            const float lam_min = esolve.eigenvalues()(0);
+            const float lam_max = esolve.eigenvalues()(2);
+            if (lam_min > 0.0f && std::isfinite(lam_max)) {
+                out.cond_number = lam_max / lam_min;
+            }
+        }
         current_pos = pose;
     }
     return out;
@@ -237,13 +252,23 @@ namespace {
 //   winner. Because we're about to kf.reset() to it (blowing away prior
 //   state), we need high confidence.
 constexpr int   MIN_INLIERS_FUSE     = 6;
+// Reject rank-deficient information matrices. With the ridge term (1e-3)
+// floor on the smallest eigenvalue, a well-observed scan typically has
+// cond ~ 1e2-1e3; a long-corridor / single-wall scan blows past 1e6. Set
+// the gate well above the typical "good" upper bound to avoid false
+// rejects while still catching geometric degeneracy.
+constexpr float MAX_COND_FUSE        = 1.0e5f;
 
 constexpr int   MIN_INLIERS_FIX      = 15;
 constexpr float MAX_SIGMA_XY_FIX     = 30.0f;   // mm  (~3 cm 1sigma)
 constexpr float MAX_SIGMA_THETA_FIX  = 0.035f;  // rad (~2 deg)
+constexpr float MAX_COND_FIX         = 1.0e4f;
 
 bool cox_can_fuse(const PosEstimate& est) {
-    return est.converged && est.inliers >= MIN_INLIERS_FUSE;
+    return est.converged
+        && est.inliers >= MIN_INLIERS_FUSE
+        && std::isfinite(est.cond_number)
+        && est.cond_number <= MAX_COND_FUSE;
 }
 
 bool cox_strong_fix(const PosEstimate& est) {
@@ -251,7 +276,9 @@ bool cox_strong_fix(const PosEstimate& est) {
         && est.inliers >= MIN_INLIERS_FIX
         && est.sigma_x <  MAX_SIGMA_XY_FIX
         && est.sigma_y <  MAX_SIGMA_XY_FIX
-        && est.sigma_a <  MAX_SIGMA_THETA_FIX;
+        && est.sigma_a <  MAX_SIGMA_THETA_FIX
+        && std::isfinite(est.cond_number)
+        && est.cond_number <= MAX_COND_FIX;
 }
 
 // LOCAL relocalize sweep. The professor only nudges the robot a bit, so
@@ -406,6 +433,8 @@ void loop_scan_cox_estimation(
         dash.set("Cox", "sTh_deg",  est.sigma_a * 180.0f / static_cast<float>(M_PI));
         dash.set("Cox", "inliers",  static_cast<int64_t>(est.inliers));
         dash.set("Cox", "iters",    static_cast<int64_t>(est.itr));
+        dash.set("Cox", "cond",
+                 std::isfinite(est.cond_number) ? est.cond_number : -1.0f);
         dash.set("Cox", "status",
                  std::string(fuse ? "fused"
                                   : (est.converged ? "weak" : "no-conv")));

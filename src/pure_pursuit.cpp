@@ -66,6 +66,11 @@ PathPoint PurePursuitController::get_active_target() const {
     return _active_target;
 }
 
+bool PurePursuitController::has_active_target() const {
+    std::lock_guard<std::mutex> lk(_m);
+    return _mode != Mode::IDLE && !_path.empty();
+}
+
 std::vector<PathPoint> PurePursuitController::get_path() const {
     std::lock_guard<std::mutex> lk(_m);
     return _path;

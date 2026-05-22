@@ -80,11 +80,25 @@ void loop_vision_tracking(Dashboard& dash,
     // or two-frame HSV blink (~0.53 s at 15 fps).
     constexpr int GRAB_FRAMES      = 8;
     constexpr int RELEASE_FRAMES   = 8;
-    int in_capture_counter       = 0;
-    int out_of_retention_counter = 0;
-    int no_detection_counter     = 0;
-    int in_grab_counter          = 0;
-    int out_of_grab_counter      = 0;
+    // Counters saturate at their thresholds (see clamp_inc) so a long
+    // detection streak / dropout doesn't accumulate boundless integer
+    // values. unsigned makes the saturation intent explicit and removes
+    // any signed-overflow UB question.
+    unsigned in_capture_counter       = 0;
+    unsigned out_of_retention_counter = 0;
+    unsigned no_detection_counter     = 0;
+    unsigned in_grab_counter          = 0;
+    unsigned out_of_grab_counter      = 0;
+    auto clamp_inc = [](unsigned& c, unsigned cap) {
+        if (c < cap) ++c;
+    };
+
+    // Local mirror of the published flags. Single-source-of-truth for the
+    // debounce state machines below; committed in one critical section per
+    // frame via result.commit_flags() so readers never see torn triples.
+    bool flag_captured  = false;
+    bool flag_lost      = true;
+    bool flag_grabbable = false;
 
     auto hz_last_time = std::chrono::steady_clock::now();
     int  hz_frame_count = 0;
@@ -197,23 +211,29 @@ void loop_vision_tracking(Dashboard& dash,
         // -------- Lost state machine --------
         if (detected) {
             no_detection_counter = 0;
-            if (result.lost.load()) {
-                result.lost.store(false);
+            if (flag_lost) {
+                flag_lost = false;
                 LOG("Vision") << "Target re-acquired";
             }
-        } else if (++no_detection_counter >= LOST_FRAMES
-                   && !result.lost.load()) {
-            result.lost.store(true);
-            LOG("Vision") << "LOST (no detection)";
+        } else {
+            clamp_inc(no_detection_counter,
+                      static_cast<unsigned>(LOST_FRAMES));
+            if (no_detection_counter >= static_cast<unsigned>(LOST_FRAMES)
+                && !flag_lost) {
+                flag_lost = true;
+                LOG("Vision") << "LOST (no detection)";
+            }
         }
 
         // -------- Capture / retention state machine --------
         // No-detection naturally feeds in_*_range=false, so the same
         // logic handles dropout-driven release.
-        if (!result.captured.load()) {
+        if (!flag_captured) {
             if (in_capture_range) {
-                if (++in_capture_counter >= CAPTURE_FRAMES) {
-                    result.captured.store(true);
+                clamp_inc(in_capture_counter,
+                          static_cast<unsigned>(CAPTURE_FRAMES));
+                if (in_capture_counter >= static_cast<unsigned>(CAPTURE_FRAMES)) {
+                    flag_captured = true;
                     out_of_retention_counter = 0;
                     LOG("Vision") << "CAPTURED";
                 }
@@ -223,10 +243,15 @@ void loop_vision_tracking(Dashboard& dash,
         } else {
             if (in_retention_range) {
                 out_of_retention_counter = 0;
-            } else if (++out_of_retention_counter >= RETENTION_FRAMES) {
-                result.captured.store(false);
-                in_capture_counter = 0;
-                LOG("Vision") << "Released";
+            } else {
+                clamp_inc(out_of_retention_counter,
+                          static_cast<unsigned>(RETENTION_FRAMES));
+                if (out_of_retention_counter >=
+                        static_cast<unsigned>(RETENTION_FRAMES)) {
+                    flag_captured = false;
+                    in_capture_counter = 0;
+                    LOG("Vision") << "Released";
+                }
             }
         }
 
@@ -235,19 +260,33 @@ void loop_vision_tracking(Dashboard& dash,
         // from `captured`: this is "should the servo close right now?".
         if (grab_gate) {
             out_of_grab_counter = 0;
-            if (!result.grabbable.load()
-                && ++in_grab_counter >= GRAB_FRAMES) {
-                result.grabbable.store(true);
-                LOG("Vision") << "GRABBABLE";
+            if (!flag_grabbable) {
+                clamp_inc(in_grab_counter,
+                          static_cast<unsigned>(GRAB_FRAMES));
+                if (in_grab_counter >= static_cast<unsigned>(GRAB_FRAMES)) {
+                    flag_grabbable = true;
+                    LOG("Vision") << "GRABBABLE";
+                }
             }
         } else {
             in_grab_counter = 0;
-            if (result.grabbable.load()
-                && ++out_of_grab_counter >= RELEASE_FRAMES) {
-                result.grabbable.store(false);
-                LOG("Vision") << "Not grabbable";
+            if (flag_grabbable) {
+                clamp_inc(out_of_grab_counter,
+                          static_cast<unsigned>(RELEASE_FRAMES));
+                if (out_of_grab_counter >=
+                        static_cast<unsigned>(RELEASE_FRAMES)) {
+                    flag_grabbable = false;
+                    LOG("Vision") << "Not grabbable";
+                }
             }
         }
+
+        // Publish all three flags atomically so readers never see a torn
+        // triple. set_target/clear_target above already took the lock for
+        // bearing/dist; this is a separate critical section because the
+        // state-machine logic between then and now consumes the previous
+        // flag values.
+        result.commit_flags(flag_captured, flag_lost, flag_grabbable);
 
         // FPS estimator (averages over ~1 s windows).
         ++hz_frame_count;

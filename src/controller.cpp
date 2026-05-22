@@ -87,6 +87,10 @@ void StateMachine::start() {
     _state.store(State::SEARCH);
     _state_entered = std::chrono::steady_clock::now();
     _approach_attempts = 0;
+    // Fresh mission: drop any stale failed-target avoidance memory so the
+    // operator doesn't have to wait _failed_target_skip_s for the next
+    // mission to engage a box near the previous failure.
+    _last_failed_target_valid = false;
     LOG("Mission") << "start(): " << state_name(now) << " -> SEARCH";
 }
 
@@ -98,6 +102,8 @@ void StateMachine::go_to(double x, double y, double theta) {
                             // pose passed into step(); we only need to flip
                             // the state here. The actual plan is built on
                             // the first step() tick after the transition.
+    bool replaced_pending = false;
+    double prev_x = 0.0, prev_y = 0.0, prev_th = 0.0;
     {
         std::lock_guard<std::mutex> lk(_m);
         const State now = _state.load();
@@ -109,12 +115,20 @@ void StateMachine::go_to(double x, double y, double theta) {
             LOG("Mission") << "go_to() ignored; state = " << state_name(now);
             return;
         }
+        if (_goto_pending) {
+            replaced_pending = true;
+            prev_x = _goto_x; prev_y = _goto_y; prev_th = _goto_theta;
+        }
         _goto_x = x;
         _goto_y = y;
         _goto_theta = theta;
         _goto_pending = true;
         _state.store(State::GOTO);
         _state_entered = std::chrono::steady_clock::now();
+    }
+    if (replaced_pending) {
+        LOG("Mission") << "go_to(): displaced un-consumed target ("
+                       << prev_x << ", " << prev_y << ", " << prev_th << ")";
     }
     LOG("Mission") << "go_to(" << x << ", " << y << ", "
                    << theta << ") latched";
@@ -429,6 +443,23 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
                         }
                         at_home_skip = true;
                     }
+                    // Failed-target skip: same idea as at-home, but for a
+                    // box we just couldn't engage. The skip is bounded in
+                    // both space and time so a *different* box at a similar
+                    // bearing later isn't ignored.
+                    if (!at_home_skip && _last_failed_target_valid) {
+                        const double age =
+                            seconds_since(_last_failed_at);
+                        const double d_to_fail = std::hypot(
+                            det_x - _last_failed_target_x,
+                            det_y - _last_failed_target_y);
+                        if (age <= _failed_target_skip_s &&
+                            d_to_fail <= _failed_target_skip_radius_mm) {
+                            at_home_skip = true;
+                        } else if (age > _failed_target_skip_s) {
+                            _last_failed_target_valid = false;
+                        }
+                    }
                 }
 
                 if (!at_home_skip) {
@@ -568,6 +599,12 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
                     servo_release();
                     _grip_fired = false;
                     { std::lock_guard<std::mutex> lk(_m); ++_approach_attempts; }
+                    if (_last_target_valid) {
+                        _last_failed_target_valid = true;
+                        _last_failed_target_x = _last_target_x;
+                        _last_failed_target_y = _last_target_y;
+                        _last_failed_at = std::chrono::steady_clock::now();
+                    }
                     _transition(State::SEARCH, pose);
                     out.mode = Command::Mode::STOP;
                     break;
@@ -579,10 +616,13 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
             }
 
             // 3. Box is in the grab zone. Two-tick sequence so the motor
-            //    has a control cycle to decelerate before the blocking
-            //    smooth-close runs:
+            //    has a control cycle to decelerate before the gripper
+            //    target is commanded:
             //      tick N   — command v=0, latch _grip_stop_sent
-            //      tick N+1 — call servo_grab() (blocks ~1.2 s)
+            //      tick N+1 — call servo_grab() (non-blocking PWM write;
+            //                 the closure happens mechanically over the
+            //                 next ~_grip_settle_s and `captured` debounces
+            //                 once the box is held)
             if (snap.grabbable) {
                 if (!_grip_stop_sent) {
                     _grip_stop_sent = true;
@@ -639,8 +679,16 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
 
             if (t_in > _approach_timeout_s) {
                 // Box visible but we cannot engage it within the timeout.
-                // This is a real failed attempt charge the budget here.
+                // This is a real failed attempt charge the budget here, and
+                // remember where the failed box sat so SEARCH skips it for
+                // a while instead of immediately re-engaging.
                 { std::lock_guard<std::mutex> lk(_m); ++_approach_attempts; }
+                if (_last_target_valid) {
+                    _last_failed_target_valid = true;
+                    _last_failed_target_x = _last_target_x;
+                    _last_failed_target_y = _last_target_y;
+                    _last_failed_at = std::chrono::steady_clock::now();
+                }
                 _transition(State::SEARCH, pose);
                 out.mode = Command::Mode::STOP;
                 break;
@@ -746,6 +794,19 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
             _turn_accumulated += dtheta;
             _turn_start_theta = pose.theta;
             if (_turn_accumulated >= M_PI) {
+                _transition(State::SEARCH, pose);
+                out.mode = Command::Mode::STOP;
+                break;
+            }
+            // Hard timeout so a jammed motor / blocked chassis can't wedge
+            // here forever. Bailing into SEARCH means the mission's own
+            // timeouts still apply and we can either retry or eventually
+            // reach SAFE_STOP.
+            if (t_in > _turn_around_timeout_s) {
+                LOG("Mission") << "TURN_AROUND timed out after "
+                               << t_in << " s with only "
+                               << (_turn_accumulated * 180.0 / M_PI)
+                               << " deg accumulated; bailing to SEARCH.";
                 _transition(State::SEARCH, pose);
                 out.mode = Command::Mode::STOP;
                 break;

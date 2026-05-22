@@ -112,6 +112,18 @@ private:
     double _last_target_x     = 0.0;
     double _last_target_y     = 0.0;
 
+    // Failed-approach memory: world-frame position of the box that just
+    // timed out / failed to grip. If SEARCH later sees a target inside
+    // _failed_target_skip_radius_mm of this point and we are still inside
+    // _failed_target_skip_s of the failure, skip it (treat it the same as
+    // an at-home box) instead of immediately re-entering APPROACH. This
+    // breaks the SEARCH→APPROACH→timeout→SEARCH livelock when a box is
+    // wedged or otherwise unreachable.
+    bool   _last_failed_target_valid = false;
+    double _last_failed_target_x     = 0.0;
+    double _last_failed_target_y     = 0.0;
+    std::chrono::steady_clock::time_point _last_failed_at;
+
     bool   _search_path_active = false;
     size_t _search_last_wp_idx = static_cast<size_t>(-1);
 
@@ -172,6 +184,16 @@ private:
     double _approach_timeout_s  = 20.0;
     double _carry_timeout_s     = 90.0;
     double _carry_replan_s      = 5.0;   // re-plan spline this often during CARRY_HOME
+    // Hard timeout on TURN_AROUND so a jammed motor doesn't wedge the
+    // mission. If we cannot accumulate ~π of rotation within this many
+    // seconds, give up and fall back to SEARCH so the mission can still
+    // make progress (or hit its own timeout/budget guard).
+    double _turn_around_timeout_s = 8.0;
+    // Failed-target avoidance: how close (mm) and how recent (s) a
+    // SEARCH detection must be to a previously-failed target before we
+    // skip it.
+    double _failed_target_skip_radius_mm = 200.0;
+    double _failed_target_skip_s         = 30.0;
 
     // State change: runs exit side-effects (clear path, abort controller)
     // on the outgoing state and entry side-effects (plan spline) on the

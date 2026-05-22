@@ -3,6 +3,7 @@
 #include <vector>
 #include <array>
 #include <atomic>
+#include <limits>
 #include <mutex>
 #include <opencv2/opencv.hpp>
 
@@ -23,7 +24,11 @@ struct Frame {
 
 struct LidarData {
     mutable std::mutex lock;
-    double sensor_noise;
+    // sensor_noise is written once at boot (from loop_localization, after
+    // a settling sleep) and read by cox / find_walls / telemetry from
+    // worker threads. Atomic so the read/write is well-defined without
+    // making the lidar buffer lock visible at every reader.
+    std::atomic<double> sensor_noise;
 
     std::array<Frame, FRAME_COUNT> frames;
     std::atomic<int> buffer_id;
@@ -94,6 +99,13 @@ struct PosEstimate {
     // number of lidar points
     int inliers = 0;
     bool converged = false;
+
+    // Information-matrix condition number λ_max / λ_min of A in the cox
+    // normal equations. Large values (e.g. > 1e5) mean the scan is
+    // geometrically degenerate (long corridor, one wall visible) and the
+    // reported covariance is meaningless in the unobserved direction.
+    // Set to +inf if the eigensolve fails or n_in < 6 (no fit at all).
+    float cond_number = std::numeric_limits<float>::infinity();
 };
 
 
@@ -161,14 +173,20 @@ struct FilterResult {
 struct TrackerResult {
     mutable std::mutex lock;
     std::atomic<bool> running{true};
-    std::atomic<bool> captured{false};
-    std::atomic<bool> lost{true};
 
-    std::atomic<bool> grabbable{false};
+    // captured/lost/grabbable USED to be std::atomic<bool> set independently
+    // across ~50 lines of tracker.cpp. The reader (StateMachine::step) takes
+    // them all in one snapshot under `lock`, so previously a reader could
+    // observe e.g. captured=true && lost=true mid-update. Now all three are
+    // plain bools protected by `lock`, and the writer commits them in one
+    // critical section via commit_flags() at end-of-frame.
+    bool captured  = false;
+    bool lost      = true;
+    bool grabbable = false;
 
-    bool is_captured()  const { return captured.load(); }
-    bool is_lost()      const { return lost.load(); }
-    bool is_grabbable() const { return grabbable.load(); }
+    bool is_captured()  const { std::lock_guard<std::mutex> g(lock); return captured;  }
+    bool is_lost()      const { std::lock_guard<std::mutex> g(lock); return lost;      }
+    bool is_grabbable() const { std::lock_guard<std::mutex> g(lock); return grabbable; }
 
     // Latest target measurement.
     bool   has_target  = false;
@@ -198,6 +216,16 @@ struct TrackerResult {
         area_px           = 0.0;
     }
 
+    // Commit the three debounced flags atomically with respect to readers.
+    // Writer-only entry point (loop_vision_tracking); the reader observes a
+    // consistent triple via get_snapshot().
+    void commit_flags(bool new_captured, bool new_lost, bool new_grabbable) {
+        std::lock_guard<std::mutex> guard(lock);
+        captured  = new_captured;
+        lost      = new_lost;
+        grabbable = new_grabbable;
+    }
+
     struct Snapshot {
     bool   has_target;
     double bearing_rad;
@@ -215,7 +243,7 @@ struct TrackerResult {
         return { has_target, bearing_rad,
                  distance_mm,
                  area_px, fps,
-                 captured.load(), lost.load(), grabbable.load() };
+                 captured, lost, grabbable };
     }
 
     void update_frame(const cv::Mat &f, int frame_rate);

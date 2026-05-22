@@ -91,4 +91,4 @@ logger:
   scan_subsample: 2
 
 battery:
-  enabled: false
+  enabled: true

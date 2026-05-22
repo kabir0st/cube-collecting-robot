@@ -31,6 +31,12 @@ public:
     // planner produced.
     PathPoint get_active_target() const;
 
+    // True iff `get_active_target()` reflects a real path target rather than
+    // a default-constructed PathPoint{}. False before the first set_path()
+    // call, after abort(), and while idling. Telemetry consumers gate
+    // their "draw target" overlay on this.
+    bool has_active_target() const;
+
     // Snapshot of the currently-loaded path.
     std::vector<PathPoint> get_path() const;
 

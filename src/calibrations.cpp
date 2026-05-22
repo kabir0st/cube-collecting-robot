@@ -360,7 +360,12 @@ bool save_filter_result(const std::string& path, const FilterResult& result) {
         kept.pop_back();
     }
 
-    std::ofstream out(path, std::ios::trunc);
+    // Atomic write: write to a sibling temp file, then rename() it over the
+    // original. POSIX rename(2) is atomic within a filesystem, so a crash
+    // before the rename leaves the old config untouched, and a crash after
+    // leaves the new config fully in place. No torn writes.
+    const std::string tmp_path = path + ".tmp";
+    std::ofstream out(tmp_path, std::ios::trunc);
     if (!out) return false;
     for (const std::string& l : kept) out << l << '\n';
     if (!kept.empty()) out << '\n';
@@ -372,7 +377,15 @@ bool save_filter_result(const std::string& path, const FilterResult& result) {
     out << "  upper1: \"" << fmt_scalar3(result.upper1) << "\"\n";
     out << "  lower2: \"" << fmt_scalar3(result.lower2) << "\"\n";
     out << "  upper2: \"" << fmt_scalar3(result.upper2) << "\"\n";
-    return out.good();
+    if (!out.good()) return false;
+    out.close();
+    // rename(2): atomic on the same filesystem. After this call the new
+    // config is fully in place; before it, the old one was untouched.
+    if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+        std::remove(tmp_path.c_str());
+        return false;
+    }
+    return true;
 }
 
 bool load_config(const std::string& path, Config& out) {
@@ -506,17 +519,17 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
                            static_cast<double>(pts.second.size());
         // Closer than ~8 cm is typically the LIDAR seeing its own chassis/mount.
         if (avg < 80) continue;
-        // LiDAR CW → math CCW, then rotate into the robot body frame so
-        // forward = +x. Must match cox.cpp's per-scan transform exactly
-        // (otherwise scan and map end up in mirrored frames and Cox can't
-        // converge from any seed). See global.hpp.
-        const double a = -pts.first * M_PI / 180.0 + LIDAR_MOUNT_OFFSET_RAD;
-        points.emplace_back(avg * std::cos(a), avg * std::sin(a));
+        // LiDAR CW → math CCW + LIDAR_MOUNT_OFFSET_RAD. Centralized in
+        // utils.hpp::lidar_polar_to_body so map-building (here) and the
+        // per-scan transform in cox.cpp can never drift out of sync.
+        double bx, by;
+        lidar_polar_to_body(pts.first, avg, bx, by);
+        points.emplace_back(bx, by);
     }
     LOG("MAP") << "Usable Points for MAP : " << points.size();
     
     // floor threshold that scales with sensor noise;
-    params.inlier_thresh_mm = std::max(15.0, lidar_data.sensor_noise + 10);
+    params.inlier_thresh_mm = std::max(15.0, lidar_data.sensor_noise.load() + 10);
     std::mt19937 rng(params.seed != 0 ? params.seed : std::random_device{}());
 
     // starting RANSAC algorithm

@@ -1,5 +1,6 @@
 #include <telemetry.hpp>
 
+#include <loggers.hpp>
 #include <utils.hpp>
 
 #include <arpa/inet.h>
@@ -31,11 +32,33 @@ std::vector<LineSeg> g_last_map;
 std::thread g_rebroadcast;
 std::atomic<bool> g_run{false};
 
+// Backpressure / loss tracking. UDP sendto drops silently when the kernel
+// socket buffer is full; surface that to the operator without spamming
+// every send call.
+std::atomic<uint64_t> g_drop_count{0};
+std::atomic<int64_t>  g_last_warn_ms{0};
+
+int64_t mono_ms() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(
+        steady_clock::now().time_since_epoch()).count();
+}
+
 void send_raw(const std::string& s) {
     if (!g_enabled || g_sock < 0) return;
     std::lock_guard<std::mutex> lk(g_send_mtx);
-    ::sendto(g_sock, s.data(), s.size(), MSG_NOSIGNAL,
-             reinterpret_cast<sockaddr*>(&g_dst), sizeof(g_dst));
+    const ssize_t n = ::sendto(g_sock, s.data(), s.size(), MSG_NOSIGNAL,
+                               reinterpret_cast<sockaddr*>(&g_dst),
+                               sizeof(g_dst));
+    if (n < 0 || static_cast<size_t>(n) < s.size()) {
+        const uint64_t drops = g_drop_count.fetch_add(1) + 1;
+        const int64_t  now   = mono_ms();
+        if (now - g_last_warn_ms.load() >= 1000) {
+            g_last_warn_ms.store(now);
+            LOGE("Telemetry") << "UDP send dropped (cumulative=" << drops
+                              << "); listener offline or socket buffer full.";
+        }
+    }
 }
 
 std::string build_map_packet(const std::vector<LineSeg>& walls) {
@@ -129,7 +152,8 @@ void send_path(const std::vector<PathPoint>& path) {
 }
 
 void send_state(const Pos2D& pose, const Pose2DCov& cov,
-                const Pos2D& goal, const PathPoint& target,
+                const Pos2D& goal,
+                const PathPoint& target, bool target_valid,
                 LidarData& lidar) {
     if (!g_enabled) return;
 
@@ -154,6 +178,7 @@ void send_state(const Pos2D& pose, const Pose2DCov& cov,
       << ",\"cov\":["  << sx << ',' << sy << ',' << sth << ']'
       << ",\"goal\":[" << goal.x << ',' << goal.y << ','
                        << goal.theta << ']'
+      << ",\"target_valid\":" << (target_valid ? 1 : 0)
       << ",\"target\":[" << target.x << ',' << target.y << ','
                          << target.theta << ']'
       << ",\"scan\":[";

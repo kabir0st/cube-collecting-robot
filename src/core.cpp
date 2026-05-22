@@ -1,4 +1,5 @@
 #include <ina219.h>
+#include <core.hpp>
 #include <global.hpp>
 #include <types.hpp>
 #include <thread>
@@ -77,8 +78,9 @@ void loop_localization(Dashboard& dash,
                 std::ref(lidar), std::ref(lidar_data));
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
-    lidar_data.sensor_noise = get_lidar_sensor_noise(lidar_data);
-    LOG("Main") << "Lidar Sensor Noise : " << lidar_data.sensor_noise;
+    const double measured_noise = get_lidar_sensor_noise(lidar_data);
+    lidar_data.sensor_noise.store(measured_noise);
+    LOG("Main") << "Lidar Sensor Noise : " << measured_noise;
 
     std::vector<LineSeg> ref_map;
     if (arena.in_arena) {
@@ -135,7 +137,8 @@ void loop_localization(Dashboard& dash,
 
 void loop_control(Dashboard& dash,
                   KalmanFilter& kf, TrackerResult& target,
-                  LidarData& lidar_data) {
+                  LidarData& lidar_data,
+                  const MissionConfig& mission) {
     Motor motor;
     Odometry odom;
     PurePursuitController pp;
@@ -154,14 +157,9 @@ void loop_control(Dashboard& dash,
         odom.reset(l0_mm, r0_mm);
     }
 
-    // GO-TO TEST: drive to a single (x, y, theta) world-frame pose via
-    // spline + PurePursuit. The SEARCH/APPROACH/CARRY_HOME mission is *not*
-    // started; we use the lab-mode go_to() entry directly, which is
-    // orthogonal to the vision-driven mission and latches DONE on arrival.
-    constexpr double GOTO_X     = 300.0;  // mm
-    constexpr double GOTO_Y     = 0.0;    // mm
-    constexpr double GOTO_THETA = 0.0;    // rad
-    sm.go_to(GOTO_X, GOTO_Y, GOTO_THETA);
+    sm.configure(mission.home_x_mm, mission.home_y_mm, mission.home_theta,
+                 mission.home_margin, mission.arm_length_mm);
+    sm.start();
 
     while(!app::shutdown) {
         // giving time for 2 readings
@@ -212,9 +210,16 @@ void loop_control(Dashboard& dash,
                 w_cmd = 0.0;
                 break;
         }
-        // Hold motors while cox is running a relocalize sweep --
-        // driving on a stale pose is worse than standing still.
+        // Hold motors while cox is running a relocalize sweep -- driving on
+        // a stale pose is worse than standing still. Also hold on a forward-
+        // arc obstacle: loop_collect_frames sets app::obstacle_ahead when
+        // any beam inside ±OBSTACLE_ARC_HALF_DEG is closer than
+        // OBSTACLE_DIST_MM. Reverse motion (v < 0) is allowed so the robot
+        // can back out of a near-miss.
         if (app::relocalizing.load()) {
+            v_cmd = 0.0;
+            w_cmd = 0.0;
+        } else if (app::obstacle_ahead.load() && v_cmd > 0.0) {
             v_cmd = 0.0;
             w_cmd = 0.0;
         }
@@ -235,29 +240,21 @@ void loop_control(Dashboard& dash,
         dash.set("KF", "sTh_deg",
                  std::sqrt(std::max(0.0, cov.tt)) * 180.0 / M_PI);
 
-        // Mission state + goto progress.
-        const double err_x  = GOTO_X - p.x;
-        const double err_y  = GOTO_Y - p.y;
-        const double err_th = std::atan2(std::sin(GOTO_THETA - p.theta),
-                                         std::cos(GOTO_THETA - p.theta));
         dash.set("Mission", "state",
                  std::string(StateMachine::state_name(sm.state())));
-        dash.set("Mission", "goal_X_mm",   GOTO_X);
-        dash.set("Mission", "goal_Y_mm",   GOTO_Y);
-        dash.set("Mission", "goal_Th_deg", GOTO_THETA * 180.0 / M_PI);
-        dash.set("Mission", "err_d_mm",    std::hypot(err_x, err_y));
-        dash.set("Mission", "err_th_deg",  err_th * 180.0 / M_PI);
-        dash.set("Mission", "arrived",
-                 std::string(sm.goto_arrived() ? "yes" : "no"));
 
         // Gated telemetry: ~10 Hz regardless of the 25 Hz control loop.
         static auto last_send = std::chrono::steady_clock::now();
         const auto now = std::chrono::steady_clock::now();
         if (now - last_send >= std::chrono::milliseconds(100)) {
             last_send = now;
+            const Pos2D home_pose(mission.home_x_mm,
+                                  mission.home_y_mm,
+                                  mission.home_theta);
             telemetry::send_state(p, cov,
-                                  Pos2D(GOTO_X, GOTO_Y, GOTO_THETA),
+                                  home_pose,
                                   pp.get_active_target(),
+                                  pp.has_active_target(),
                                   lidar_data);
         }
     }

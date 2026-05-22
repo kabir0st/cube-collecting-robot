@@ -70,12 +70,13 @@ int main() {
     cam_cfg.show_debug_view = cfg.get_bool(
         "camera.show_debug_view", cam_cfg.show_debug_view);
 
-    // Mission geometry: only home_theta is needed right now (for the
-    // localization sanity-check + the seed pose). The remaining mission.*
-    // keys (home_x/y_mm, home_margin_mm, arm_length_mm) are read by
-    // StateMachine::configure() once the state-machine path in
-    // loop_control is re-enabled.
-    const double mission_home_theta = cfg.get_dbl("mission.home_theta_rad", 0.0);
+    MissionConfig mission;
+    mission.home_x_mm     = cfg.get_dbl("mission.home_x_mm",       mission.home_x_mm);
+    mission.home_y_mm     = cfg.get_dbl("mission.home_y_mm",       mission.home_y_mm);
+    mission.home_theta    = cfg.get_dbl("mission.home_theta_rad",  mission.home_theta);
+    mission.home_margin   = cfg.get_dbl("mission.home_margin_mm",  mission.home_margin);
+    mission.arm_length_mm = cfg.get_dbl("mission.arm_length_mm",   mission.arm_length_mm);
+    const double mission_home_theta = mission.home_theta;
 
     // Arena geometry + validation tolerances. Degrees in the YAML are
     // converted to radians here so the rest of the codebase only deals in
@@ -111,28 +112,29 @@ int main() {
         cfg.get_bool("logger.udp_enabled",   false),
         cfg.get_int ("logger.scan_subsample", 2));
 
-    // ENCODER-TEST: skip camera filter calibration (camera not used in encoder-only mode)
-    // FilterResult filter;
-    // if (load_filter_result(cfg, filter)) {
-    //     LOG("Main") << "Loaded filter calibration from " << config_path;
-    // } else {
-    //     LOG("Main") << "No filter calibration in config — running calibration.";
-    //     CalibrateCamera calibrator(cam_cfg);
-    //     filter = calibrator.start_filter_calibration();
-    //     if (filter.ready) {
-    //         if (save_filter_result(config_path, filter)) {
-    //             LOG("Main") << "Saved filter calibration to " << config_path;
-    //         } else {
-    //             LOG("Main") << "Failed to write filter calibration to " << config_path;
-    //         }
-    //     } else {
-    //         LOG("Main") << "Calibration aborted; filter not saved.";
-    //     }
-    // }
-    // ------------------------------------------------------------------------
+    FilterResult filter;
+    if (load_filter_result(cfg, filter)) {
+        LOG("Main") << "Loaded filter calibration from " << config_path;
+    } else {
+        LOG("Main") << "No filter calibration in config — running calibration.";
+        CalibrateCamera calibrator(cam_cfg);
+        filter = calibrator.start_filter_calibration();
+        if (filter.ready) {
+            if (save_filter_result(config_path, filter)) {
+                LOG("Main") << "Saved filter calibration to " << config_path;
+            } else {
+                LOG("Main") << "Failed to write filter calibration to " << config_path;
+            }
+        } else {
+            LOG("Main") << "Calibration aborted; filter not saved.";
+        }
+    }
+    if (!filter.ready) {
+        LOGE("Main") << "Color filter is not ready -- vision cannot run. "
+                        "Refusing to start.";
+        return 1;
+    }
 
-
-    // ENCODER-TEST: skip 3-second pre-start wait (no camera to clear)
     std::cout << "Waiting 3 seconds before starting . ..\n";
     std::this_thread::sleep_for(std::chrono::seconds(3));
 
@@ -146,7 +148,6 @@ int main() {
     // 9 panels × 4 lines each = 36 lines (+ slack).
     dash.start(48);
 
-    // ENCODER-TEST: battery monitor disabled
     if (cfg.get_bool("battery.enabled", true)) {
         dash.add_row("Battery");
         threads.emplace_back(loop_check_battery,
@@ -163,20 +164,19 @@ int main() {
     // waiting for cox 1st seeds to be stable
     std::this_thread::sleep_for(std::chrono::seconds(5));
 
-    // ENCODER-TEST: vision tracking disabled
-    // dash.add_row("Vision");
-    // threads.emplace_back(loop_vision_tracking,
-    //     std::ref(dash), filter, cam_cfg, std::ref(target));
-    // dash.render();
-    // std::this_thread::sleep_for(std::chrono::seconds(3));
-    // dash.render();
+    dash.add_row("Vision");
+    threads.emplace_back(loop_vision_tracking,
+        std::ref(dash), filter, cam_cfg, std::ref(target));
+    dash.render();
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    dash.render();
     dash.add_row("Motor");
     dash.add_row("Odometry");
     dash.add_row("KF");
     dash.add_row("Mission");
     threads.emplace_back(loop_control,
         std::ref(dash), std::ref(kf), std::ref(target),
-        std::ref(lidar_data));
+        std::ref(lidar_data), std::cref(mission));
 
     while(!app::shutdown) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
