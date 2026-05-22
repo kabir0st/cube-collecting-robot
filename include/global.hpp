@@ -17,7 +17,7 @@ constexpr double LIDAR_MOUNT_OFFSET_RAD = -M_PI / 2.0;
 // acceleration limit. 1.0 = the tuned baseline. Bump up to make the robot
 // faster (driving + turning + ramp rates all scale together so cruise time
 // stays the same shape); drop below 1.0 to slow everything down.
-constexpr double ROBOT_SPEED = 1.0;
+constexpr double ROBOT_SPEED = 1.5;
 
 namespace app {
     extern std::atomic<bool> shutdown;
@@ -29,4 +29,8 @@ namespace app {
     // this and halts the motors for the duration of the sweep so we don't
     // drive blind while the KF is being re-pinned.
     extern std::atomic<bool> relocalizing;
+    // Latched true the first time cox produces a fix that passes
+    // cox_can_fuse() and is folded into the KF. loop_control blocks the
+    // mission start on this so we never drive on the seeded (0,0,0) pose.
+    extern std::atomic<bool> cox_first_fix;
 }

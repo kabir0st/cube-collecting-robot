@@ -145,8 +145,34 @@ void loop_control(Dashboard& dash,
     // Home is fixed at the localization origin (0, 0, 0).
     sm.configure(0.0, 0.0, 0.0,
                  mission.home_margin, mission.arm_length_mm);
+
+    // Block any mission entry (TEST, SEARCH, or future GOTO seeded from
+    // here) until cox has produced a fix that the KF actually accepted.
+    // Otherwise the SM kicks off on the seeded (0,0,0) pose and the robot
+    // drives before localization is real. The 15 s timeout exists so a
+    // misconfigured map / bad scan doesn't hang forever — we fall through
+    // and drive on dead reckoning, matching the pre-gate behaviour.
+    {
+        constexpr auto WAIT_TIMEOUT = std::chrono::seconds(15);
+        const auto t_start = std::chrono::steady_clock::now();
+        while (!app::cox_first_fix.load(std::memory_order_acquire)
+            && !app::shutdown.load()) {
+            if (std::chrono::steady_clock::now() - t_start > WAIT_TIMEOUT) {
+                LOGE("Main") << "Cox first-fix wait timed out after 15s — "
+                                "starting on dead-reckoned pose.";
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (app::cox_first_fix.load(std::memory_order_acquire)) {
+            LOG("Main") << "Cox first fix acquired — starting mission.";
+        }
+    }
+
     if (IS_TEST) {
         sm.start_test();
+    } else {
+        sm.start();
     }
 
     while(!app::shutdown) {

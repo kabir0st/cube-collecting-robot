@@ -398,6 +398,7 @@ void loop_scan_cox_estimation(
             R.yy = est.cov[4]; R.yt = est.cov[5];
             R.tt = est.cov[8];
             kf.correct(z, R);
+            app::cox_first_fix.store(true, std::memory_order_release);
         }
 
         // 2. KF-COV-TRIGGERED RELOCALIZE. After the correct above, check
