@@ -16,7 +16,7 @@ void Init_RPI(void)
 	pinMode(PWM0_pin, PWM_OUTPUT); /* set PWM0 pin as output */
 	pwmSetMode(PWM_MODE_MS);
 	pinMode(PWM1_pin, PWM_OUTPUT); /* set PWM1 pin as output */
-	pwmSetMode(PWM_MODE_MS);
+	// pwmSetMode(PWM_MODE_MS);
 	pwmSetClock(384);  // 19.2 Mhz divided by 384.
 	pwmSetRange(1000); // 19.2 Mhz divided by 384 divided by 1000 = 50Hz
 }
