@@ -27,6 +27,9 @@ public:
         // PurePursuit pipeline, then latch DONE. Orthogonal to the
         // SEARCH-based mission; entered via go_to(), not start().
         GOTO,
+        // Hardcoded test sequence: forward 400 mm -> +90° turn + 300 mm ->
+        // back home. Entered via start_test().
+        TEST,
     };
 
     // What loop_control should do with the motors this tick.
@@ -46,6 +49,9 @@ public:
 
     // Begin the mission: IDLE -> SEARCH. No-op from any other state.
     void start();
+    // Begin the hardcoded TEST sequence: IDLE/DONE/SAFE_STOP -> TEST.
+    // First leg is planned on the next step() tick.
+    void start_test();
     void abort();
 
     // Load mission geometry from config (overrides constructor defaults).
@@ -161,6 +167,14 @@ private:
     bool   _goto_pending = false;
     double _goto_v_max_mm_s = 60.0 * ROBOT_SPEED;    // a bit faster than SEARCH; tunable
     double _goto_margin_mm  = 40.0;    // tighter than SEARCH for lab accuracy
+
+    // TEST state: walks the hardcoded leg list defined in controller.cpp.
+    // _test_replan_needed is set on entry and after each leg arrival; the
+    // next step() tick consumes it to build the spline for the next leg.
+    size_t _test_step           = 0;
+    bool   _test_replan_needed  = false;
+    double _test_v_max_mm_s     = 50.0 * ROBOT_SPEED;
+    double _test_margin_mm      = 40.0;
 
     // Tunables. Conservative defaults; safe to tweak from main if needed.
     double _search_omega        = 0.35 * ROBOT_SPEED;  // rad/s, ~20°/s so camera gets enough frames

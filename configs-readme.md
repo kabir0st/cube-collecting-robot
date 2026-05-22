@@ -33,13 +33,10 @@
 
 > **Note:** Only `mission.home_theta_rad` is used today (seed pose for localization). The other mission keys are loaded only if `StateMachine::configure()` is wired in.
 
-Home is centered on the robot's **starting pose** (world origin). The home zone is a 1 ft x 1 ft area, with `home_margin_mm` = 0.5 ft as the arrival radius.
+Home is hardcoded to the robot's **starting pose** — the localization origin (0, 0, 0). The home zone is a 1 ft x 1 ft area, with `home_margin_mm` = 0.5 ft as the arrival radius. Only the zone radius and arm geometry are tunable.
 
 | Key | Default | What it does | Increase / Decrease effect |
 |---|---|---|---|
-| `mission.home_x_mm` | `0.0` | Target **box** landing X (mm) in the localization frame; defaults to the robot's starting pose. | **Increase / Decrease:** shifts the drop point relative to the starting pose. |
-| `mission.home_y_mm` | `0.0` | Target **box** landing Y (mm) in the localization frame. | **Increase / Decrease:** shifts drop point left/right. |
-| `mission.home_theta_rad` | `0.0` | Home pose heading (rad) used to seed the KF at boot. | **Increase:** rotate seed heading CCW. **Decrease:** rotate seed heading CW. |
 | `mission.home_margin_mm` | `152.4` | Arrival radius (≈ 0.5 ft) used at home — half the side of the 1 ft home zone. | **Increase:** larger home zone, easier to "arrive". **Decrease:** tighter precision. |
 | `mission.arm_length_mm` | `80.0` | Distance from robot center to the box when held. | **Increase:** biases robot stop point further back from the drop. **Decrease:** biases stop point forward. |
 

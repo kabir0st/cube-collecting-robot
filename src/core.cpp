@@ -67,7 +67,7 @@ void loop_check_battery(INA219& power_interface, Dashboard& dash) {
 
 void loop_localization(Dashboard& dash,
                        LidarData& lidar_data, KalmanFilter& kf,
-                       const RansacParams& ransac, double home_theta) {
+                       const RansacParams& ransac) {
     hh::Lidar lidar;
     if (!start_lidar(lidar)) {
         return;
@@ -98,10 +98,10 @@ void loop_localization(Dashboard& dash,
     calib::compute_map_bounds(ref_map);
     telemetry::send_map(ref_map);
 
-    // Seed the KF at the starting pose = home center. If cox later disagrees
-    // it will repin via the relocalize sweep — "I'm somewhere unknown" is
-    // recoverable, not fatal.
-    kf.reset(Pos2D(0.0, 0.0, home_theta), KalmanFilter::default_cov());
+    // Seed the KF at the starting pose = home (0, 0, 0). If cox later
+    // disagrees it will repin via the relocalize sweep — "I'm somewhere
+    // unknown" is recoverable, not fatal.
+    kf.reset(Pos2D(0.0, 0.0, 0.0), KalmanFilter::default_cov());
 
     std::thread thread_loop_scan_cox(
         loop_scan_cox_estimation, std::ref(ref_map),
@@ -118,6 +118,12 @@ void loop_control(Dashboard& dash,
                   KalmanFilter& kf, TrackerResult& target,
                   LidarData& lidar_data,
                   const MissionConfig& mission) {
+    // Hardcoded toggle: when true, the state machine runs the canned TEST
+    // sequence (fwd 400 mm -> +90° + 300 mm -> back home) instead of the
+    // real SEARCH-based mission. Flip to false once the mission flow is
+    // wired in.
+    constexpr bool IS_TEST = true;
+
     Motor motor;
     Odometry odom;
     PurePursuitController pp;
@@ -136,9 +142,12 @@ void loop_control(Dashboard& dash,
         odom.reset(l0_mm, r0_mm);
     }
 
-    // sm.configure(mission.home_x_mm, mission.home_y_mm, mission.home_theta,
-    //              mission.home_margin, mission.arm_length_mm);
-    // sm.start();
+    // Home is fixed at the localization origin (0, 0, 0).
+    sm.configure(0.0, 0.0, 0.0,
+                 mission.home_margin, mission.arm_length_mm);
+    if (IS_TEST) {
+        sm.start_test();
+    }
 
     while(!app::shutdown) {
         // giving time for 2 readings
@@ -173,42 +182,42 @@ void loop_control(Dashboard& dash,
         Pos2D p;
         Pose2DCov cov;
         kf.snapshot(p, cov);
-        // const StateMachine::Command cmd = sm.step(p, dash);
-        // double v_cmd = 0.0, w_cmd = 0.0;
-        // switch (cmd.mode) {
-        //     case StateMachine::Command::Mode::DIRECT:
-        //         v_cmd = cmd.v_mm_s;
-        //         w_cmd = cmd.omega_rad_s;
-        //         break;
-        //     case StateMachine::Command::Mode::PATH_FOLLOW:
-        //         pp.compute(p, v_cmd, w_cmd);
-        //         break;
-        //     case StateMachine::Command::Mode::STOP:
-        //     default:
-        //         v_cmd = 0.0;
-        //         w_cmd = 0.0;
-        //         break;
-        // }
+        const StateMachine::Command cmd = sm.step(p, dash);
+        double v_cmd = 0.0, w_cmd = 0.0;
+        switch (cmd.mode) {
+            case StateMachine::Command::Mode::DIRECT:
+                v_cmd = cmd.v_mm_s;
+                w_cmd = cmd.omega_rad_s;
+                break;
+            case StateMachine::Command::Mode::PATH_FOLLOW:
+                pp.compute(p, v_cmd, w_cmd);
+                break;
+            case StateMachine::Command::Mode::STOP:
+            default:
+                v_cmd = 0.0;
+                w_cmd = 0.0;
+                break;
+        }
         // Hold motors while cox is running a relocalize sweep -- driving on
         // a stale pose is worse than standing still. Also hold on a forward-
         // arc obstacle: loop_collect_frames sets app::obstacle_ahead when
         // any beam inside ±OBSTACLE_ARC_HALF_DEG is closer than
         // OBSTACLE_DIST_MM. Reverse motion (v < 0) is allowed so the robot
         // can back out of a near-miss.
-        // if (app::relocalizing.load()) {
-        //     v_cmd = 0.0;
-        //     w_cmd = 0.0;
-        // } else if (app::obstacle_ahead.load() && v_cmd > 0.0) {
-        //     v_cmd = 0.0;
-        //     w_cmd = 0.0;
-        // }
-        // motor.set_velocity(v_cmd, w_cmd);
+        if (app::relocalizing.load()) {
+            v_cmd = 0.0;
+            w_cmd = 0.0;
+        } else if (app::obstacle_ahead.load() && v_cmd > 0.0) {
+            v_cmd = 0.0;
+            w_cmd = 0.0;
+        }
+        motor.set_velocity(v_cmd, w_cmd);
 
         uint64_t rejects = 0;
         motor.get_spi_stats(rejects);
         dash.set("Motor", "spi_rej", rejects);
-        // dash.set("Motor", "v_cmd",  v_cmd);
-        // dash.set("Motor", "w_cmd_deg_s", w_cmd * 180.0 / M_PI);
+        dash.set("Motor", "v_cmd",  v_cmd);
+        dash.set("Motor", "w_cmd_deg_s", w_cmd * 180.0 / M_PI);
 
         // Fused pose + uncertainties (1σ).
         dash.set("KF", "X_mm",    p.x);
@@ -227,9 +236,7 @@ void loop_control(Dashboard& dash,
         const auto now = std::chrono::steady_clock::now();
         if (now - last_send >= std::chrono::milliseconds(100)) {
             last_send = now;
-            const Pos2D home_pose(mission.home_x_mm,
-                                  mission.home_y_mm,
-                                  mission.home_theta);
+            const Pos2D home_pose(0.0, 0.0, 0.0);
             telemetry::send_state(p, cov,
                                   home_pose,
                                   pp.get_active_target(),

@@ -32,6 +32,19 @@ inline void polar_to_world(const Pos2D& pose,
     out_y = pose.y + distance_mm * std::sin(world_bearing);
 }
 
+// Hardcoded TEST sequence: forward 400 mm in +x, then 90° CCW + 300 mm in
+// +y, then back to (0,0,0). Each entry is (x, y, theta) in the
+// localization frame; theta is the desired heading at the end of that leg
+// (PurePursuit's TERMINAL_ROTATE enforces it).
+struct TestWaypoint { double x, y, theta; };
+static const TestWaypoint TEST_WAYPOINTS[] = {
+    {400.0,   0.0, 0.0},
+    {400.0, 300.0, M_PI / 2.0},
+    {  0.0,   0.0, 0.0},
+};
+static const size_t TEST_WAYPOINT_COUNT =
+    sizeof(TEST_WAYPOINTS) / sizeof(TEST_WAYPOINTS[0]);
+
 }  // namespace
 
 const char* StateMachine::state_name(State s) {
@@ -45,6 +58,7 @@ const char* StateMachine::state_name(State s) {
         case State::DONE:        return "DONE";
         case State::SAFE_STOP:   return "SAFE_STOP";
         case State::GOTO:        return "GOTO";
+        case State::TEST:        return "TEST";
     }
     return "?";
 }
@@ -92,6 +106,24 @@ void StateMachine::start() {
     // mission to engage a box near the previous failure.
     _last_failed_target_valid = false;
     LOG("Mission") << "start(): " << state_name(now) << " -> SEARCH";
+}
+
+void StateMachine::start_test() {
+    std::lock_guard<std::mutex> lk(_m);
+    const State now = _state.load();
+    const bool terminal = (now == State::IDLE   ||
+                           now == State::DONE   ||
+                           now == State::SAFE_STOP);
+    if (!terminal) {
+        LOG("Mission") << "start_test() ignored; state = " << state_name(now);
+        return;
+    }
+    _test_step          = 0;
+    _test_replan_needed = true;
+    _state.store(State::TEST);
+    _state_entered = std::chrono::steady_clock::now();
+    LOG("Mission") << "start_test(): " << state_name(now) << " -> TEST ("
+                   << TEST_WAYPOINT_COUNT << " legs)";
 }
 
 
@@ -847,6 +879,46 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
                 out.mode = Command::Mode::STOP;
                 break;
             }
+            out.mode = Command::Mode::PATH_FOLLOW;
+            break;
+        }
+
+        case State::TEST: {
+            // Plan-on-entry / plan-on-arrival: one-shot per leg. Set by
+            // start_test() and by the arrival branch below.
+            if (_test_replan_needed) {
+                if (_test_step >= TEST_WAYPOINT_COUNT) {
+                    LOG("Mission") << "TEST: all legs complete";
+                    _transition(State::DONE, pose);
+                    out.mode = Command::Mode::STOP;
+                    break;
+                }
+                const TestWaypoint& wp = TEST_WAYPOINTS[_test_step];
+                if (!_plan_path_to(pose, wp.x, wp.y, wp.theta,
+                                   _test_margin_mm, _test_v_max_mm_s)) {
+                    LOGE("Mission") << "TEST: leg " << (_test_step + 1)
+                                    << " plan failed; -> SAFE_STOP";
+                    _transition(State::SAFE_STOP, pose);
+                    out.mode = Command::Mode::STOP;
+                    break;
+                }
+                LOG("Mission") << "TEST: leg " << (_test_step + 1) << "/"
+                               << TEST_WAYPOINT_COUNT << " -> ("
+                               << wp.x << ", " << wp.y << ", "
+                               << wp.theta << " rad)";
+                _test_replan_needed = false;
+                out.mode = Command::Mode::PATH_FOLLOW;
+                break;
+            }
+
+            if (_controller.has_arrived()) {
+                ++_test_step;
+                _test_replan_needed = true;
+                // Next tick will plan the next leg (or transition to DONE).
+                out.mode = Command::Mode::STOP;
+                break;
+            }
+
             out.mode = Command::Mode::PATH_FOLLOW;
             break;
         }

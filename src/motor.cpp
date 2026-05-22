@@ -82,6 +82,14 @@ bool Motor::start() {
       }
     MotorDataType md = {0, 0, 0, 0, 0, 0};
     Send_Read_Motor_Data(&md);
+    // Let the Arduino apply the zero-speed command before the IO loop
+    // starts pumping setpoints. If the previous run was killed mid-motion
+    // the motors are still spinning until this settles — without the
+    // pause, the first tick of the IO loop fires while the controller is
+    // still decelerating, which shows up as a twitch on start.
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    // Re-read encoders so the seed reflects the settled (stopped) state.
+    Send_Read_Motor_Data(&md);
     const int32_t seed_l = md.Encoder_M1;
     const int32_t seed_r = md.Encoder_M2;
 

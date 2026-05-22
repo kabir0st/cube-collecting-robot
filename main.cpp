@@ -71,12 +71,8 @@ int main() {
         "camera.show_debug_view", cam_cfg.show_debug_view);
 
     MissionConfig mission;
-    mission.home_x_mm     = cfg.get_dbl("mission.home_x_mm",       mission.home_x_mm);
-    mission.home_y_mm     = cfg.get_dbl("mission.home_y_mm",       mission.home_y_mm);
-    mission.home_theta    = cfg.get_dbl("mission.home_theta_rad",  mission.home_theta);
     mission.home_margin   = cfg.get_dbl("mission.home_margin_mm",  mission.home_margin);
     mission.arm_length_mm = cfg.get_dbl("mission.arm_length_mm",   mission.arm_length_mm);
-    const double mission_home_theta = mission.home_theta;
 
     // RANSAC parameters for the boot-time lidar map build. Defaults tuned
     // for a rectangular arena with 1-2 other robots inside (see config.yml
@@ -148,7 +144,7 @@ int main() {
     dash.add_row("Cox");
     threads.emplace_back(loop_localization,
         std::ref(dash), std::ref(lidar_data), std::ref(kf),
-        std::cref(map_ransac), mission_home_theta);
+        std::cref(map_ransac));
     // waiting for cox 1st seeds to be stable
     std::this_thread::sleep_for(std::chrono::seconds(5));
 
