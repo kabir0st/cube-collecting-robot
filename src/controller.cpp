@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 #include <string>
 
@@ -44,6 +45,33 @@ static const TestWaypoint TEST_WAYPOINTS[] = {
 };
 static const size_t TEST_WAYPOINT_COUNT =
     sizeof(TEST_WAYPOINTS) / sizeof(TEST_WAYPOINTS[0]);
+
+// Halt-and-localize / Mahalanobis-gate tunables. See _halting field
+// docstring in controller.hpp for the overall flow. HALT_MIN_MS gives
+// Cox at least one or two 100 ms scan cycles to fold in; HALT_MAX_MS
+// caps the wait so a sustained-bad Cox can't deadlock the mission.
+// MAHAL_GATE_CHI2 = 5.99 is the χ² 95 % cut-off for 2 DoF (x, y);
+// heading is intentionally outside the gate because angle-wrap makes
+// the 3-DoF form brittle and PurePursuit's TERMINAL_ROTATE already
+// enforces final heading.
+constexpr int    HALT_MIN_MS             = 300;
+constexpr int    HALT_MAX_MS             = 700;
+constexpr double HALT_SIGMA_XY_TARGET_MM = 30.0;
+constexpr double MAHAL_GATE_CHI2         = 5.99;
+
+// Squared Mahalanobis distance from `pose` (x, y) to (tx, ty) under the
+// xy-block of `cov`. Returns +inf when the block is degenerate so the
+// gate treats it as "wildly uncertain" rather than dividing by zero.
+inline double mahalanobis2_xy(const Pos2D& pose, const Pose2DCov& cov,
+                              double tx, double ty) {
+    const double dx  = tx - pose.x;
+    const double dy  = ty - pose.y;
+    const double det = cov.xx * cov.yy - cov.xy * cov.xy;
+    if (det <= 0.0) return std::numeric_limits<double>::infinity();
+    return (cov.yy * dx * dx
+            - 2.0 * cov.xy * dx * dy
+            + cov.xx * dy * dy) / det;
+}
 
 }  // namespace
 
@@ -120,6 +148,7 @@ void StateMachine::start_test() {
     }
     _test_step          = 0;
     _test_replan_needed = true;
+    _halting            = false;
     _state.store(State::TEST);
     _state_entered = std::chrono::steady_clock::now();
     LOG("Mission") << "start_test(): " << state_name(now) << " -> TEST ("
@@ -195,6 +224,9 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
     const State old_state = _state.load();
 
     if (old_state == new_state) return;
+    // Any state change clears halt-and-localize bookkeeping so an aborted
+    // halt mid-state can't masquerade as a halt belonging to the next.
+    _halting = false;
     // Exit side-effects on the outgoing state.
     if (old_state == State::CARRY_HOME || old_state == State::SEARCH) {
         LOG("CONTROLLER") << "Carried Home! Mission Accomplished";
@@ -406,7 +438,9 @@ void StateMachine::_build_search_plan(const Pos2D& /*pose*/) {
                    << " waypoints (" << nx << "x" << ny << " grid + center)";
 }
 
-StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
+StateMachine::Command StateMachine::step(const Pos2D& pose,
+                                         const Pose2DCov& cov,
+                                         Dashboard& dash) {
     Command out;
     // Snapshot everything once so the state body sees a consistent view.
     // One mutex acquire per tick on each of _m and the vision lock
@@ -874,8 +908,38 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
                                << _controller.total() << " waypoints";
             }
 
-            if (_controller.has_arrived()) {
-                _transition(State::DONE, pose);
+            // Rising-edge into halt-and-localize before declaring DONE so
+            // the final pose used by goto_arrived() reflects a settled KF
+            // rather than the moment PurePursuit's geometric arrival fired.
+            if (!_halting && _controller.has_arrived()) {
+                _halting       = true;
+                _halt_started  = std::chrono::steady_clock::now();
+                _halt_target_x = tx;
+                _halt_target_y = ty;
+                out.mode = Command::Mode::STOP;
+                break;
+            }
+
+            if (_halting) {
+                const auto elapsed_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - _halt_started).count();
+                const double sigma_xy = std::sqrt(std::max(cov.xx, cov.yy));
+                const bool min_done = elapsed_ms >= HALT_MIN_MS;
+                const bool settled  = sigma_xy <= HALT_SIGMA_XY_TARGET_MM;
+                const bool timed_out = elapsed_ms >= HALT_MAX_MS;
+                if ((min_done && settled) || timed_out) {
+                    const double mahal2 = mahalanobis2_xy(
+                        pose, cov, _halt_target_x, _halt_target_y);
+                    const bool gate_pass = (mahal2 <= MAHAL_GATE_CHI2);
+                    LOG("Mission") << "GOTO halt done: " << elapsed_ms
+                                   << "ms sigma_xy=" << sigma_xy
+                                   << "mm mahal2=" << mahal2
+                                   << (gate_pass ? " (pass)"
+                                                 : " (FAIL — accepting)");
+                    _halting = false;
+                    _transition(State::DONE, pose);
+                }
                 out.mode = Command::Mode::STOP;
                 break;
             }
@@ -911,10 +975,40 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
                 break;
             }
 
-            if (_controller.has_arrived()) {
-                ++_test_step;
-                _test_replan_needed = true;
-                // Next tick will plan the next leg (or transition to DONE).
+            // Rising-edge: PurePursuit says we're at the leg goal. Latch
+            // into the halt-and-localize hold before committing to advance.
+            if (!_halting && _controller.has_arrived()) {
+                const TestWaypoint& wp_cur = TEST_WAYPOINTS[_test_step];
+                _halting       = true;
+                _halt_started  = std::chrono::steady_clock::now();
+                _halt_target_x = wp_cur.x;
+                _halt_target_y = wp_cur.y;
+                out.mode = Command::Mode::STOP;
+                break;
+            }
+
+            if (_halting) {
+                const auto elapsed_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - _halt_started).count();
+                const double sigma_xy = std::sqrt(std::max(cov.xx, cov.yy));
+                const bool min_done = elapsed_ms >= HALT_MIN_MS;
+                const bool settled  = sigma_xy <= HALT_SIGMA_XY_TARGET_MM;
+                const bool timed_out = elapsed_ms >= HALT_MAX_MS;
+                if ((min_done && settled) || timed_out) {
+                    const double mahal2 = mahalanobis2_xy(
+                        pose, cov, _halt_target_x, _halt_target_y);
+                    const bool gate_pass = (mahal2 <= MAHAL_GATE_CHI2);
+                    LOG("Mission") << "TEST leg " << (_test_step + 1)
+                                   << " halt done: " << elapsed_ms
+                                   << "ms sigma_xy=" << sigma_xy
+                                   << "mm mahal2=" << mahal2
+                                   << (gate_pass ? " (pass)"
+                                                 : " (FAIL — advancing anyway)");
+                    _halting = false;
+                    ++_test_step;
+                    _test_replan_needed = true;
+                }
                 out.mode = Command::Mode::STOP;
                 break;
             }

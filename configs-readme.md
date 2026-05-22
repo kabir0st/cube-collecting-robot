@@ -21,6 +21,10 @@
 
 ### `robot`
 
+| Key | Default | What it does | Increase / Decrease effect |
+|---|---|---|---|
+| `robot.speed` | `1.875` | Global multiplier on every linear/angular velocity cap AND acceleration limit. Loaded by `main.cpp` at startup and stored in the runtime `ROBOT_SPEED` global. | **Increase:** snappier robot (cruise + turn + ramp rates all scale together). **Decrease:** slower / bench-safe. Soft ceiling ~3.6 with current chassis caps before omega starts clipping on sharp turns; hard-clamped to 5.0 with a warning. |
+
 > **Note:** The robot extents are currently **not wired into code** (they are comments for geometry planning). They are intended for wall-clearance and home-placement math.
 
 | Key | Default | What it does | Increase / Decrease effect |

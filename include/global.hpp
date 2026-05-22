@@ -14,10 +14,21 @@
 constexpr double LIDAR_MOUNT_OFFSET_RAD = -M_PI / 2.0;
 
 // Global speed multiplier applied to every linear/angular velocity cap and
-// acceleration limit. 1.0 = the tuned baseline. Bump up to make the robot
-// faster (driving + turning + ramp rates all scale together so cruise time
-// stays the same shape); drop below 1.0 to slow everything down.
-constexpr double ROBOT_SPEED = 1.5;
+// acceleration limit. 1.0 = the original tuned baseline. Bump up to make
+// the robot faster (driving + turning + ramp rates all scale together so
+// cruise time stays the same shape); drop below 1.0 to slow everything
+// down.
+//
+// Loaded from `robot.speed` in config.yml at startup (see main.cpp). The
+// initial value below is only the boot default; it's overwritten before
+// any motor / controller object is constructed, so member initializers
+// that reference ROBOT_SPEED pick up the configured value automatically.
+//
+// Soft ceiling for clean scaling depends on chassis hardware caps in
+// motor.cpp. With the current ~504 mm/s / ~5.45 rad/s caps, ROBOT_SPEED
+// up to ~3.6 stays clean; above that the motor silently clamps omega on
+// sharp turns. See docs/coordinate-frames.md for the full table.
+extern double ROBOT_SPEED;
 
 namespace app {
     extern std::atomic<bool> shutdown;

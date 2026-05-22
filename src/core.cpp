@@ -208,7 +208,7 @@ void loop_control(Dashboard& dash,
         Pos2D p;
         Pose2DCov cov;
         kf.snapshot(p, cov);
-        const StateMachine::Command cmd = sm.step(p, dash);
+        const StateMachine::Command cmd = sm.step(p, cov, dash);
         double v_cmd = 0.0, w_cmd = 0.0;
         switch (cmd.mode) {
             case StateMachine::Command::Mode::DIRECT:

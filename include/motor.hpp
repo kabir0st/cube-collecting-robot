@@ -10,9 +10,19 @@
 // right-wheel wiring inversion are all hidden inside this class.
 class Motor {
     public:
-        // Drive-train constants
-        static constexpr double TICKS_PER_MM = 119.73;
-        static constexpr double WHEELBASE_MM = 185.0;
+        // Drive-train constants. Per-wheel calibration: the encoders +
+        // wheels are not identical (typical ~2% asymmetry from wheel-radius
+        // variation), and feeding both raw deltas through one shared scale
+        // injects a fake heading change every step that compounds into
+        // unbounded drift. Calibrate each wheel independently against the
+        // same ground-truth distance and update here.
+        //
+        // Calibration method: push the robot in a straight line over a
+        // tape-measured distance (e.g. 1 m), read raw ticks per wheel,
+        // ticks_per_mm = raw_ticks / actual_mm.
+        static constexpr double LEFT_TICKS_PER_MM  = 121.04;
+        static constexpr double RIGHT_TICKS_PER_MM = 118.42;
+        static constexpr double WHEELBASE_MM       = 185.0;
 
         Motor();
         ~Motor();

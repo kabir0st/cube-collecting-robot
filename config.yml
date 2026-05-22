@@ -11,6 +11,17 @@ camera:
   show_debug_view: true
 
 robot:
+  # Global speed multiplier applied to every linear/angular velocity cap
+  # AND acceleration limit. 1.0 = original tuned baseline. 1.875 was the
+  # last hard-coded value. Increase for a snappier robot; decrease for
+  # bench-safe slow motion. The motion stack stays in proportion — cruise
+  # time has the same shape, just stretched/compressed in time.
+  #
+  # Soft ceiling with the current chassis caps (~504 mm/s, ~5.45 rad/s)
+  # is ~3.6 before omega starts clipping on sharp turns; main() hard-clamps
+  # to 5.0 with a warning if exceeded.
+  speed: 1.875
+
   # All extents measured from the LIDAR mount point (= the tracked pose
   # center used by cox / KF / odometry). Used for wall-clearance and home
   # placement math. Update if the robot is rebuilt.

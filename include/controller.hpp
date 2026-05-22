@@ -70,7 +70,7 @@ public:
     // the goto completed.
     bool goto_arrived() const;
 
-    Command step(const Pos2D& pose, Dashboard& dash);
+    Command step(const Pos2D& pose, const Pose2DCov& cov, Dashboard& dash);
 
     State state() const;
     static const char* state_name(State s);
@@ -175,6 +175,19 @@ private:
     bool   _test_replan_needed  = false;
     double _test_v_max_mm_s     = 50.0 * ROBOT_SPEED;
     double _test_margin_mm      = 40.0;
+
+    // Halt-and-localize bookkeeping. When PurePursuit reports arrived for a
+    // closed-loop leg (TEST/GOTO), we latch _halting=true, command zero
+    // velocity, and wait HALT_MIN_MS..HALT_MAX_MS for σ_xy to settle (Cox
+    // folds ~3-5 fresh fixes into the KF while the wheels stand still and
+    // add no odometry noise). The Mahalanobis gate then checks the leg
+    // target sits inside the post-halt covariance before we advance.
+    // _halt_target_{x,y} snapshots the leg target at halt entry so the
+    // gate uses the same goal the controller was driving toward.
+    bool _halting = false;
+    std::chrono::steady_clock::time_point _halt_started;
+    double _halt_target_x = 0.0;
+    double _halt_target_y = 0.0;
 
     // Tunables. Conservative defaults; safe to tweak from main if needed.
     double _search_omega        = 0.35 * ROBOT_SPEED;  // rad/s, ~20°/s so camera gets enough frames

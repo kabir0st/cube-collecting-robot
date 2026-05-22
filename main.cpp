@@ -21,6 +21,13 @@ std::atomic<bool> app::relocalizing{false};
 std::atomic<bool> app::cox_first_fix{false};
 std::vector<std::thread> threads;
 
+// Definition for the extern declared in global.hpp. Boot default is the
+// previous compile-time tuning (1.875); main() overwrites this from
+// `robot.speed` in config.yml before any motor / controller object is
+// constructed, so member initializers that read ROBOT_SPEED see the
+// configured value.
+double ROBOT_SPEED = 1.875;
+
 
 static void handle_sigint(int) {
     if (app::shutdown.exchange(true)) {
@@ -51,6 +58,29 @@ int main() {
     } else {
         LOG("Main") << "Loaded config from " << config_path
                     << " (" << cfg.raw().size() << " keys).";
+    }
+
+    // Apply ROBOT_SPEED FIRST, before any object that captures it at
+    // construction time (Motor, PurePursuit, StateMachine — all built down
+    // inside loop_control). Clamp to a sane range so a typo in config
+    // doesn't ramp accel into orbit; logs the resolved value so the
+    // operator can see what's actually in effect.
+    {
+        double rs = cfg.get_dbl("robot.speed", ROBOT_SPEED);
+        if (!std::isfinite(rs) || rs <= 0.0) {
+            LOGE("Main") << "robot.speed = " << rs
+                         << " is invalid; falling back to default "
+                         << ROBOT_SPEED;
+        } else {
+            if (rs > 5.0) {
+                LOGE("Main") << "robot.speed = " << rs
+                             << " is above the soft ceiling (5.0); clamping. "
+                                "Accel ramps & omega will saturate at chassis caps.";
+                rs = 5.0;
+            }
+            ROBOT_SPEED = rs;
+        }
+        LOG("Main") << "ROBOT_SPEED = " << ROBOT_SPEED;
     }
     CameraConfig cam_cfg(
         cfg.get_int("camera.width",      640),
