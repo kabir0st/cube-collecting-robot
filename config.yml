@@ -34,7 +34,7 @@ mission:
   # Home is centered on the robot's starting pose (the localization
   # origin (0, 0, 0)). Only the zone size and arm geometry are tunable.
   home_margin_mm: 152.4   # 0.5 ft — radius of the 1 ft home zone
-  arm_length_mm: 80.0     # LIDAR center -> arm tip (held box position)
+  arm_length_mm: 165.0     # LIDAR center -> arm tip (held box position)
 
 map:
   # The reference map is built from ~50 lidar frames at boot via RANSAC.

@@ -241,7 +241,7 @@ void loop_control(Dashboard& dash,
             w_cmd = 0.0;
         }
 
-        // motor.set_velocity(v_cmd, w_cmd);
+        motor.set_velocity(v_cmd, w_cmd);
 
         uint64_t rejects = 0;
         motor.get_spi_stats(rejects);
