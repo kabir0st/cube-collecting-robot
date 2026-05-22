@@ -45,12 +45,12 @@ mission:
   arm_length_mm: 80.0
 
 arena:
-  in_arena: false
+  in_arena: true
   arena_width_mm: 2400.0
   arena_length_mm: 3600.0
   # Wall match tolerance for the validator.
-  validation_tol_mm: 100.0
-  validation_tol_deg: 5.0
+  validation_tol_mm: 500.0
+  validation_tol_deg: 10.0
 
   # RANSAC presets. The active one is picked at boot by `in_arena`.
   # Tune these without touching code.
@@ -61,7 +61,7 @@ arena:
     max_iters_per_line: 200
     inlier_points_req: 20
     min_inlier_fraction: 0.10
-    max_lines: 5
+    max_lines: 20
     endpoint_padding_mm: 50.0
     min_segment_len_mm: 500.0
   ransac_room:
