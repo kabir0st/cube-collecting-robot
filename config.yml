@@ -45,7 +45,7 @@ mission:
   arm_length_mm: 80.0
 
 arena:
-  in_arena: false
+  in_arena: true
   arena_width_mm: 2400.0
   arena_length_mm: 3600.0
   # Wall match tolerance for the validator.
@@ -83,7 +83,7 @@ logger:
   # Lab-4 UDP stream to Matlab listener.
   udp_enabled: true
   out_dir: logs
-  udp_host: 169.254.6.52
+  udp_host: 10.98.151.142
   udp_port: 5005
   tick_ms: 100
   # Take every N-th lidar beam for the UDP scan overlay. 1 = full ~360 pts,
