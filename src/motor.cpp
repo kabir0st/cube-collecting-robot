@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 #include <global.hpp>
 #include <loggers.hpp>
@@ -91,15 +92,65 @@ bool Motor::start() {
           LOGE("Motor") << "wiringPiSPISetup(1) failed";
           return false;
       }
-    MotorDataType md = {0, 0, 0, 0, 0, 0};
-    Send_Read_Motor_Data(&md);
-    // Let the Arduino apply the zero-speed command before the IO loop
-    // starts pumping setpoints. If the previous run was killed mid-motion
-    // the motors are still spinning until this settles — without the
-    // pause, the first tick of the IO loop fires while the controller is
-    // still decelerating, which shows up as a twitch on start.
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-    // Re-read encoders so the seed reflects the settled (stopped) state.
+
+    // Settle pause after SPI init. The bus lines need a few ms to come
+    // out of their pre-init state; sending commands immediately can
+    // clock garbage bytes into the Arduino that look like asymmetric
+    // speed commands and rotate the chassis a few degrees.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Hammer zero frames to fully overwrite any stale Arduino state
+    // (e.g., previous run was SIGKILL'd while driving). One frame is
+    // not always enough — the controller may finish its current PWM
+    // cycle at the previous speed before applying the new command, so
+    // we send N frames at the motor IO loop period to cover several
+    // PWM cycles before doing anything else.
+    //
+    // memset (not aggregate init) so padding bytes in MotorDataType are
+    // guaranteed zero — otherwise an Arduino that parses by struct
+    // offset could see stack garbage in padding slots.
+    MotorDataType md;
+    constexpr int   ZERO_FRAMES = 8;
+    constexpr auto  ZERO_GAP    = std::chrono::milliseconds(25);  // 8 × 25ms = 200ms
+    for (int i = 0; i < ZERO_FRAMES; ++i) {
+        std::memset(&md, 0, sizeof(md));
+        Send_Read_Motor_Data(&md);
+        std::this_thread::sleep_for(ZERO_GAP);
+    }
+
+    // Poll encoders until the wheels are actually stationary. If a
+    // previous run left them spinning, the zero frames have now arrived
+    // but inertia can keep them coasting for a few hundred ms more.
+    // Two successive reads with negligible delta = at rest. Cap the
+    // wait so a stuck-spinning chassis doesn't deadlock startup.
+    constexpr auto  POLL_GAP        = std::chrono::milliseconds(50);
+    constexpr auto  POLL_TIMEOUT    = std::chrono::seconds(3);
+    constexpr int32_t REST_TICK_TOL = 2;   // ~17 µm at 119 ticks/mm — sensor noise
+    const auto t_poll_start = std::chrono::steady_clock::now();
+    int32_t prev_l = 0, prev_r = 0;
+    bool first = true;
+    while (true) {
+        std::memset(&md, 0, sizeof(md));
+        Send_Read_Motor_Data(&md);
+        if (!first) {
+            const int32_t dl = std::abs(md.Encoder_M1 - prev_l);
+            const int32_t dr = std::abs(md.Encoder_M2 - prev_r);
+            if (dl <= REST_TICK_TOL && dr <= REST_TICK_TOL) break;
+        }
+        prev_l = md.Encoder_M1;
+        prev_r = md.Encoder_M2;
+        first = false;
+        if (std::chrono::steady_clock::now() - t_poll_start > POLL_TIMEOUT) {
+            LOGE("Motor") << "Wheels still moving after "
+                          << POLL_TIMEOUT.count()
+                          << "s of zero frames — proceeding anyway.";
+            break;
+        }
+        std::this_thread::sleep_for(POLL_GAP);
+    }
+
+    // Final read for the encoder seed in the settled state.
+    std::memset(&md, 0, sizeof(md));
     Send_Read_Motor_Data(&md);
     const int32_t seed_l = md.Encoder_M1;
     const int32_t seed_r = md.Encoder_M2;
