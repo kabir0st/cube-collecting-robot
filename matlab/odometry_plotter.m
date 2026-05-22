@@ -1,7 +1,7 @@
 % Real-time robot odometry receiver and plotter
 % Packet format (ASCII, newline-terminated):
 %   "x_mm,y_mm,theta_deg,d_mm,da_deg\n"
-% Requirements: MATLAB R2020b+ (uses udpport, not legacy udp())
+% Requirements: Any MATLAB with JVM — uses Java DatagramSocket, no toolbox needed
 % ---------------------------------------------------------------------------
 
 %% Config
@@ -9,15 +9,18 @@ UDP_PORT    = 5005;
 MAX_HISTORY = 4000;    % maximum 
 ARROW_LEN   = 80;     % mm, heading arrow visual length
 
-%% Open UDP socket
+%% Open UDP socket (Java DatagramSocket — no toolbox required)
 try
-    u = udpport("LocalPort", UDP_PORT, "Timeout", 5);
+    socket  = java.net.DatagramSocket(UDP_PORT);
+    socket.setSoTimeout(5);              % 5 ms receive timeout so the loop stays responsive
 catch ME
     error('Cannot open UDP port %d: %s', UDP_PORT, ME.message);
 end
 fprintf('Listening on port %d ...\n', UDP_PORT);
 
-cleanup = onCleanup(@() delete(u));   % auto-close on Ctrl-C or error to unlock the port 
+pkt_buf = zeros(1, 512, 'int8');
+pkt     = java.net.DatagramPacket(pkt_buf, numel(pkt_buf));
+cleanup = onCleanup(@() socket.close());  % auto-close on Ctrl-C or error
 
 %% Circular buffers
 xs     = nan(1, MAX_HISTORY);
@@ -80,17 +83,14 @@ fprintf('Close the figure or press Ctrl-C to stop.\n');
 
 
 while ishandle(fig)
-    % sleep for 5 ms if no data arrived
-    if u.NumBytesAvailable == 0
-        pause(0.005);
-        continue;
-    end
-
+    % block up to 5 ms waiting for a packet; timeout silently loops
     try
-        raw = readline(u);
+        socket.receive(pkt);
     catch
         continue;
     end
+    raw = char(pkt.getData())';
+    raw = raw(1:pkt.getLength());
 
     parts = str2double(strsplit(strtrim(raw), ','));
 
