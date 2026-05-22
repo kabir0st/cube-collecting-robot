@@ -158,6 +158,11 @@ struct CameraConfig {
     double grab_bottom_region_ratio = 0.40;
     double grab_bottom_fill_ratio   = 0.50;
 
+    // Detections whose centroid falls inside the top fraction of the frame
+    // are rejected outright (typical use: ignore pink things on walls/lab
+    // posters above the floor plane).
+    double detect_top_exclude_ratio = 0.25;
+
     CameraConfig(int w, int h, int f):
         width(w), height(h), fps_target(f) {}
 

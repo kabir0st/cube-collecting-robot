@@ -130,6 +130,12 @@ void loop_vision_tracking(Dashboard& dash,
         cv::findContours(mask, contours,
                          cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
+        // Upper dead-zone: detections whose centroid falls in the top
+        // `detect_top_exclude_ratio` of the frame are skipped. Computed once
+        // per frame so the contour loop just does a y-compare.
+        const int dead_zone_y = static_cast<int>(
+            cfg.height * cfg.detect_top_exclude_ratio);
+
         // Score = area, penalized by distance from the last detection.
         int          selected       = -1;
         double       selected_score = -DBL_MAX;
@@ -145,6 +151,7 @@ void loop_vision_tracking(Dashboard& dash,
             const cv::Point2f center(
                 static_cast<float>(M.m10 / M.m00),
                 static_cast<float>(M.m01 / M.m00));
+            if (center.y < static_cast<float>(dead_zone_y)) continue;
             double score = area;
             if (has_last_position) {
                 score -= 8.0 * cv::norm(center - last_center);
@@ -207,6 +214,10 @@ void loop_vision_tracking(Dashboard& dash,
         }
 
         cv::rectangle(frame, bottom_region, cv::Scalar(0, 255, 255), 1);
+        // Upper exclusion zone — magenta so it doesn't blend with the
+        // yellow grab-region or the red bbox.
+        const cv::Rect top_region(0, 0, cfg.width, dead_zone_y);
+        cv::rectangle(frame, top_region, cv::Scalar(255, 0, 255), 1);
 
         // -------- Lost state machine --------
         if (detected) {

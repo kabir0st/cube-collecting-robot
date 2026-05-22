@@ -110,9 +110,16 @@ bool CalibrateCamera::create_filter_mask(FilterResult& result){
     const bool spans_red_edges =
         h_min <= red_edge_window && h_max >= (180.f - red_edge_window);
 
-    const float hue_margin = 10.f;
-    const float s_margin = 20.f;
-    const float v_margin = 40.f;  
+    // Tightened margins: a noisy / poorly-white-balanced camera spreads
+    // background pixels into a wider band of HSV than a clean one, so the
+    // *wider* the margin the more non-target pixels survive the inRange and
+    // form spurious blobs. Narrowing the band keeps only "really pink"
+    // pixels and rejects the bulk of camera noise. Costs a bit of robustness
+    // to dramatic lighting changes — if the box is also dim/washed-out the
+    // calibration ROI should be re-captured under the same lighting.
+    const float hue_margin = 6.f;
+    const float s_margin   = 10.f;
+    const float v_margin   = 20.f;
 
     if ((h_max - h_min) > 90.f && hue_is_reliable && spans_red_edges){
         sort(h_vals.begin(), h_vals.end());
