@@ -33,47 +33,29 @@
 
 > **Note:** Only `mission.home_theta_rad` is used today (seed pose for localization). The other mission keys are loaded only if `StateMachine::configure()` is wired in.
 
-| Key | Default | What it does | Increase / Decrease effect |
-|---|---|---|---|
-| `mission.home_x_mm` | `275.0` | Target **box** landing X in arena frame (mm). | **Increase:** drop zone moves deeper into arena. **Decrease:** drop zone closer to back wall. |
-| `mission.home_y_mm` | `0.0` | Target **box** landing Y in arena frame (mm). | **Increase / Decrease:** shifts drop zone left/right in arena frame. |
-| `mission.home_theta_rad` | `0.0` | Home pose heading (rad) used to seed the KF when `arena.in_arena=true`. | **Increase:** rotate seed heading CCW. **Decrease:** rotate seed heading CW. |
-| `mission.home_margin_mm` | `25.0` | Arrival radius used by the path follower at home. | **Increase:** easier to “arrive” but less precise. **Decrease:** tighter precision, may stall if too small. |
-| `mission.arm_length_mm` | `80.0` | Distance from robot center to box when held. | **Increase:** biases robot stop point further back from the box drop. **Decrease:** biases stop point forward. |
-
-### `arena`
+Home is centered on the robot's **starting pose** (world origin). The home zone is a 1 ft x 1 ft area, with `home_margin_mm` = 0.5 ft as the arrival radius.
 
 | Key | Default | What it does | Increase / Decrease effect |
 |---|---|---|---|
-| `arena.in_arena` | `false` | Selects **analytical arena map** (`true`) vs **RANSAC map** (`false`), and also selects `ransac_arena` vs `ransac_room`. | **True:** strict arena geometry and validation. **False:** builds map from walls in the room. |
-| `arena.arena_width_mm` | `2400.0` | Arena width used to build the analytical map. | **Increase / Decrease:** scales left/right walls and search bounds. |
-| `arena.arena_length_mm` | `3600.0` | Arena length used to build the analytical map. | **Increase / Decrease:** scales front wall and search bounds. |
-| `arena.validation_tol_mm` | `100.0` | Position tolerance when validating observed walls vs expected map. | **Increase:** more tolerant, fewer false aborts; risks accepting wrong walls. **Decrease:** stricter, may abort with slight noise. |
-| `arena.validation_tol_deg` | `5.0` | Angle tolerance in **degrees** for wall validation (converted to radians at load). | **Increase:** tolerates more angular error. **Decrease:** stricter angle match. |
+| `mission.home_x_mm` | `0.0` | Target **box** landing X (mm) in the localization frame; defaults to the robot's starting pose. | **Increase / Decrease:** shifts the drop point relative to the starting pose. |
+| `mission.home_y_mm` | `0.0` | Target **box** landing Y (mm) in the localization frame. | **Increase / Decrease:** shifts drop point left/right. |
+| `mission.home_theta_rad` | `0.0` | Home pose heading (rad) used to seed the KF at boot. | **Increase:** rotate seed heading CCW. **Decrease:** rotate seed heading CW. |
+| `mission.home_margin_mm` | `152.4` | Arrival radius (≈ 0.5 ft) used at home — half the side of the 1 ft home zone. | **Increase:** larger home zone, easier to "arrive". **Decrease:** tighter precision. |
+| `mission.arm_length_mm` | `80.0` | Distance from robot center to the box when held. | **Increase:** biases robot stop point further back from the drop. **Decrease:** biases stop point forward. |
 
-#### `arena.ransac_arena` (tight, clean arena)
+### `map`
 
-| Key | Default | What it does | Increase / Decrease effect |
-|---|---|---|---|
-| `arena.ransac_arena.inlier_thresh_mm` | `25.0` | Perpendicular distance gate for line inliers. | **Increase:** accepts noisier points; may fit wrong lines. **Decrease:** tighter but may reject real wall points. |
-| `arena.ransac_arena.max_iters_per_line` | `200` | RANSAC trials per line. | **Increase:** more robust but slower. **Decrease:** faster but less robust. |
-| `arena.ransac_arena.inlier_points_req` | `20` | Minimum inliers for a line. | **Increase:** stricter. **Decrease:** accepts weaker lines. |
-| `arena.ransac_arena.min_inlier_fraction` | `0.10` | Minimum fraction of points that must be inliers. | **Increase:** stricter; may fail in sparse data. **Decrease:** more permissive. |
-| `arena.ransac_arena.max_lines` | `5` | Cap on walls extracted. | **Increase:** can accept more walls (risk clutter). **Decrease:** fewer walls. |
-| `arena.ransac_arena.endpoint_padding_mm` | `50.0` | Extends wall endpoints for downstream matching. | **Increase:** makes endpoints longer, more forgiving. **Decrease:** tighter endpoints. |
-| `arena.ransac_arena.min_segment_len_mm` | `500.0` | Reject segments shorter than this. | **Increase:** suppresses short spurious lines. **Decrease:** allows shorter walls. |
-
-#### `arena.ransac_room` (looser, cluttered room)
+The reference map for cox localization is built from ~50 lidar frames at boot using RANSAC. There is no hardcoded arena geometry — walls are whatever the lidar finds.
 
 | Key | Default | What it does | Increase / Decrease effect |
 |---|---|---|---|
-| `arena.ransac_room.inlier_thresh_mm` | `40.0` | Perpendicular distance gate for line inliers. | **Increase:** tolerates more clutter/noise. **Decrease:** stricter. |
-| `arena.ransac_room.max_iters_per_line` | `300` | RANSAC trials per line. | **Increase:** more robust, slower. **Decrease:** faster. |
-| `arena.ransac_room.inlier_points_req` | `10` | Minimum inliers for a line. | **Increase:** stricter. **Decrease:** accepts weaker lines. |
-| `arena.ransac_room.min_inlier_fraction` | `0.02` | Minimum fraction of points that must be inliers. | **Increase:** stricter, may fail in clutter. **Decrease:** permissive. |
-| `arena.ransac_room.max_lines` | `10` | Cap on walls extracted. | **Increase:** allows more candidates. **Decrease:** fewer lines. |
-| `arena.ransac_room.endpoint_padding_mm` | `50.0` | Extends wall endpoints for downstream matching. | **Increase:** more forgiving endpoints. **Decrease:** tighter endpoints. |
-| `arena.ransac_room.min_segment_len_mm` | `800.0` | Reject segments shorter than this. | **Increase:** filters furniture edges more aggressively. **Decrease:** allows shorter segments. |
+| `map.ransac.inlier_thresh_mm` | `40.0` | Perpendicular distance gate for line inliers. | **Increase:** tolerates more clutter/noise. **Decrease:** stricter. |
+| `map.ransac.max_iters_per_line` | `300` | RANSAC trials per line. | **Increase:** more robust, slower. **Decrease:** faster. |
+| `map.ransac.inlier_points_req` | `10` | Minimum inliers for a line. | **Increase:** stricter. **Decrease:** accepts weaker lines. |
+| `map.ransac.min_inlier_fraction` | `0.02` | Minimum fraction of points that must be inliers. | **Increase:** stricter, may fail in clutter. **Decrease:** permissive. |
+| `map.ransac.max_lines` | `10` | Cap on walls extracted. | **Increase:** allows more candidates. **Decrease:** fewer lines. |
+| `map.ransac.endpoint_padding_mm` | `50.0` | Extends wall endpoints for downstream matching. | **Increase:** more forgiving endpoints. **Decrease:** tighter endpoints. |
+| `map.ransac.min_segment_len_mm` | `800.0` | Reject segments shorter than this. | **Increase:** filters furniture edges more aggressively. **Decrease:** allows shorter segments. |
 
 ### `logger`
 

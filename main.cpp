@@ -78,33 +78,21 @@ int main() {
     mission.arm_length_mm = cfg.get_dbl("mission.arm_length_mm",   mission.arm_length_mm);
     const double mission_home_theta = mission.home_theta;
 
-    // Arena geometry + validation tolerances. Degrees in the YAML are
-    // converted to radians here so the rest of the codebase only deals in
-    // mm/rad.
-    ArenaConfig arena_cfg;
-    arena_cfg.in_arena           = cfg.get_bool("arena.in_arena",           arena_cfg.in_arena);
-    arena_cfg.width_mm           = cfg.get_dbl ("arena.arena_width_mm",     arena_cfg.width_mm);
-    arena_cfg.length_mm          = cfg.get_dbl ("arena.arena_length_mm",    arena_cfg.length_mm);
-    arena_cfg.validation_tol_mm  = cfg.get_dbl ("arena.validation_tol_mm",  arena_cfg.validation_tol_mm);
-    arena_cfg.validation_tol_rad = cfg.get_dbl ("arena.validation_tol_deg", 5.0) * M_PI / 180.0;
+    // RANSAC parameters for the boot-time lidar map build. Defaults match
+    // the looser room-style preset since the analytical arena map has been
+    // retired.
+    RansacParams map_ransac;
+    map_ransac.inlier_thresh_mm    = cfg.get_dbl("map.ransac.inlier_thresh_mm",    40.0);
+    map_ransac.max_iters_per_line  = cfg.get_int("map.ransac.max_iters_per_line",  300);
+    map_ransac.inlier_points_req   = cfg.get_int("map.ransac.inlier_points_req",   10);
+    map_ransac.min_inlier_fraction = cfg.get_dbl("map.ransac.min_inlier_fraction", 0.02);
+    map_ransac.max_lines           = cfg.get_int("map.ransac.max_lines",           10);
+    map_ransac.endpoint_padding_mm = cfg.get_dbl("map.ransac.endpoint_padding_mm", 50.0);
+    map_ransac.min_segment_len_mm  = cfg.get_dbl("map.ransac.min_segment_len_mm",  800.0);
 
-    // RANSAC presets -- the one used is selected at runtime in core.cpp by
-    // `in_arena`. Both blocks parsed unconditionally so the dashboard /
-    // logs surface whichever one is active.
-    auto load_ransac = [&](const std::string& prefix, RansacParams& p) {
-        p.inlier_thresh_mm    = cfg.get_dbl(prefix + ".inlier_thresh_mm",    p.inlier_thresh_mm);
-        p.max_iters_per_line  = cfg.get_int(prefix + ".max_iters_per_line",  p.max_iters_per_line);
-        p.inlier_points_req   = cfg.get_int(prefix + ".inlier_points_req",   p.inlier_points_req);
-        p.min_inlier_fraction = cfg.get_dbl(prefix + ".min_inlier_fraction", p.min_inlier_fraction);
-        p.max_lines           = cfg.get_int(prefix + ".max_lines",           p.max_lines);
-        p.endpoint_padding_mm = cfg.get_dbl(prefix + ".endpoint_padding_mm", p.endpoint_padding_mm);
-        p.min_segment_len_mm  = cfg.get_dbl(prefix + ".min_segment_len_mm",  p.min_segment_len_mm);
-    };
-    load_ransac("arena.ransac_arena", arena_cfg.ransac_arena);
-    load_ransac("arena.ransac_room",  arena_cfg.ransac_room);
-
-    LOG("Main") << "Arena: in_arena=" << (arena_cfg.in_arena ? "yes" : "no")
-                << " size=" << arena_cfg.width_mm << "x" << arena_cfg.length_mm << " mm";
+    LOG("Main") << "Map RANSAC: max_lines=" << map_ransac.max_lines
+                << " min_seg=" << map_ransac.min_segment_len_mm
+                << " mm thresh=" << map_ransac.inlier_thresh_mm << " mm";
 
     telemetry::init(
         cfg.get_str ("logger.udp_host",      "127.0.0.1"),
@@ -160,7 +148,7 @@ int main() {
     dash.add_row("Cox");
     threads.emplace_back(loop_localization,
         std::ref(dash), std::ref(lidar_data), std::ref(kf),
-        std::cref(arena_cfg), mission_home_theta);
+        std::cref(map_ransac), mission_home_theta);
     // waiting for cox 1st seeds to be stable
     std::this_thread::sleep_for(std::chrono::seconds(5));
 

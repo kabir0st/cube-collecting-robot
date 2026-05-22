@@ -20,55 +20,23 @@ robot:
   # Front extent (with arm extended + held box) = arm_length_mm + 30 mm.
 
 mission:
-  # Home is a 1 ft x 1 ft (~305 mm) drop zone against the back wall.
-  # Arena frame: back wall at x = 0, +x into the arena, midline y = 0.
-  #
-  # home_x/y_mm is where the *box* should land. The controller biases the
-  # robot's goal back by arm_length_mm, so robot_x = home_x_mm - 80.
-  #
-  # Geometry from robot:
-  #   robot back = 150 mm behind LIDAR  → need robot_x ≥ 170 (20 mm safety)
-  #   robot front (arm+box) = 110 mm    → need robot_x ≤ 195 to keep the
-  #                                       box leading edge inside the zone
-  # That pins home_x_mm to [250, 275]. home_margin_mm must be ≤ 25 so the
-  # worst-case approach (anywhere on the arrival circle) still satisfies
-  # both bounds. 275 / 25 picks the middle of the safe band:
-  #   robot stop range:  [170, 220]  rear clearance: [20, 70]  mm
-  #   box landing range: [250, 300]  inside home zone [0, 305]
-  home_x_mm: 275.0
+  # Home is a 1 ft x 1 ft (~305 mm) drop zone CENTERED on the robot's
+  # starting pose. home_margin_mm is the arrival radius (0.5 ft).
+  # home_x/y_mm is where the *box* should land; the controller biases the
+  # robot's stop point back by arm_length_mm along the heading so the held
+  # box lands on the home center.
+  home_x_mm: 0.0
   home_y_mm: 0.0
   home_theta_rad: 0.0
-  home_margin_mm: 25.0
+  home_margin_mm: 152.4
   # Distance from LIDAR center to the arm tip (= where the held box sits).
-  # If you change this, recompute the home_x_mm / home_margin_mm window
-  # above (robot_x = home_x_mm - arm_length_mm).
   arm_length_mm: 80.0
 
-arena:
-  in_arena: true
-  arena_width_mm: 2400.0
-  arena_length_mm: 3600.0
-  # Wall match tolerance for the validator.
-  validation_tol_mm: 500.0
-  validation_tol_deg: 10.0
-
-  # RANSAC presets. The active one is picked at boot by `in_arena`.
-  # Tune these without touching code.
-  ransac_arena:
-    # Clean rectangular arena, ~4 long walls, robot inside.
-    # Tight gates, high inlier requirement, hard cap at 4 lines.
-    inlier_thresh_mm: 25.0
-    max_iters_per_line: 200
-    inlier_points_req: 20
-    min_inlier_fraction: 0.10
-    max_lines: 20
-    endpoint_padding_mm: 50.0
-    min_segment_len_mm: 500.0
-  ransac_room:
-    # Real-room operation: walls partially occluded by chairs, desks,
-    # PCs. Loose gates, lower inlier requirement, extract more
-    # candidates and reject short segments so furniture edges don't
-    # masquerade as walls.
+map:
+  # The reference map is built from ~50 lidar frames at boot via RANSAC.
+  # No hardcoded geometry — walls are whatever the lidar finds. Tune these
+  # for the actual operating environment.
+  ransac:
     inlier_thresh_mm: 40.0
     max_iters_per_line: 300
     inlier_points_req: 10

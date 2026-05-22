@@ -128,7 +128,7 @@ private:
     size_t _search_last_wp_idx = static_cast<size_t>(-1);
 
     // Adaptive-subdivision search plan. Regenerated on every entry to SEARCH
-    // from the arena bounding box published by the calibrations module.
+    // from the map bounding box published by the calibrations module.
     struct SearchPlan {
         std::vector<std::pair<double, double>> waypoints;  // world-frame (x, y) mm
         size_t idx = 0;
@@ -211,7 +211,7 @@ private:
                        double margin_mm, double v_max_mm_s);
 
     // Build the adaptive-subdivision waypoint list from the calibrations
-    // module's published ArenaBounds. Sets _search_plan.valid = false if the
+    // module's published MapBounds. Sets _search_plan.valid = false if the
     // bounds are not yet ready.
     void _build_search_plan(const Pos2D& pose);
 };

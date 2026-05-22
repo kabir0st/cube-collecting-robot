@@ -625,246 +625,16 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
     return walls;
 }
 
-std::vector<LineSeg> build_arena_map(double width_mm, double length_mm) {
-    // Frame: home at midpoint of the back wall (x=0), robot faces +x.
-    // Normals point INTO the arena so y = nx*pwx + ny*pwy - r is positive
-    // for interior points (Cox convention, src/cox.cpp:45).
-    const float half_w = static_cast<float>(0.5 * width_mm);
-    const float L      = static_cast<float>(length_mm);
-
-    std::vector<LineSeg> walls;
-    walls.reserve(4);
-
-    // Back wall (home wall, behind robot at boot): x = 0, normal +x.
-    LineSeg back;
-    back.nx = 1.0f; back.ny = 0.0f; back.r = 0.0f;
-    back.ax = 0.0f; back.ay = -half_w;
-    back.bx = 0.0f; back.by = +half_w;
-    walls.push_back(back);
-
-    // Front wall: x = L, normal -x. r = -L so y = -pwx - (-L) = L - pwx > 0.
-    LineSeg front;
-    front.nx = -1.0f; front.ny = 0.0f; front.r = -L;
-    front.ax = L; front.ay = -half_w;
-    front.bx = L; front.by = +half_w;
-    walls.push_back(front);
-
-    // Right wall (+y side): y = +half_w, normal -y. r = -half_w.
-    LineSeg right;
-    right.nx = 0.0f; right.ny = -1.0f; right.r = -half_w;
-    right.ax = 0.0f; right.ay = +half_w;
-    right.bx = L;    right.by = +half_w;
-    walls.push_back(right);
-
-    // Left wall (-y side): y = -half_w, normal +y. r = -half_w.
-    LineSeg left;
-    left.nx = 0.0f; left.ny = 1.0f; left.r = -half_w;
-    left.ax = 0.0f; left.ay = -half_w;
-    left.bx = L;    left.by = -half_w;
-    walls.push_back(left);
-
-    LOG("MAP") << "Built analytical arena map: " << width_mm << " x "
-               << length_mm << " mm (4 walls).";
-    return walls;
-}
-
-namespace {
-
-// True if (n_obs, r_obs) describes the same infinite line as
-// (n_exp, r_exp), allowing for opposite-sign normal conventions
-// (RANSAC emits positive r; the analytical map has negative r on two
-// walls).
-bool same_line(const LineSeg& obs, const LineSeg& exp,
-               double tol_mm, double tol_rad,
-               double& signed_match_sign) {
-    // Angle between normals, modulo orientation.
-    const double dot = obs.nx * exp.nx + obs.ny * exp.ny;
-    const double abs_dot = std::min(1.0, std::fabs(dot));
-    const double ang = std::acos(abs_dot);
-    if (ang > tol_rad) return false;
-
-    // Sign that makes the normals point the same way.
-    const double sgn = (dot >= 0.0) ? 1.0 : -1.0;
-    // r in the obs frame, expressed in the exp frame's normal direction.
-    const double r_obs_adj = sgn * obs.r;
-    if (std::fabs(r_obs_adj - exp.r) > tol_mm) return false;
-
-    signed_match_sign = sgn;
-    return true;
-}
-
-// True if both endpoints of `obs` lie within tol_mm of the infinite line
-// defined by `exp.n, exp.r` (using exp's sign convention).
-bool endpoints_on_line(const LineSeg& obs, const LineSeg& exp, double tol_mm) {
-    const double d_a = std::fabs(exp.nx * obs.ax + exp.ny * obs.ay - exp.r);
-    const double d_b = std::fabs(exp.nx * obs.bx + exp.ny * obs.by - exp.r);
-    return d_a <= tol_mm && d_b <= tol_mm;
-}
-
-}  // namespace
-
-bool validate_arena_walls(const std::vector<LineSeg>& expected,
-                          const std::vector<LineSeg>& observed,
-                          double tol_mm, double tol_rad) {
-    if (expected.empty()) {
-        LOGE("MAP") << "validate_arena_walls: expected map is empty";
-        return false;
-    }
-    if (observed.empty()) {
-        LOGE("MAP") << "validate_arena_walls: RANSAC found no walls";
-        return false;
-    }
-
-    size_t unmatched = 0;
-    for (const LineSeg& obs : observed) {
-        bool matched = false;
-        for (const LineSeg& exp : expected) {
-            double sgn = 1.0;
-            if (!same_line(obs, exp, tol_mm, tol_rad, sgn)) continue;
-            if (!endpoints_on_line(obs, exp, tol_mm)) continue;
-            matched = true;
-            break;
-        }
-        if (!matched) {
-            ++unmatched;
-            LOGE("MAP") << "Unmatched observed wall: n=(" << obs.nx << ", "
-                        << obs.ny << ") r=" << obs.r
-                        << " endpoints (" << obs.ax << ", " << obs.ay
-                        << ") -> (" << obs.bx << ", " << obs.by << ")";
-        }
-    }
-    if (unmatched > 0) {
-        LOGE("MAP") << "Arena validation: " << unmatched << "/"
-                    << observed.size()
-                    << " observed walls did not match expected geometry";
-        return false;
-    }
-    LOG("MAP") << "Arena validation OK: all " << observed.size()
-               << " observed walls match expected rectangle";
-    return true;
-}
-
-namespace {
-
-// Distance between two parallel observed walls. RANSAC emits positive r with
-// the normal pointing from the sensor toward the wall. When the two walls
-// are on opposite sides of the robot their normals point opposite ways
-// (dot < 0); their separation is then |r1 + r2|. Same-side walls would give
-// |r1 - r2|; the sign-flip below handles both cases the same way as
-// same_line() above.
-double parallel_span(const LineSeg& a, const LineSeg& b) {
-    const double dot = static_cast<double>(a.nx) * b.nx +
-                       static_cast<double>(a.ny) * b.ny;
-    const double sgn = (dot >= 0.0) ? 1.0 : -1.0;
-    return std::fabs(static_cast<double>(a.r) - sgn * static_cast<double>(b.r));
-}
-
-// Pair the 4 observed walls into two ~parallel pairs that are mutually
-// perpendicular. Returns false if the geometry isn't a rectangle within
-// tol_rad. The four walls produced by find_walls under the arena RANSAC
-// preset are already capped at 4, so this is the expected shape.
-bool group_walls_perpendicular(const std::vector<LineSeg>& walls,
-                               double tol_rad,
-                               std::array<LineSeg, 2>& pair1,
-                               std::array<LineSeg, 2>& pair2,
-                               double& span1,
-                               double& span2) {
-    if (walls.size() != 4) return false;
-
-    const double cos_par  = std::cos(tol_rad);   // |dot| >= this -> parallel
-    const double cos_perp = std::sin(tol_rad);   // |dot| <= this -> perpendicular
-
-    int best_partner = -1;
-    double best_abs_dot = -1.0;
-    for (int i = 1; i < 4; ++i) {
-        const double d = std::fabs(static_cast<double>(walls[0].nx) * walls[i].nx +
-                                   static_cast<double>(walls[0].ny) * walls[i].ny);
-        if (d > best_abs_dot) {
-            best_abs_dot = d;
-            best_partner = i;
-        }
-    }
-    if (best_partner < 0 || best_abs_dot < cos_par) return false;
-
-    pair1[0] = walls[0];
-    pair1[1] = walls[best_partner];
-
-    int rem[2];
-    int ri = 0;
-    for (int i = 1; i < 4; ++i) if (i != best_partner) rem[ri++] = i;
-    pair2[0] = walls[rem[0]];
-    pair2[1] = walls[rem[1]];
-
-    const double d2 = std::fabs(static_cast<double>(pair2[0].nx) * pair2[1].nx +
-                                static_cast<double>(pair2[0].ny) * pair2[1].ny);
-    if (d2 < cos_par) return false;
-
-    const double d12 = std::fabs(static_cast<double>(pair1[0].nx) * pair2[0].nx +
-                                 static_cast<double>(pair1[0].ny) * pair2[0].ny);
-    if (d12 > cos_perp) return false;
-
-    span1 = parallel_span(pair1[0], pair1[1]);
-    span2 = parallel_span(pair2[0], pair2[1]);
-    return true;
-}
-
-}  // namespace
-
-bool try_fit_arena_fallback(const std::vector<LineSeg>& observed,
-                            const ArenaConfig& arena,
-                            ArenaFit& out) {
-    std::array<LineSeg, 2> pair1, pair2;
-    double span1 = 0.0, span2 = 0.0;
-    if (!group_walls_perpendicular(observed, arena.validation_tol_rad,
-                                   pair1, pair2, span1, span2)) {
-        LOGE("MAP") << "Fallback: observed walls don't form a rectangle";
-        return false;
-    }
-
-    const double tol = arena.validation_tol_mm;
-    const double W   = arena.width_mm;
-    const double L   = arena.length_mm;
-
-    // The short-wall pair is the one whose perpendicular separation equals
-    // the arena's LONG dimension L: short walls sit at x=0 and x=L of the
-    // analytical map (see build_arena_map above).
-    const bool p1_is_short = std::fabs(span1 - L) <= tol &&
-                             std::fabs(span2 - W) <= tol;
-    const bool p2_is_short = std::fabs(span2 - L) <= tol &&
-                             std::fabs(span1 - W) <= tol;
-    if (!p1_is_short && !p2_is_short) {
-        LOGE("MAP") << "Fallback: observed spans (" << span1 << ", " << span2
-                    << ") don't match arena " << W << " x " << L;
-        return false;
-    }
-
-    const std::array<LineSeg, 2>& short_pair = p1_is_short ? pair1 : pair2;
-    const bool a_closer = std::fabs(short_pair[0].r) < std::fabs(short_pair[1].r);
-    const LineSeg& home = a_closer ? short_pair[0] : short_pair[1];
-
-    // Robot's heading in the arena frame. The home wall's RANSAC normal
-    // points from the sensor toward the wall (outward from the arena
-    // interior); the arena frame defines +x_arena as the home wall's INWARD
-    // normal. So the robot-frame direction from origin to home wall maps to
-    // -x_arena. Solving R(theta) * (nx, ny) = (-1, 0) gives
-    // theta = atan2(ny, -nx).
-    out.ref_map = build_arena_map(W, L);
-    out.home_theta = std::atan2(static_cast<double>(home.ny),
-                                -static_cast<double>(home.nx));
-    out.rotated = std::fabs(home.nx) < std::fabs(home.ny);
-    return true;
-}
-
 namespace calib {
 namespace {
 std::atomic<bool> g_bounds_ready{false};
 std::mutex        g_bounds_m;
-ArenaBounds       g_bounds;
+MapBounds         g_bounds;
 }  // namespace
 
-void compute_arena_bounds(const std::vector<LineSeg>& walls) {
+void compute_map_bounds(const std::vector<LineSeg>& walls) {
     if (walls.empty()) return;
-    ArenaBounds b;
+    MapBounds b;
     b.min_x =  std::numeric_limits<double>::max();
     b.max_x =  std::numeric_limits<double>::lowest();
     b.min_y =  std::numeric_limits<double>::max();
@@ -880,11 +650,11 @@ void compute_arena_bounds(const std::vector<LineSeg>& walls) {
         g_bounds = b;
     }
     g_bounds_ready.store(true, std::memory_order_release);
-    LOG("Calib") << "Arena bbox: (" << b.min_x << "," << b.min_y
+    LOG("Calib") << "Map bbox: (" << b.min_x << "," << b.min_y
                  << ") to (" << b.max_x << "," << b.max_y << ")";
 }
 
-bool get_arena_bounds(ArenaBounds& out) {
+bool get_map_bounds(MapBounds& out) {
     if (!g_bounds_ready.load(std::memory_order_acquire)) return false;
     std::lock_guard<std::mutex> lk(g_bounds_m);
     out = g_bounds;

@@ -7,8 +7,12 @@
 #include <mutex>
 #include <opencv2/opencv.hpp>
 
-// only keep 3 latest frames
-constexpr std::size_t FRAME_COUNT = 3;
+// Circular buffer of lidar frames. Sized to give the boot-time map
+// builder (find_walls / get_lidar_sensor_noise) enough data to extract
+// stable walls via RANSAC. Runtime cox uses only the newest frame, so
+// the buffer depth costs ~290 KB of RAM and a one-shot snapshot copy
+// per boot — both negligible.
+constexpr std::size_t FRAME_COUNT = 50;
 
 struct Frame {
     int id;

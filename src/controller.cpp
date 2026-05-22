@@ -333,8 +333,8 @@ bool StateMachine::_plan_path_to(const Pos2D& current,
 }
 
 void StateMachine::_build_search_plan(const Pos2D& /*pose*/) {
-    calib::ArenaBounds ab;
-    if (!calib::get_arena_bounds(ab)) {
+    calib::MapBounds ab;
+    if (!calib::get_map_bounds(ab)) {
         _search_plan.valid = false;
         return;
     }
@@ -343,7 +343,7 @@ void StateMachine::_build_search_plan(const Pos2D& /*pose*/) {
     const double min_y = ab.min_y + _waypoint_margin_mm;
     const double max_y = ab.max_y - _waypoint_margin_mm;
     if (max_x <= min_x || max_y <= min_y) {
-        // Margin ate the bounds — arena too small to plan in. Spin and hope
+        // Margin ate the bounds — map too small to plan in. Spin and hope
         // the box wanders into view.
         _search_plan.valid = false;
         return;
@@ -356,7 +356,7 @@ void StateMachine::_build_search_plan(const Pos2D& /*pose*/) {
 
     _search_plan.waypoints.clear();
     _search_plan.waypoints.reserve(static_cast<size_t>(nx * ny) + 1);
-    // Center first so a small arena resolves in one rotation.
+    // Center first so a small map resolves in one rotation.
     _search_plan.waypoints.emplace_back(0.5 * (min_x + max_x),
                                         0.5 * (min_y + max_y));
     for (int j = 0; j < ny; ++j) {
@@ -504,7 +504,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
             }
 
             // Adaptive-subdivision waypoint walker. Plan is rebuilt on every
-            // SEARCH entry (see _transition). If the arena bounds aren't
+            // SEARCH entry (see _transition). If the map bounds aren't
             // published yet we just spin in place until they are.
             if (!_search_plan.valid) {
                 _build_search_plan(pose);

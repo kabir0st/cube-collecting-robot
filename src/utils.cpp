@@ -107,10 +107,15 @@ std::map<double, std::vector<double>> get_angle_mapped_lidar_data(LidarData& lid
 
 
 std::pair<std::vector<double>, std::vector<double>> get_latest_frame_lidar_data(LidarData& lidar_data) {
-    std::array<Frame, FRAME_COUNT - 1> latest_frames = lidar_data.get_latest_snapshot();
-    // get_latest_snapshot returns frames oldest -> newest; the last entry
-    // is the freshest complete frame.
-    const Frame& f = latest_frames.back();
+    // buffer_id points to the slot currently being written; the most recent
+    // *complete* frame is one slot behind it. Copy only that slot under the
+    // lidar_data lock — copying all FRAME_COUNT-1 frames per cox tick would
+    // dominate runtime with the 50-slot buffer.
+    std::lock_guard<std::mutex> guard(lidar_data.lock);
+    const std::size_t n = lidar_data.frames.size();
+    const std::size_t bid = static_cast<std::size_t>(lidar_data.buffer_id.load());
+    const std::size_t prev = (bid + n - 1) % n;
+    const Frame& f = lidar_data.frames[prev];
     return { std::vector<double>(f.ang.begin(), f.ang.end()),
              std::vector<double>(f.dist.begin(), f.dist.end()) };
 }

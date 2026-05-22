@@ -67,77 +67,47 @@ void loop_check_battery(INA219& power_interface, Dashboard& dash) {
 
 void loop_localization(Dashboard& dash,
                        LidarData& lidar_data, KalmanFilter& kf,
-                       const ArenaConfig& arena, double home_theta) {
-    // mapping;
+                       const RansacParams& ransac, double home_theta) {
     hh::Lidar lidar;
     if (!start_lidar(lidar)) {
         return;
     }
-    // starting lidar data collection
     std::thread thread_loop_collect_frames(loop_collect_frames,
                 std::ref(lidar), std::ref(lidar_data));
 
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    // Wait for the circular buffer to fill. ~5 Hz frame rate × 12 s ≈ 60
+    // frames, comfortably above FRAME_COUNT=50, so find_walls sees a
+    // fully-populated buffer for RANSAC wall extraction.
+    LOG("Main") << "Collecting lidar frames for map build...";
+    std::this_thread::sleep_for(std::chrono::seconds(12));
+
     const double measured_noise = get_lidar_sensor_noise(lidar_data);
     lidar_data.sensor_noise.store(measured_noise);
     LOG("Main") << "Lidar Sensor Noise : " << measured_noise;
 
-    std::vector<LineSeg> ref_map;
-    if (arena.in_arena) {
-        const std::vector<LineSeg> observed = find_walls(lidar_data,
-                                                         arena.ransac_arena);
-        const std::vector<LineSeg> expected = build_arena_map(
-            arena.width_mm, arena.length_mm);
-        if (validate_arena_walls(expected, observed,
-                                 arena.validation_tol_mm,
-                                 arena.validation_tol_rad)) {
-            ref_map = expected;
-        } else {
-            ArenaFit fit;
-            if (!try_fit_arena_fallback(observed, arena, fit)) {
-                LOGE("Main") << "Arena validation failed -- refusing to start.";
-                app::shutdown.store(true);
-                stop_lidar(lidar);
-                thread_loop_collect_frames.join();
-                return;
-            }
-            LOG("MAP") << "Arena validation fell back to closest-short-wall"
-                       << " home" << (fit.rotated ? " (rotated 90 deg)" : "")
-                       << "; seeding theta=" << fit.home_theta;
-            ref_map = std::move(fit.ref_map);
-            home_theta = fit.home_theta;
-        }
-    } else {
-        ref_map = find_walls(lidar_data, arena.ransac_room);
-        if (ref_map.empty()) {
-            LOGE("Main") << "find_walls produced an empty reference map; "
-                            "Cox has nothing to register against. Aborting.";
-            app::shutdown.store(true);
-            stop_lidar(lidar);
-            thread_loop_collect_frames.join();
-            return;
-        }
+    std::vector<LineSeg> ref_map = find_walls(lidar_data, ransac);
+    if (ref_map.empty()) {
+        LOGE("Main") << "find_walls produced an empty reference map; "
+                        "Cox has nothing to register against. Aborting.";
+        app::shutdown.store(true);
+        stop_lidar(lidar);
+        thread_loop_collect_frames.join();
+        return;
     }
     LOG("Main") << "Built reference map (" << ref_map.size() << " walls).";
-    calib::compute_arena_bounds(ref_map);
+    calib::compute_map_bounds(ref_map);
     telemetry::send_map(ref_map);
 
-    // Seed the KF at the expected home pose. If the robot was actually
-    // placed elsewhere the seed is wrong, cox will return an untrusted
-    // estimate on the first cycle, and loop_scan_cox_estimation's
-    // relocalize sweep will find the real pose and re-pin the KF. No
-    // abort -- "I'm somewhere unknown" is recoverable, not fatal.
-    if (arena.in_arena) {
-        kf.reset(Pos2D(0.0, 0.0, home_theta), KalmanFilter::default_cov());
-    }
+    // Seed the KF at the starting pose = home center. If cox later disagrees
+    // it will repin via the relocalize sweep — "I'm somewhere unknown" is
+    // recoverable, not fatal.
+    kf.reset(Pos2D(0.0, 0.0, home_theta), KalmanFilter::default_cov());
 
-    // starting cox estimation
     std::thread thread_loop_scan_cox(
         loop_scan_cox_estimation, std::ref(ref_map),
         std::ref(lidar_data),
         std::ref(dash), std::ref(kf)
     );
-    // joining threads
     thread_loop_scan_cox.join();
     thread_loop_collect_frames.join();
     stop_lidar(lidar);
