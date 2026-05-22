@@ -157,9 +157,9 @@ void loop_control(Dashboard& dash,
         odom.reset(l0_mm, r0_mm);
     }
 
-    sm.configure(mission.home_x_mm, mission.home_y_mm, mission.home_theta,
-                 mission.home_margin, mission.arm_length_mm);
-    sm.start();
+    // sm.configure(mission.home_x_mm, mission.home_y_mm, mission.home_theta,
+    //              mission.home_margin, mission.arm_length_mm);
+    // sm.start();
 
     while(!app::shutdown) {
         // giving time for 2 readings
@@ -194,42 +194,42 @@ void loop_control(Dashboard& dash,
         Pos2D p;
         Pose2DCov cov;
         kf.snapshot(p, cov);
-        const StateMachine::Command cmd = sm.step(p, dash);
-        double v_cmd = 0.0, w_cmd = 0.0;
-        switch (cmd.mode) {
-            case StateMachine::Command::Mode::DIRECT:
-                v_cmd = cmd.v_mm_s;
-                w_cmd = cmd.omega_rad_s;
-                break;
-            case StateMachine::Command::Mode::PATH_FOLLOW:
-                pp.compute(p, v_cmd, w_cmd);
-                break;
-            case StateMachine::Command::Mode::STOP:
-            default:
-                v_cmd = 0.0;
-                w_cmd = 0.0;
-                break;
-        }
+        // const StateMachine::Command cmd = sm.step(p, dash);
+        // double v_cmd = 0.0, w_cmd = 0.0;
+        // switch (cmd.mode) {
+        //     case StateMachine::Command::Mode::DIRECT:
+        //         v_cmd = cmd.v_mm_s;
+        //         w_cmd = cmd.omega_rad_s;
+        //         break;
+        //     case StateMachine::Command::Mode::PATH_FOLLOW:
+        //         pp.compute(p, v_cmd, w_cmd);
+        //         break;
+        //     case StateMachine::Command::Mode::STOP:
+        //     default:
+        //         v_cmd = 0.0;
+        //         w_cmd = 0.0;
+        //         break;
+        // }
         // Hold motors while cox is running a relocalize sweep -- driving on
         // a stale pose is worse than standing still. Also hold on a forward-
         // arc obstacle: loop_collect_frames sets app::obstacle_ahead when
         // any beam inside ±OBSTACLE_ARC_HALF_DEG is closer than
         // OBSTACLE_DIST_MM. Reverse motion (v < 0) is allowed so the robot
         // can back out of a near-miss.
-        if (app::relocalizing.load()) {
-            v_cmd = 0.0;
-            w_cmd = 0.0;
-        } else if (app::obstacle_ahead.load() && v_cmd > 0.0) {
-            v_cmd = 0.0;
-            w_cmd = 0.0;
-        }
-        motor.set_velocity(v_cmd, w_cmd);
+        // if (app::relocalizing.load()) {
+        //     v_cmd = 0.0;
+        //     w_cmd = 0.0;
+        // } else if (app::obstacle_ahead.load() && v_cmd > 0.0) {
+        //     v_cmd = 0.0;
+        //     w_cmd = 0.0;
+        // }
+        // motor.set_velocity(v_cmd, w_cmd);
 
         uint64_t rejects = 0;
         motor.get_spi_stats(rejects);
         dash.set("Motor", "spi_rej", rejects);
-        dash.set("Motor", "v_cmd",  v_cmd);
-        dash.set("Motor", "w_cmd_deg_s", w_cmd * 180.0 / M_PI);
+        // dash.set("Motor", "v_cmd",  v_cmd);
+        // dash.set("Motor", "w_cmd_deg_s", w_cmd * 180.0 / M_PI);
 
         // Fused pose + uncertainties (1σ).
         dash.set("KF", "X_mm",    p.x);
