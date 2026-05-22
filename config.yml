@@ -20,7 +20,7 @@ robot:
   # Soft ceiling with the current chassis caps (~504 mm/s, ~5.45 rad/s)
   # is ~3.6 before omega starts clipping on sharp turns; main() hard-clamps
   # to 5.0 with a warning if exceeded.
-  speed: 1.875
+  speed: 3.0
 
   # All extents measured from the LIDAR mount point (= the tracked pose
   # center used by cox / KF / odometry). Used for wall-clearance and home

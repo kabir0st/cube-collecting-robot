@@ -191,7 +191,7 @@ private:
 
     // Tunables. Conservative defaults; safe to tweak from main if needed.
     double _search_omega        = 0.35 * ROBOT_SPEED;  // rad/s, ~20°/s so camera gets enough frames
-    double _search_min_dwell_s  = 2.0;   // bounce guard between failed approaches
+    double _search_min_dwell_s  = 0.0;   // engage on sight; failed-target skip handles bounce protection
     double _search_v_max_mm_s   = 40.0 * ROBOT_SPEED;  // travel speed between waypoints
     double _waypoint_margin_mm  = 80.0;  // arrival radius + wall standoff
     double _box_detection_range_mm = 700.0;  // drives subdivision math

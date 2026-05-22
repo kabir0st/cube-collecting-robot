@@ -402,40 +402,16 @@ void StateMachine::_build_search_plan(const Pos2D& /*pose*/) {
         _search_plan.valid = false;
         return;
     }
-    const double min_x = ab.min_x + _waypoint_margin_mm;
-    const double max_x = ab.max_x - _waypoint_margin_mm;
-    const double min_y = ab.min_y + _waypoint_margin_mm;
-    const double max_y = ab.max_y - _waypoint_margin_mm;
-    if (max_x <= min_x || max_y <= min_y) {
-        // Margin ate the bounds — map too small to plan in. Spin and hope
-        // the box wanders into view.
-        _search_plan.valid = false;
-        return;
-    }
-    const double W    = max_x - min_x;
-    const double H    = max_y - min_y;
-    const double step = 2.0 * _box_detection_range_mm;
-    const int nx = std::max(1, (int)std::ceil(W / step));
-    const int ny = std::max(1, (int)std::ceil(H / step));
-
     _search_plan.waypoints.clear();
-    _search_plan.waypoints.reserve(static_cast<size_t>(nx * ny) + 1);
-    // Center first so a small map resolves in one rotation.
-    _search_plan.waypoints.emplace_back(0.5 * (min_x + max_x),
-                                        0.5 * (min_y + max_y));
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const double wx = min_x + (i + 0.5) * W / nx;
-            const double wy = min_y + (j + 0.5) * H / ny;
-            _search_plan.waypoints.emplace_back(wx, wy);
-        }
-    }
+    _search_plan.waypoints.emplace_back(0.5 * (ab.min_x + ab.max_x),
+                                        0.5 * (ab.min_y + ab.max_y));
     _search_plan.idx                  = 0;
     _search_plan.at_waypoint          = false;
     _search_plan.accumulated_rotation = 0.0;
     _search_plan.valid                = true;
-    LOG("Mission") << "Search plan: " << _search_plan.waypoints.size()
-                   << " waypoints (" << nx << "x" << ny << " grid + center)";
+    LOG("Mission") << "Search plan: center-only at ("
+                   << _search_plan.waypoints[0].first << ", "
+                   << _search_plan.waypoints[0].second << ")";
 }
 
 StateMachine::Command StateMachine::step(const Pos2D& pose,
@@ -624,16 +600,11 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 }
             }
 
-            // at_waypoint == true: rotate in place until ~2π accumulated.
-            const double dtheta = std::abs(wrap_pi(pose.theta - _search_plan.rotation_start_theta));
-            _search_plan.accumulated_rotation += dtheta;
+            // at_waypoint == true: rotate in place forever. Center-only plan
+            // means there's nowhere to advance to; we keep spinning until the
+            // tracker latches a target or _search_timeout_s trips us to
+            // SAFE_STOP.
             _search_plan.rotation_start_theta = pose.theta;
-            if (_search_plan.accumulated_rotation >= 2.0 * M_PI) {
-                _search_plan.idx++;
-                _search_plan.at_waypoint = false;
-                _search_plan.accumulated_rotation = 0.0;
-                _search_last_wp_idx = static_cast<size_t>(-1);
-            }
             out.mode = Command::Mode::DIRECT;
             out.v_mm_s = 0.0;
             out.omega_rad_s = _search_omega;
@@ -642,22 +613,14 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
 
         case State::APPROACH: {
             // 1. Vision tracker latched a hold (10-frame debounce on grip ROI).
-            //    Hand off to carry/release.
+            //    Always carry home before releasing, even if we happen to be
+            //    inside the home zone right now — releasing here would drop
+            //    the box where we picked it up and looks like an instant
+            //    grab-then-release to the operator.
             if (snap.captured) {
                 { std::lock_guard<std::mutex> lk(_m); _approach_attempts = 0; }
-                // Already at home Skip the carry phase. Decision uses the
-                // BOX position (pose + arm), not the robot pose, so that we
-                // do not back up with the box still parked in the gripper
-                // outside the home zone.
-                if (box_to_home < hm) {
-                    _transition(State::RELEASE, pose);
-                    out.mode = Command::Mode::DIRECT;
-                    out.v_mm_s = _release_v;
-                    out.omega_rad_s = 0.0;
-                } else {
-                    _transition(State::CARRY_HOME, pose);
-                    out.mode = Command::Mode::PATH_FOLLOW;
-                }
+                _transition(State::CARRY_HOME, pose);
+                out.mode = Command::Mode::PATH_FOLLOW;
                 break;
             }
 
