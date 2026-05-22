@@ -683,14 +683,15 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
 
             // 3. Box is in the grab zone. Two-tick sequence so the motor
             //    has a control cycle to decelerate before the gripper
-            //    target is commanded:
+            //    target is latched:
             //      tick N   — command v=0, latch _grip_stop_sent
-            //      tick N+1 — call servo_grab() (blocking, ~140 ms: the
-            //                 angle is walked in STEP_DEG / STEP_MS chunks
-            //                 to cap inrush current and keep the Pi's 5 V
-            //                 rail from browning out. v=0 is already in
-            //                 effect from tick N, so the wheels are
-            //                 stationary during the blocking window.)
+            //      tick N+1 — call servo_grab() (non-blocking: latches the
+            //                 target angle; servo_tick() in loop_control
+            //                 walks the PWM in STEP_DEG / STEP_MS chunks to
+            //                 cap inrush current). _grip_fired is set
+            //                 immediately, and v=0 stays commanded by the
+            //                 hold-after-grab logic below while the slew
+            //                 completes.
             if (snap.grabbable) {
                 if (!_grip_stop_sent) {
                     _grip_stop_sent = true;

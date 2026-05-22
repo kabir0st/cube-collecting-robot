@@ -18,7 +18,9 @@ enum {
 };
 
 static int INIT_RPI = 0;
-static int cur_deg[2] = {-1, -1};
+static int cur_deg[2]    = {-1, -1}; // -1 = unknown (no command issued yet)
+static int target_deg[2] = {-1, -1};
+static unsigned int last_step_ms[2] = {0, 0};
 
 void Init_RPI(void){
 	INIT_RPI = 1;
@@ -35,6 +37,7 @@ static void pwm_write_deg(int ch, int deg) {
 	int pin = (ch == 0) ? PWM0_pin : PWM1_pin;
 	pwmWrite(pin, (50 * deg) / 180 + 50); // 0deg=1ms, 180deg=2ms
 	cur_deg[ch] = deg;
+	last_step_ms[ch] = millis();
 }
 
 void Servo(int Ch, int Deg) {
@@ -42,21 +45,33 @@ void Servo(int Ch, int Deg) {
 	if (Ch < 0 || Ch > 1) return;
 	if (Deg < 0 || Deg > 180) return;
 
-	// First call on this channel: position is unknown, so commit directly.
-	// Subsequent moves step in STEP_DEG increments to limit peak current.
-	if (cur_deg[Ch] < 0) {
-		pwm_write_deg(Ch, Deg);
-		return;
-	}
+	target_deg[Ch] = Deg;
 
-	int from = cur_deg[Ch];
-	int step = (Deg > from) ? STEP_DEG : -STEP_DEG;
-	while ((step > 0 && from + step < Deg) || (step < 0 && from + step > Deg)) {
-		from += step;
-		pwm_write_deg(Ch, from);
-		delay(STEP_MS);
+	// First command on this channel: physical position is unknown, so we
+	// must commit it directly. From here on, servo_tick() steps gradually.
+	if (cur_deg[Ch] < 0) pwm_write_deg(Ch, Deg);
+}
+
+void servo_tick(void) {
+	if (!INIT_RPI) return; // nothing latched yet
+	unsigned int now = millis();
+	for (int ch = 0; ch < 2; ++ch) {
+		if (target_deg[ch] < 0 || cur_deg[ch] < 0) continue;
+		if (cur_deg[ch] == target_deg[ch]) continue;
+		if (now - last_step_ms[ch] < STEP_MS) continue;
+
+		int diff = target_deg[ch] - cur_deg[ch];
+		int step = (diff >  STEP_DEG) ?  STEP_DEG
+		         : (diff < -STEP_DEG) ? -STEP_DEG
+		         : diff;
+		pwm_write_deg(ch, cur_deg[ch] + step);
 	}
-	pwm_write_deg(Ch, Deg);
+}
+
+int servo_done(int ch) {
+	if (ch < 0 || ch > 1) return 1;
+	if (target_deg[ch] < 0) return 1;
+	return cur_deg[ch] == target_deg[ch];
 }
 
 void servo_grab()    { Servo(0, CLOSED_DEG); }

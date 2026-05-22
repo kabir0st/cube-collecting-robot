@@ -19,6 +19,7 @@
 #include <pure_pursuit.hpp>
 #include <kalman.hpp>
 #include <telemetry.hpp>
+#include <servo.h>
 
 
 void loop_check_battery(INA219& power_interface, Dashboard& dash) {
@@ -178,6 +179,11 @@ void loop_control(Dashboard& dash,
     while(!app::shutdown) {
         // giving time for 2 readings
         std::this_thread::sleep_for(std::chrono::milliseconds(40));
+
+        // Advance any pending gripper slew by one STEP_DEG (paced internally
+        // to STEP_MS). Non-blocking: keeps the 5 V rail safe without
+        // stalling odometry / motor updates.
+        servo_tick();
 
         double l_mm, r_mm;
         motor.get_encoders(l_mm, r_mm);
