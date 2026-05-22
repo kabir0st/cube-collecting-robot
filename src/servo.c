@@ -46,49 +46,5 @@ enum {
 	STEP_MS    = 20
 };
 
-// Last commanded angle per channel. -1 = unknown (no previous command).
-// Allows smooth-step from the previous position and makes repeated calls
-// to the same target a no-op.
-static int last_deg[2] = { -1, -1 };
-
-static int clamp_deg(int d) {
-	if (d < 0)   return 0;
-	if (d > 180) return 180;
-	return d;
-}
-
-// Walk the PWM output from the previous angle to `target_deg` in
-// STEP_DEG-sized steps with STEP_MS between each step. On the very first
-// call (last_deg unknown) the function snaps to target — we have no prior
-// position to interpolate from, and the user is presumably holding the
-// gripper before boot anyway.
-static void servo_smooth_to(int ch, int target_deg) {
-	if (!INIT_RPI) Init_RPI();
-	if (ch != 0 && ch != 1) return;
-	target_deg = clamp_deg(target_deg);
-
-	int prev = last_deg[ch];
-	if (prev < 0) {
-		Servo(ch, target_deg);
-		last_deg[ch] = target_deg;
-		return;
-	}
-	if (prev == target_deg) return;
-
-	int cur  = prev;
-	int step = (target_deg > prev) ? STEP_DEG : -STEP_DEG;
-	while (cur != target_deg) {
-		int next = cur + step;
-		if ((step > 0 && next > target_deg) ||
-		    (step < 0 && next < target_deg)) {
-			next = target_deg;
-		}
-		Servo(ch, next);
-		cur = next;
-		last_deg[ch] = cur;
-		if (cur != target_deg) delay(STEP_MS);
-	}
-}
-
-void servo_grab()    { servo_smooth_to(0, CLOSED_DEG); }
-void servo_release() { servo_smooth_to(0, OPEN_DEG); }
+void servo_grab()    { Servo(0, CLOSED_DEG); }
+void servo_release() { Servo(0, OPEN_DEG); }
