@@ -473,6 +473,10 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             break;
 
         case State::SEARCH: {
+            // Keep the gripper latched OPEN for the entire SEARCH state, not
+            // just on entry. Idempotent: servo_tick() no-ops once cur == target.
+            servo_release();
+
             // Highest priority: if we somehow already hold a box (e.g. we
             // re-entered SEARCH mid-mission), do NOT spin — it would fling
             // the cargo. Go straight to deliver.
