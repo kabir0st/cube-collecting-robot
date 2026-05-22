@@ -1,6 +1,9 @@
 % Real-time robot odometry receiver and plotter
 % Packet format (ASCII, newline-terminated):
-%   "x_mm,y_mm,theta_deg,d_mm,da_deg\n"
+%   "x_mm,y_mm,theta_deg,d_mm,da_deg,time_s,cov_xx,cov_xy,cov_xt,cov_yy,cov_yt,cov_tt,src_id\n"
+%   Fields 1-5  : pose + increments (used by basic plotter)
+%   Fields 6-12 : timestamp + 6 unique values of 3x3 symmetric covariance
+%   Field  13   : source id  0=Kalman  1=Odometry  2=ScanMatch
 % Requirements: Any MATLAB with JVM — uses Java DatagramSocket, no toolbox needed
 % ---------------------------------------------------------------------------
 
@@ -55,9 +58,12 @@ h_dot   = plot(ax_xy, NaN, NaN, 'o',  'MarkerSize',9, ...
 % Robot current heading direction: yellow arrow
 h_arrow = quiver(ax_xy, NaN, NaN, NaN, NaN, 0, ...
                  'Color',[1.0 0.88 0.20], 'LineWidth',2, 'MaxHeadSize',2.5);
+% Robot uncernatinity
+h_ellipse = plot(ax_xy, NaN, NaN, '--', 'Color', [0.20 0.90 0.40], 'LineWidth', 1.0);
+
 xlabel(ax_xy,'X (mm)','Color',W); ylabel(ax_xy,'Y (mm)','Color',W);
 title(ax_xy,'XY Trajectory  (KF fused pose)','Color',W);
-grid(ax_xy,'on'); axis(ax_xy,'equal');
+grid(ax_xy,'on'); axis(ax_xy,'equal');  
 set(ax_xy,'Color',BG2,'XColor',W,'YColor',W,'GridColor',GR,'GridAlpha',0.5);
 
 % Heading over time (top-right) : Purple line
@@ -94,14 +100,24 @@ while ishandle(fig)
 
     parts = str2double(strsplit(strtrim(raw), ','));
 
-    % corrupt data guard
-    if numel(parts) < 5 || any(isnan(parts))
+    % corrupt data guard — only check the 5 mandatory fields
+    if numel(parts) < 5 || any(isnan(parts(1:5)))
         continue;
     end
 
     x_mm = parts(1);  y_mm = parts(2);  th_d = parts(3);
     d_mm = parts(4);  da_d = parts(5);
     t_now = toc(t0);
+
+    % extract covariance if the extended packet is present
+    have_cov = numel(parts) >= 12;
+    if have_cov
+        cov_xx = parts(7);  cov_xy = parts(8);
+        cov_yy = parts(10);
+        sigma_xy = sqrt(0.5 * (cov_xx + cov_yy));
+    else
+        sigma_xy = NaN;
+    end
 
     % write into circular buffer
     n    = n + 1;
@@ -123,8 +139,23 @@ while ishandle(fig)
     set(h_trail, 'XData', px,   'YData', py);
     set(h_dot,   'XData', x_mm, 'YData', y_mm);
     set(h_arrow, 'XData', x_mm, 'YData', y_mm, ...
-                 'UData', ARROW_LEN*cosd(th_d), ...
+                 'UData', ARROW_LEN*cosd(th_d), ... 
                  'VData', ARROW_LEN*sind(th_d));
+    
+    % update uncertainty ellipse (95% confidence, position only)
+    if have_cov
+        P2      = [cov_xx, cov_xy; cov_xy, cov_yy];
+        [V, D]  = eig(P2);
+        chi2_95 = 5.991;
+        a       = sqrt(chi2_95 * max(D(1,1), D(2,2)));
+        b       = sqrt(chi2_95 * min(D(1,1), D(2,2)));
+        ang     = atan2(V(2,end), V(1,end));
+        t_e     = linspace(0, 2*pi, 40);
+        ex      = x_mm + a*cos(t_e)*cos(ang) - b*sin(t_e)*sin(ang);
+        ey      = y_mm + a*cos(t_e)*sin(ang) + b*sin(t_e)*cos(ang);
+        set(h_ellipse, 'XData', ex, 'YData', ey);
+    end
+
     if numel(px) > 1
         xp = max(200, 0.13*(max(px)-min(px)+1));
         yp = max(200, 0.13*(max(py)-min(py)+1));
@@ -137,15 +168,21 @@ while ishandle(fig)
     xlim(ax_th, [max(0, t_now-60), t_now+1]);
 
     % update status
+    if have_cov
+        sigma_str = sprintf('%8.2f mm', sigma_xy);
+    else
+        sigma_str = '     n/a   ';
+    end
     set(h_status, 'String', sprintf([ ...
         'X        : %8.2f mm\n'  ...
         'Y        : %8.2f mm\n'  ...
         'Theta    : %8.2f deg\n' ...
         'dDist    : %8.3f mm\n'  ...
         'dAngle   : %8.3f deg\n' ...
+        'SigmaXY  : %s\n'        ...
         'Elapsed  : %8.1f s\n'   ...
         'Packets  : %d'],         ...
-        x_mm, y_mm, th_d, d_mm, da_d, t_now, n));
+        x_mm, y_mm, th_d, d_mm, da_d, sigma_str, t_now, n));
 
     drawnow limitrate;
 end
