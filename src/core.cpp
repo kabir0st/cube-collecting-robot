@@ -119,11 +119,8 @@ void loop_control(Dashboard& dash,
                   KalmanFilter& kf, TrackerResult& target,
                   LidarData& lidar_data,
                   const MissionConfig& mission) {
-    // Hardcoded toggle: when true, the state machine runs the canned TEST
-    // sequence (fwd 400 mm -> +90° + 300 mm -> back home) instead of the
-    // real SEARCH-based mission. Flip to false once the mission flow is
-    // wired in.
-    constexpr bool IS_TEST = true;
+    // sequence (fwd 400 mm -> +90° + 300 mm -> back home)
+    constexpr bool IS_TEST = false;
 
     Motor motor;
     Odometry odom;
@@ -243,7 +240,8 @@ void loop_control(Dashboard& dash,
             v_cmd = 0.0;
             w_cmd = 0.0;
         }
-        motor.set_velocity(v_cmd, w_cmd);
+
+        // motor.set_velocity(v_cmd, w_cmd);
 
         uint64_t rejects = 0;
         motor.get_spi_stats(rejects);

@@ -179,9 +179,9 @@ int main() {
     // waiting for cox 1st seeds to be stable
     std::this_thread::sleep_for(std::chrono::seconds(5));
 
-    // dash.add_row("Vision");
-    // threads.emplace_back(loop_vision_tracking,
-    //     std::ref(dash), filter, cam_cfg, std::ref(target));
+    dash.add_row("Vision");
+    threads.emplace_back(loop_vision_tracking,
+        std::ref(dash), filter, cam_cfg, std::ref(target));
     dash.render();
     std::this_thread::sleep_for(std::chrono::seconds(3));
     dash.render();

@@ -61,7 +61,6 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
 test: $(BUILD_DIR) $(BUILD_DIR)/servo_test.o $(BUILD_DIR)/servo.o
 	$(CXX) -o servo_test $(BUILD_DIR)/servo_test.o $(BUILD_DIR)/servo.o -lwiringPi
 	@echo "Build complete: servo_test — running…"
-	./servo_test
 
 # Clean
 clean:
