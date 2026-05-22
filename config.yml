@@ -3,9 +3,9 @@ camera:
   height: 480
   fps_target: 12
   focal_length_px: 650.0
-  grab_bottom_region_ratio: 0.35
-  grab_bottom_fill_ratio: 0.60
-  capture_distance_mm: 120.0
+  grab_bottom_region_ratio: 0.20
+  grab_bottom_fill_ratio: 0.75
+  capture_distance_mm: 100.0
   capture_bearing_tol_rad: 0.12
   retention_distance_mm: 150.0
   show_debug_view: true
@@ -81,4 +81,4 @@ logger:
   scan_subsample: 2
 
 battery:
-  enabled: false
+  enabled: true

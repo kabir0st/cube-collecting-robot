@@ -7,8 +7,8 @@ const int PWM1_pin = 23;  // GPIO 23 as WiringPi, <=> pin 33 (RPI ver 3B)
 /*-----------------------------------------------------------------------------------------*/
 
 enum {
-	OPEN_DEG   = 140,
-	CLOSED_DEG = 75,
+	OPEN_DEG   = 35,
+	CLOSED_DEG = 115,
 	// PWM frame is 20 ms (50 Hz), so STEP_MS must be ≥ one frame for the
 	// servo to actually see each intermediate command. A direct jump from
 	// 140° to 75° draws enough current during the slew to brown out the 5 V
