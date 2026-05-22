@@ -227,8 +227,8 @@ void loop_control(Dashboard& dash,
         dash.set("Motor", "w_cmd_deg_s", w_cmd * 180.0 / M_PI);
 
         // Fused pose + uncertainties (1σ).
-        dash.set("KF", "X_cm",    p.x / 10);
-        dash.set("KF", "Y_cm",    p.y / 10);
+        dash.set("KF", "X_mm",    p.x);
+        dash.set("KF", "Y_mm",    p.y);
         dash.set("KF", "Th_deg",  p.theta * 180.0 / M_PI);
         dash.set("KF", "sX_mm",   std::sqrt(std::max(0.0, cov.xx)));
         dash.set("KF", "sY_mm",   std::sqrt(std::max(0.0, cov.yy)));
@@ -242,10 +242,10 @@ void loop_control(Dashboard& dash,
                                          std::cos(GOTO_THETA - p.theta));
         dash.set("Mission", "state",
                  std::string(StateMachine::state_name(sm.state())));
-        dash.set("Mission", "goal_X_cm",   GOTO_X / 10.0);
-        dash.set("Mission", "goal_Y_cm",   GOTO_Y / 10.0);
+        dash.set("Mission", "goal_X_mm",   GOTO_X);
+        dash.set("Mission", "goal_Y_mm",   GOTO_Y);
         dash.set("Mission", "goal_Th_deg", GOTO_THETA * 180.0 / M_PI);
-        dash.set("Mission", "err_d_cm",    std::hypot(err_x, err_y) / 10.0);
+        dash.set("Mission", "err_d_mm",    std::hypot(err_x, err_y));
         dash.set("Mission", "err_th_deg",  err_th * 180.0 / M_PI);
         dash.set("Mission", "arrived",
                  std::string(sm.goto_arrived() ? "yes" : "no"));

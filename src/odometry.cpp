@@ -72,7 +72,7 @@ OdomStep Odometry::update(double left_mm, double right_mm) {
     //
     // Floor terms keep variance > 0 at very small steps (encoder quantization
     // is real but small: TICKS_PER_MM = 103.8 -> ~10 micron per tick).
-    constexpr double K_WHEEL_INDEP = 0.010;   // 1% per-wheel independent slip
+    constexpr double K_WHEEL_INDEP = 0.020;   // 1% per-wheel independent slip
     constexpr double K_COMMON      = 0.025;   // 2.5% common-mode scale error
     constexpr double K_ROT         = 0.030;   // 3% scale on |d_theta|
     constexpr double VAR_L_FLOOR_MM2 = 0.25;  // mm^2 per step

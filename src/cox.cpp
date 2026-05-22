@@ -398,8 +398,8 @@ void loop_scan_cox_estimation(
         }
 
         // Dashboard. Always publish so a stale value never looks live.
-        dash.set("Cox", "X_cm",     est.pos.x / 10);
-        dash.set("Cox", "Y_cm",     est.pos.y / 10);
+        dash.set("Cox", "X_mm",     est.pos.x );
+        dash.set("Cox", "Y_mm",     est.pos.y );
         dash.set("Cox", "Th_deg",   est.pos.theta * 180.0f / static_cast<float>(M_PI));
         dash.set("Cox", "sX_mm",    est.sigma_x);
         dash.set("Cox", "sY_mm",    est.sigma_y);

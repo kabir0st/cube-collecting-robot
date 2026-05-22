@@ -10,7 +10,7 @@ today. Update this when you change any of the constants below.
 The arena is modeled as four `LineSeg` structs ([include/types.hpp:35-38](../include/types.hpp#L35-L38)).
 Each carries a unit normal `(nx, ny)`, a signed distance `r` from the origin
 along that normal, and two endpoints. Cox computes the residual for a world
-point P as `y = nx·Px + ny·Py − r` ([src/cox.cpp:45](../src/cox.cpp#L45)).
+point P as `y = nx·Px + ny·Py − r` ([src/cox.cpp:54](../src/cox.cpp#L54)).
 With normals pointing **into** the arena, that residual is positive
 everywhere inside.
 
@@ -43,15 +43,21 @@ Accepts an observed RANSAC wall as a match if:
 Extra observed walls that match nothing → fail. Missing expected walls →
 OK (corner occlusion is normal).
 
-**Switching the map source.** Set `arena.in_arena: false` in `config.yml`
-to fall back to the legacy RANSAC-built map. Useful when developing outside
-the actual arena.
+**Switching the map source.** `arena.in_arena` in `config.yml` selects
+between the analytical arena map (`true`) and a RANSAC-built map of
+whatever room the robot is in (`false`). The flag *also* selects which
+RANSAC preset is active: `arena.ransac_arena` (tight gates, ≤5 lines,
+≥500 mm segments) is used inside the arena, `arena.ransac_room` (loose
+gates, ≤10 lines, ≥800 mm segments to reject furniture edges) is used
+outside. The repo currently ships with `in_arena: false` so lab-bench
+runs work without code edits — flip it back to `true` before the actual
+arena run.
 
 ---
 
 ## Odometry noise: scale-error model
 
-`src/odometry.cpp:59-85`. The old code used a random-walk form (`var = k·|d|`),
+`src/odometry.cpp:57-105`. The old code used a random-walk form (`var = k·|d|`),
 which gives σ ~ √d. Real wheel slip + radius miscalibration is a scale error
 (σ ~ d), so squared variance must grow as d². Calibrated against observed
 "report 600 mm, actually 610–620 mm" — that's ~2-3 % scale error on the
@@ -59,22 +65,22 @@ chassis distance.
 
 | Source | Constant | Affects | At d = 600 mm |
 |---|---|---|---|
-| Per-wheel independent slip | `K_WHEEL_INDEP = 0.010` | both d and θ | σ_L = σ_R ≈ 6 mm |
+| Per-wheel independent slip | `K_WHEEL_INDEP = 0.020` | both d and θ | σ_L = σ_R ≈ 12 mm |
 | Common-mode (both wheels same slip) | `K_COMMON = 0.025` | only d | σ_d_common ≈ 15 mm |
 | Rotation scale error | `K_ROT = 0.030` | only θ during a turn | σ_θ_rot at 90° turn ≈ 2.7° |
 
 For a 600 mm straight run:
-`σ_d = √(0.25·(36+36) + 15²) = √(18 + 225) ≈ 15.6 mm`
+`σ_d = √(0.25·(144+144) + 15²) = √(72 + 225) ≈ 17.2 mm`
 That matches the observed 10–20 mm range.
 
-`σ_θ ≈ √((36+36)/185²) = 0.046 rad ≈ 2.6° / m` of forward travel — typical
-drift for a diff-drive robot without an IMU. Cox will hammer it down once
-running.
+`σ_θ ≈ √((144+144)/185²) = 0.092 rad ≈ 5.3° / m` of forward travel —
+typical drift for a diff-drive robot without an IMU. Cox will hammer it
+down once running.
 
-**Re-calibrating for a new floor.** Edit the three constants at the top of
-[src/odometry.cpp:60-65](../src/odometry.cpp#L60-L65). The fastest direct
-measurement is `K_COMMON`: drive 1 m straight, measure the actual distance
-with a ruler.
+**Re-calibrating for a new floor.** Edit the three constants near the top
+of [src/odometry.cpp:75-79](../src/odometry.cpp#L75-L79). The fastest
+direct measurement is `K_COMMON`: drive 1 m straight, measure the actual
+distance with a ruler.
 
 ```
 K_COMMON = |encoder_reading - measured_truth| / encoder_reading
@@ -89,17 +95,30 @@ measure the angular error at the end, divide by 2π.
 
 ## Cox trust gate
 
-`src/cox.cpp` `namespace` constants near the top of the file.
+There are **two** gates with different jobs, defined at
+[src/cox.cpp:239-255](../src/cox.cpp#L239-L255):
 
-| Threshold | Before | After | Why |
-|---|---|---|---|
-| `MAX_SIGMA_XY` | 100 mm | **30 mm** | Analytical map gives much tighter Cox; 100 mm was for noisy RANSAC walls. |
-| `MAX_SIGMA_THETA` | 0.087 rad (5°) | **0.035 rad (2°)** | Same reason. |
-| `MIN_INLIERS` | 10 | 10 (unchanged) | Good floor for ~360-point scans. |
+- `cox_can_fuse()` — loose floor. Used on every Cox→KF correction.
+  Just checks that Cox converged and returned at least
+  `MIN_INLIERS_FUSE = 6` inliers. There is no σ gate here: the KF's
+  R-weighted gain already attenuates a noisy Cox automatically, so
+  gatekeeping at this stage would only throw away useful information.
+- `cox_strong_fix()` — strict gate. Used only to accept a relocalize
+  sweep winner, because we're about to `kf.reset()` to it and need high
+  confidence. Requires `inliers ≥ 15`, `σ_xy < 30 mm`, `σ_θ < 0.035 rad`
+  (~2°).
 
-Side effect: a tighter gate = faster kidnap detection. A genuine shove now
-needs `arena.kidnap_threshold` cycles (default 5, i.e. 0.5 s at 10 Hz) of
-σ > 30 mm before the relocalize sweep kicks in.
+| Threshold | Value | Used by |
+|---|---|---|
+| `MIN_INLIERS_FUSE` | 6 | `cox_can_fuse` — normal Cox→KF fuse |
+| `MIN_INLIERS_FIX` | 15 | `cox_strong_fix` — accept relocalize sweep |
+| `MAX_SIGMA_XY_FIX` | 30 mm | `cox_strong_fix` |
+| `MAX_SIGMA_THETA_FIX` | 0.035 rad (≈2°) | `cox_strong_fix` |
+
+The fix-gate thresholds are tight (analytical map gives much tighter Cox
+than the old RANSAC walls did); tightening them also makes relocalize
+candidates harder to fake, which is what we want when we're about to
+overwrite KF state.
 
 ---
 
@@ -109,28 +128,34 @@ needs `arena.kidnap_threshold` cycles (default 5, i.e. 0.5 s at 10 Hz) of
 
 |   | Before | After | Why |
 |---|---|---|---|
-| σ_x = σ_y | 50 mm | **25 mm** | After home sanity-check passes we know we're within `arena.home_sanity_tol_mm` (50 mm by default); init at half that. |
-| σ_θ | 5° | **2°** | Same logic against the 3° sanity tolerance. |
+| σ_x = σ_y | 50 mm | **25 mm** | Boot seed assumes the robot is at home; init at roughly half the home-placement tolerance the boot check enforces. |
+| σ_θ | 5° | **2°** | Same logic against the boot heading tolerance. |
 
 Initial cov doesn't change steady-state behaviour — Cox correction
 overwhelms it within seconds either way. Tighter init just stops the first
 few prediction-only ticks (before Cox's first trusted lock) from making the
-EKF over-confident in nonsense.
+EKF over-confident in nonsense. If the boot seed is wrong (robot wasn't
+actually at home), the first untrusted Cox estimate triggers a relocalize
+sweep that re-pins the KF with `moderate_recovery_cov()` — see
+[src/kalman.cpp:28-38](../src/kalman.cpp#L28-L38).
 
 ---
 
 ## Things deliberately left alone
 
-- **`sigma_r` inside Cox** ([src/cox.cpp:65](../src/cox.cpp#L65)) —
+- **`sigma_r` inside Cox** ([src/cox.cpp:74](../src/cox.cpp#L74)) —
   `std::max(5, lidar_data.sensor_noise)`. The Welford calibration measurement
   is already accurate; the 5 mm floor protects against weird boot conditions.
-- **Cox gate-shrinking schedule** ([src/cox.cpp:121-127](../src/cox.cpp#L121-L127)).
-  Already well-tuned for tens of mm of initial error.
+- **Cox gate-shrinking schedule** ([src/cox.cpp:118-132](../src/cox.cpp#L118-L132)).
+  Already well-tuned for tens of mm of initial error (start at ≥50 mm,
+  shrink by 0.6× per iteration toward the σ-scaled final gate).
 - **Ridge regularizer** (`RIDGE = 1e-3` in Cox). Important for the corridor
   degeneracy case, not worth touching.
-- **`find_walls` RANSAC parameters** (`include/types.hpp:54-69` `RansacParams`).
-  Still used in `in_arena=false` mode and as the validator's source of
-  observed walls — leave alone.
+- **`find_walls` RANSAC parameters** ([include/types.hpp:54-73](../include/types.hpp#L54-L73)
+  `RansacParams`, populated from `arena.ransac_arena` / `arena.ransac_room`
+  in `config.yml`). Still used in `in_arena=false` mode and as the
+  validator's source of observed walls — tune via the YAML, not the
+  struct.
 
 ---
 
@@ -153,9 +178,22 @@ the first push, two things to watch:
 ## Future hooks
 
 If we end up tweaking the odometry constants often, expose `K_WHEEL_INDEP`
-/ `K_COMMON` / `K_ROT` to `config.yml` (under a new `odometry:` block).
-That's about a 10-line change — wire them into `Odometry` via a `configure()`
-setter, plumb the defaults from `main.cpp`.
+/ `K_COMMON` / `K_ROT` (currently at [src/odometry.cpp:75-77](../src/odometry.cpp#L75-L77))
+to `config.yml` under a new `odometry:` block. That's about a 10-line
+change — wire them into `Odometry` via a `configure()` setter, plumb the
+defaults from `main.cpp`.
 
 Same applies to the Cox trust gate: candidates for `cox.*` keys in config
 if we start tuning per-arena.
+
+
+
+
++x = forward (into the arena, away from the home/back wall). Robot starts at x=0 facing +x.
++y = right (right wall sits at y = +half_w, left wall at y = -half_w).
++θ follows the standard right-hand rule around z, so positive θ rotates +x toward +y, i.e. clockwise when viewed from above (turn right = positive heading change).
+This is a left-handed screen-style frame (x right, y down if you draw +x rightward on paper) but a right-handed robot frame in the usual "screen down = robot's right" sense. The dev notes (docs/devnotes.md:18) match: "+x into the arena (along the 3.6 m axis). +y to the robot's right."
+
+Quick sanity for the snapshot you posted earlier:
+
+KF Y_cm = 0.15, robot heading θ = 3.06° (slightly turned to the right). Mission goal (300, 0). So the robot is essentially on the centerline, nose pointing slightly right — consistent with the path-follower correcting back toward y=0.
