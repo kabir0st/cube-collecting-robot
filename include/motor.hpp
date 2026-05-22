@@ -11,7 +11,7 @@
 class Motor {
     public:
         // Drive-train constants
-        static constexpr double TICKS_PER_MM = 71.48;
+        static constexpr double TICKS_PER_MM = 119.73;
         static constexpr double WHEELBASE_MM = 185.0;
 
         Motor();
