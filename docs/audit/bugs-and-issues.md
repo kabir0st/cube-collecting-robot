@@ -51,18 +51,31 @@ with a log line; mission-level timeouts then govern the next transition.
 
 ---
 
-### servo_grab() blocking — false alarm
-**[src/controller.cpp:594](../../src/controller.cpp#L594) + [src/servo.c:42](../../src/servo.c#L42).**
+### servo_grab() now intentionally blocks for ~140 ms
+**[src/servo.c](../../src/servo.c), [src/controller.cpp](../../src/controller.cpp).**
 
-The audit flagged this based on a comment in controller.cpp that claimed
-`servo_grab()` blocks for ~1.2 s. Reading the implementation shows the
-function just calls `pwmWrite()` — a non-blocking PWM register write. The
-gripper closes mechanically over the next ~`_grip_settle_s` and the
-captured-state debounce already accounts for that. The comment was stale.
+Earlier note: the original `servo_grab()` was a single `pwmWrite()` —
+non-blocking, but it slammed the PWM from OPEN_DEG to CLOSED_DEG in one
+step. Hobby servos draw 1 A+ during a fast 65° slew, and the resulting
+droop on the Pi's 5 V rail was browning out the SoC and hanging the
+process.
 
-**Fixed**: Stale "blocks ~1.2 s" comment removed from
-[src/controller.cpp](../../src/controller.cpp); replaced with an accurate
-description of the two-tick grip handshake.
+**Fix**: `servo_grab()` / `servo_release()` now walk the angle in
+`STEP_DEG = 10` chunks with `STEP_MS = 20` between updates (one PWM
+frame at 50 Hz). Worst-case traversal is 7 × 20 ms ≈ 140 ms. Internal
+`last_deg[2]` tracks the previous position so repeated calls to the
+same target are no-ops and the very first call snaps (no prior state
+to interpolate from).
+
+This re-introduces a blocking call inside `StateMachine::step()`. The
+grip-handshake already commands `v=0` on the tick *before* the smooth
+close fires, so the wheels are stationary during the block. SIGINT
+handling still works because the second-SIGINT path in
+[main.cpp](../../main.cpp) calls `_exit(130)`.
+
+If 140 ms ever turns out to be too much (e.g. cox cov inflates because
+two predict cycles got dropped), move the call onto a one-shot worker
+thread and add a `_grip_in_progress` atomic the state machine polls.
 
 ---
 

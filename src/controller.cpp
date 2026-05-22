@@ -619,10 +619,12 @@ StateMachine::Command StateMachine::step(const Pos2D& pose, Dashboard& dash) {
             //    has a control cycle to decelerate before the gripper
             //    target is commanded:
             //      tick N   — command v=0, latch _grip_stop_sent
-            //      tick N+1 — call servo_grab() (non-blocking PWM write;
-            //                 the closure happens mechanically over the
-            //                 next ~_grip_settle_s and `captured` debounces
-            //                 once the box is held)
+            //      tick N+1 — call servo_grab() (blocking, ~140 ms: the
+            //                 angle is walked in STEP_DEG / STEP_MS chunks
+            //                 to cap inrush current and keep the Pi's 5 V
+            //                 rail from browning out. v=0 is already in
+            //                 effect from tick N, so the wheels are
+            //                 stationary during the blocking window.)
             if (snap.grabbable) {
                 if (!_grip_stop_sent) {
                     _grip_stop_sent = true;
