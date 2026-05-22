@@ -126,6 +126,24 @@ bool validate_arena_walls(const std::vector<LineSeg>& expected,
                           const std::vector<LineSeg>& observed,
                           double tol_mm, double tol_rad);
 
+// Result of try_fit_arena_fallback: an analytical map in the chosen arena
+// frame plus the robot heading inside that frame.
+struct ArenaFit {
+    std::vector<LineSeg> ref_map;
+    double home_theta = 0.0;
+    bool   rotated    = false;
+};
+
+// Fallback used only after validate_arena_walls rejects every observed wall.
+// Groups the four observed walls into two perpendicular pairs, checks the
+// pair spans match the arena dimensions (in either rotation), and treats
+// the closer short wall as "home". Returns true on dimensional match (out
+// is populated, Cox can take over with its relocalize sweep); false when
+// the observed scene is not this arena (caller should abort).
+bool try_fit_arena_fallback(const std::vector<LineSeg>& observed,
+                            const ArenaConfig& arena,
+                            ArenaFit& out);
+
 namespace calib {
 
 struct ArenaBounds {

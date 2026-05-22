@@ -88,16 +88,25 @@ void loop_localization(Dashboard& dash,
                                                          arena.ransac_arena);
         const std::vector<LineSeg> expected = build_arena_map(
             arena.width_mm, arena.length_mm);
-        if (!validate_arena_walls(expected, observed,
-                                  arena.validation_tol_mm,
-                                  arena.validation_tol_rad)) {
-            LOGE("Main") << "Arena validation failed -- refusing to start.";
-            app::shutdown.store(true);
-            stop_lidar(lidar);
-            thread_loop_collect_frames.join();
-            return;
+        if (validate_arena_walls(expected, observed,
+                                 arena.validation_tol_mm,
+                                 arena.validation_tol_rad)) {
+            ref_map = expected;
+        } else {
+            ArenaFit fit;
+            if (!try_fit_arena_fallback(observed, arena, fit)) {
+                LOGE("Main") << "Arena validation failed -- refusing to start.";
+                app::shutdown.store(true);
+                stop_lidar(lidar);
+                thread_loop_collect_frames.join();
+                return;
+            }
+            LOG("MAP") << "Arena validation fell back to closest-short-wall"
+                       << " home" << (fit.rotated ? " (rotated 90 deg)" : "")
+                       << "; seeding theta=" << fit.home_theta;
+            ref_map = std::move(fit.ref_map);
+            home_theta = fit.home_theta;
         }
-        ref_map = expected;
     } else {
         ref_map = find_walls(lidar_data, arena.ransac_room);
         if (ref_map.empty()) {

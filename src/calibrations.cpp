@@ -1,5 +1,6 @@
 
 #include <numeric>
+#include <array>
 #include <cmath>
 #include <algorithm>
 #include <atomic>
@@ -740,6 +741,117 @@ bool validate_arena_walls(const std::vector<LineSeg>& expected,
     }
     LOG("MAP") << "Arena validation OK: all " << observed.size()
                << " observed walls match expected rectangle";
+    return true;
+}
+
+namespace {
+
+// Distance between two parallel observed walls. RANSAC emits positive r with
+// the normal pointing from the sensor toward the wall. When the two walls
+// are on opposite sides of the robot their normals point opposite ways
+// (dot < 0); their separation is then |r1 + r2|. Same-side walls would give
+// |r1 - r2|; the sign-flip below handles both cases the same way as
+// same_line() above.
+double parallel_span(const LineSeg& a, const LineSeg& b) {
+    const double dot = static_cast<double>(a.nx) * b.nx +
+                       static_cast<double>(a.ny) * b.ny;
+    const double sgn = (dot >= 0.0) ? 1.0 : -1.0;
+    return std::fabs(static_cast<double>(a.r) - sgn * static_cast<double>(b.r));
+}
+
+// Pair the 4 observed walls into two ~parallel pairs that are mutually
+// perpendicular. Returns false if the geometry isn't a rectangle within
+// tol_rad. The four walls produced by find_walls under the arena RANSAC
+// preset are already capped at 4, so this is the expected shape.
+bool group_walls_perpendicular(const std::vector<LineSeg>& walls,
+                               double tol_rad,
+                               std::array<LineSeg, 2>& pair1,
+                               std::array<LineSeg, 2>& pair2,
+                               double& span1,
+                               double& span2) {
+    if (walls.size() != 4) return false;
+
+    const double cos_par  = std::cos(tol_rad);   // |dot| >= this -> parallel
+    const double cos_perp = std::sin(tol_rad);   // |dot| <= this -> perpendicular
+
+    int best_partner = -1;
+    double best_abs_dot = -1.0;
+    for (int i = 1; i < 4; ++i) {
+        const double d = std::fabs(static_cast<double>(walls[0].nx) * walls[i].nx +
+                                   static_cast<double>(walls[0].ny) * walls[i].ny);
+        if (d > best_abs_dot) {
+            best_abs_dot = d;
+            best_partner = i;
+        }
+    }
+    if (best_partner < 0 || best_abs_dot < cos_par) return false;
+
+    pair1[0] = walls[0];
+    pair1[1] = walls[best_partner];
+
+    int rem[2];
+    int ri = 0;
+    for (int i = 1; i < 4; ++i) if (i != best_partner) rem[ri++] = i;
+    pair2[0] = walls[rem[0]];
+    pair2[1] = walls[rem[1]];
+
+    const double d2 = std::fabs(static_cast<double>(pair2[0].nx) * pair2[1].nx +
+                                static_cast<double>(pair2[0].ny) * pair2[1].ny);
+    if (d2 < cos_par) return false;
+
+    const double d12 = std::fabs(static_cast<double>(pair1[0].nx) * pair2[0].nx +
+                                 static_cast<double>(pair1[0].ny) * pair2[0].ny);
+    if (d12 > cos_perp) return false;
+
+    span1 = parallel_span(pair1[0], pair1[1]);
+    span2 = parallel_span(pair2[0], pair2[1]);
+    return true;
+}
+
+}  // namespace
+
+bool try_fit_arena_fallback(const std::vector<LineSeg>& observed,
+                            const ArenaConfig& arena,
+                            ArenaFit& out) {
+    std::array<LineSeg, 2> pair1, pair2;
+    double span1 = 0.0, span2 = 0.0;
+    if (!group_walls_perpendicular(observed, arena.validation_tol_rad,
+                                   pair1, pair2, span1, span2)) {
+        LOGE("MAP") << "Fallback: observed walls don't form a rectangle";
+        return false;
+    }
+
+    const double tol = arena.validation_tol_mm;
+    const double W   = arena.width_mm;
+    const double L   = arena.length_mm;
+
+    // The short-wall pair is the one whose perpendicular separation equals
+    // the arena's LONG dimension L: short walls sit at x=0 and x=L of the
+    // analytical map (see build_arena_map above).
+    const bool p1_is_short = std::fabs(span1 - L) <= tol &&
+                             std::fabs(span2 - W) <= tol;
+    const bool p2_is_short = std::fabs(span2 - L) <= tol &&
+                             std::fabs(span1 - W) <= tol;
+    if (!p1_is_short && !p2_is_short) {
+        LOGE("MAP") << "Fallback: observed spans (" << span1 << ", " << span2
+                    << ") don't match arena " << W << " x " << L;
+        return false;
+    }
+
+    const std::array<LineSeg, 2>& short_pair = p1_is_short ? pair1 : pair2;
+    const bool a_closer = std::fabs(short_pair[0].r) < std::fabs(short_pair[1].r);
+    const LineSeg& home = a_closer ? short_pair[0] : short_pair[1];
+
+    // Robot's heading in the arena frame. The home wall's RANSAC normal
+    // points from the sensor toward the wall (outward from the arena
+    // interior); the arena frame defines +x_arena as the home wall's INWARD
+    // normal. So the robot-frame direction from origin to home wall maps to
+    // -x_arena. Solving R(theta) * (nx, ny) = (-1, 0) gives
+    // theta = atan2(ny, -nx).
+    out.ref_map = build_arena_map(W, L);
+    out.home_theta = std::atan2(static_cast<double>(home.ny),
+                                -static_cast<double>(home.nx));
+    out.rotated = std::fabs(home.nx) < std::fabs(home.ny);
     return true;
 }
 
