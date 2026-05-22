@@ -39,10 +39,10 @@ map:
   ransac:
     # Tight gate — arena walls are straight; tolerate a couple cm of
     # lidar noise but no more.
-    inlier_thresh_mm: 25.0
+    inlier_thresh_mm: 50.0
     # More trials per line so the partial-occlusion case (robot blocking
     # the middle of a wall) still finds the dominant line.
-    max_iters_per_line: 400
+    max_iters_per_line: 500
     # A small robot contributes ~5-15 angle-averaged points. Requiring 30
     # rejects robot bodies while passing partially-occluded walls.
     inlier_points_req: 30
@@ -62,7 +62,7 @@ logger:
   # Lab-4 UDP stream to Matlab listener.
   udp_enabled: true
   out_dir: logs
-  udp_host: 10.98.151.142
+  udp_host: 10.179.209.142
   udp_port: 5005
   tick_ms: 100
   # Take every N-th lidar beam for the UDP scan overlay. 1 = full ~360 pts,
