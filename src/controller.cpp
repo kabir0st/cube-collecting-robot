@@ -225,9 +225,21 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
     // Any state change clears halt-and-localize bookkeeping so an aborted
     // halt mid-state can't masquerade as a halt belonging to the next.
     _halting = false;
-    // Exit side-effects on the outgoing state.
-    if (old_state == State::CARRY_HOME || old_state == State::SEARCH) {
-        LOG("CONTROLLER") << "Carried Home! Mission Accomplished";
+    // Mission-accomplished log: only on the actual completion edge
+    // CARRY_HOME -> RELEASE. Used to fire on every CARRY_HOME or SEARCH
+    // exit (timeouts, engagement transitions) and produced misleading logs.
+    if (old_state == State::CARRY_HOME && new_state == State::RELEASE) {
+        LOG("Mission") << "Carried Home! Mission Accomplished";
+    }
+    // Always abort the path-follower when leaving any state that uses a
+    // path. SEARCH and APPROACH use DIRECT mode but may still have a
+    // stale path loaded from a prior CARRY_HOME / TURN_AROUND. Earlier
+    // this only fired for CARRY_HOME or SEARCH exits; TURN_AROUND -> SEARCH
+    // and GOTO -> DONE leaked stale paths into the dashboard target overlay.
+    if (old_state == State::CARRY_HOME ||
+        old_state == State::TURN_AROUND ||
+        old_state == State::GOTO ||
+        old_state == State::TEST) {
         _controller.abort();
     }
 
@@ -235,17 +247,6 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
         if (!_plan_path_home(current)) {
             new_state = State::SAFE_STOP;
         }
-    }
-
-    if (new_state == State::SEARCH) {
-        // Fresh SEARCH session: previous skip-streak log is no longer
-        // relevant; drop any latched APPROACH target; reset the simple
-        // forward-then-rotate search state so the next entry starts a new
-        // forward leg.
-        _search_skip_streak    = false;
-        _last_target_valid     = false;
-        _ssearch.initialized   = false;
-        servo_release();
     }
 
     if (new_state == State::APPROACH) {
@@ -265,14 +266,12 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
         // (which would inject wheel-slip drift into the KF heading estimate
         // right before SEARCH starts).
         //
-        // For |delta| near ±π the goal-along-home_theta direction is opposite
-        // to current heading and the spline collapses to a colinear back-and-
-        // forth on a single axis — PurePursuit's y_l (cross-track) stays
-        // ~0, kappa stays ~0, and the robot can't curve out of it. We add a
-        // lateral offset perpendicular to home_theta (on the natural turning
-        // side per sign(delta)) to force an S-curve in that case. The offset
-        // magnitude scales with sin(|delta|/2) so small deltas get no offset
-        // (curve emerges naturally), large deltas get up to LAT_MAX mm.
+        // Apex direction: perpendicular to the CURRENT (start) heading on
+        // the natural turning side (left for CCW delta, right for CW). This
+        // matches the geometric apex of the smooth arc — using perpendicular
+        // to home_theta (the goal heading) is wrong because the apex sits
+        // on the start side of the turn, not the goal side.
+        _realign_inplace = false;          // reset obstacle-fallback flag
         double home_theta_local;
         { std::lock_guard<std::mutex> lk(_m); home_theta_local = _home_theta; }
         const double delta = wrap_pi(home_theta_local - current.theta);
@@ -284,13 +283,12 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
             // delta=0 up to 500mm at delta=π. Gives the spline enough arc
             // length to turn without exceeding chassis turning radius.
             const double D = 250.0 + 250.0 * std::fabs(delta) / M_PI;
-            // Lateral offset to break colinearity on extreme deltas. 0 at
-            // delta=0, LAT_MAX at delta=π.
+            // Lateral offset perpendicular to *start heading* (apex side).
             constexpr double LAT_MAX_MM = 150.0;
             const double lat_mag  = LAT_MAX_MM * std::sin(std::fabs(delta) / 2.0);
             const double lat_sign = (delta >= 0.0) ? 1.0 : -1.0;
-            const double perp_x   = -std::sin(home_theta_local);
-            const double perp_y   =  std::cos(home_theta_local);
+            const double perp_x   = -std::sin(current.theta);
+            const double perp_y   =  std::cos(current.theta);
             const double goal_x = current.x
                                 + D       * std::cos(home_theta_local)
                                 + lat_sign * lat_mag * perp_x;
@@ -309,6 +307,20 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
                                << ", " << home_theta_local << " rad)";
             }
         }
+    }
+
+    // SEARCH entry side-effects last so any preceding block that rewrites
+    // new_state to SEARCH (currently TURN_AROUND's delta-deadband and
+    // plan-failure paths) still triggers the side-effects. Drop the
+    // skip-streak log gate, clear the latched APPROACH target, reset the
+    // FORWARD-then-ROTATE state, abort any leftover spline, and re-latch
+    // the gripper open.
+    if (new_state == State::SEARCH) {
+        _search_skip_streak    = false;
+        _last_target_valid     = false;
+        _ssearch.initialized   = false;
+        _controller.abort();
+        servo_release();
     }
 
     {
@@ -404,30 +416,104 @@ bool StateMachine::_plan_path_home(const Pos2D& current) {
         hx  = _home_x; hy = _home_y; ht = _home_theta; hm = _home_margin;
         arm = _arm_length_mm;
     }
+    (void)ht;  // home_theta no longer baked into the path
 
     // Bias the *robot* goal back by arm_length along the home heading so the
     // *box* (which sits arm_length ahead of the robot) ends up at home.
     const double gx = hx - arm * std::cos(ht);
     const double gy = hy - arm * std::sin(ht);
 
-    // Arrival heading = direction from current to goal (path tangent). The
-    // tangent-aware spline curves smoothly out of current.theta toward this
-    // direction, so PurePursuit never has to stop and PRE_ROLL at the start.
-    // REALIGN handles restoring home_theta after release.
-    const double tangent_to_goal = std::atan2(gy - current.y, gx - current.x);
-    // Suppress unused-variable warning: ht is no longer baked into the path.
-    (void)ht;
+    // Arrival heading = direction from current to goal (path tangent).
+    const double tangent_to_goal =
+        std::atan2(gy - current.y, gx - current.x);
+    const double delta_yaw = wrap_pi(tangent_to_goal - current.theta);
 
-    const bool ok = _plan_tangent_spline(current, gx, gy, tangent_to_goal,
-                                         hm, 40.0 * ROBOT_SPEED);
-    if (ok) {
-        LOG("Mission") << "CARRY_HOME plan: from (" << current.x << ", "
-                       << current.y << ", " << current.theta
-                       << ") to robot-goal (" << gx << ", " << gy << ", "
-                       << tangent_to_goal << ") [box -> ("
-                       << hx << ", " << hy << ")]";
+    const double dx_total = gx - current.x;
+    const double dy_total = gy - current.y;
+    const double dist = std::hypot(dx_total, dy_total);
+
+    // 5-control tangent-aware spline with lateral midpoint apex:
+    //   (start, start+L·start_tangent, midpoint+apex, goal-L·goal_tangent, goal)
+    //
+    // The typical CARRY_HOME geometry has post-grab heading opposite to the
+    // direction toward home (robot was facing the box). A pure 4-control
+    // tangent spline collapses to a near-1D path on that axis and
+    // PurePursuit's cross-track y_l ~ 0 leaves the robot unable to U-turn.
+    // The midpoint with a lateral apex offset forces a 2D curve so the
+    // lookahead has non-trivial cross-track and PURSUIT can drive the turn.
+    //
+    // Apex direction = perpendicular to *start* heading (the geometric
+    // apex of a smooth arc sits on the start side of the chord), with
+    // sign(delta_yaw) picking left (CCW) vs right (CW).
+    constexpr double L_T_MIN_MM      = 80.0;
+    constexpr double L_T_MAX_MM      = 300.0;
+    constexpr double APEX_LAT_MAX_MM = 300.0;
+    const double L_t  = clamp_d(0.3 * dist, L_T_MIN_MM, L_T_MAX_MM);
+    const double colin    = std::pow(std::sin(delta_yaw / 2.0), 2);  // 0..1
+    const double apex_mag = APEX_LAT_MAX_MM * colin;
+    const double apex_sign = (delta_yaw >= 0.0) ? 1.0 : -1.0;
+    const double apex_perp_x = -std::sin(current.theta);
+    const double apex_perp_y =  std::cos(current.theta);
+
+    PathPoint p_start;
+    p_start.x = current.x;
+    p_start.y = current.y;
+    p_start.theta = current.theta;
+
+    PathPoint p_start_t;
+    p_start_t.x = current.x + L_t * std::cos(current.theta);
+    p_start_t.y = current.y + L_t * std::sin(current.theta);
+
+    PathPoint p_mid;
+    p_mid.x = 0.5 * (current.x + gx) + apex_sign * apex_mag * apex_perp_x;
+    p_mid.y = 0.5 * (current.y + gy) + apex_sign * apex_mag * apex_perp_y;
+
+    PathPoint p_goal_t;
+    p_goal_t.x = gx - L_t * std::cos(tangent_to_goal);
+    p_goal_t.y = gy - L_t * std::sin(tangent_to_goal);
+
+    PathPoint p_goal;
+    p_goal.x = gx;
+    p_goal.y = gy;
+    p_goal.theta = tangent_to_goal;
+    p_goal.margin = hm;
+
+    std::vector<PathPoint> controls;
+    controls.reserve(5);
+    controls.push_back(p_start);
+    controls.push_back(p_start_t);
+    controls.push_back(p_mid);
+    controls.push_back(p_goal_t);
+    controls.push_back(p_goal);
+
+    std::vector<PathPoint> path = bcubic_spline(
+        controls,
+        20,
+        40.0 * ROBOT_SPEED,
+        hm,
+        100.0 * ROBOT_SPEED,
+        30.0);
+
+    if (path.empty()) {
+        LOGE("Mission") << "CARRY_HOME spline empty from ("
+                        << current.x << ", " << current.y << ", "
+                        << current.theta << ") to ("
+                        << gx << ", " << gy << ", "
+                        << tangent_to_goal << ")";
+        return false;
     }
-    return ok;
+    path.back().margin = hm;
+    path.back().theta  = tangent_to_goal;
+    _controller.set_path(path);
+
+    LOG("Mission") << "CARRY_HOME plan (5-ctrl): from ("
+                   << current.x << ", " << current.y << ", " << current.theta
+                   << ") -> robot-goal (" << gx << ", " << gy << ", "
+                   << tangent_to_goal << "), delta="
+                   << (delta_yaw * 180.0 / M_PI) << " deg, apex_lat="
+                   << (apex_sign * apex_mag) << " mm [box -> ("
+                   << hx << ", " << hy << ")]";
+    return true;
 }
 
 bool StateMachine::_plan_path_to(const Pos2D& current,
@@ -670,6 +756,16 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
         }
 
         case State::APPROACH: {
+            // Reset the "deceleration tick sent" latch whenever we are not
+            // about to grip (no captured/grabbable signal AND grip hasn't
+            // fired yet). A brief vision flicker into snap.captured or
+            // snap.grabbable would otherwise leave _grip_stop_sent=true and
+            // skip the deceleration tick on the next genuine grip trigger
+            // — closing the jaws at full chase speed.
+            if (!_grip_fired && !snap.captured && !snap.grabbable) {
+                _grip_stop_sent = false;
+            }
+
             // 1. Servo grab already fired. Treat the grip as committed: once
             //    the jaws are closing, the gripper arms occlude the box and
             //    `snap.captured` becomes unreliable, so we don't wait on
@@ -697,13 +793,28 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 break;
             }
 
-            // 2. Pre-grip captured (rare: e.g. the box rolls into the
-            //    retention ROI before the grab gate triggers). Still go via
-            //    CARRY_HOME unconditionally so we never instant-release.
+            // 2. Pre-grip captured (rare: e.g. the box drifts inside the
+            //    100mm capture radius before the bottom-fill grab gate
+            //    fires). Previously this short-circuited straight to
+            //    CARRY_HOME without ever firing servo_grab(), leaving the
+            //    gripper OPEN — robot carried nothing home. Run the same
+            //    two-tick grip sequence as the grabbable branch so the
+            //    next tick falls into the _grip_fired path and waits for
+            //    servo_done(0) before driving.
             if (snap.captured) {
-                { std::lock_guard<std::mutex> lk(_m); _approach_attempts = 0; }
-                _transition(State::CARRY_HOME, pose);
-                out.mode = Command::Mode::PATH_FOLLOW;
+                if (!_grip_stop_sent) {
+                    _grip_stop_sent = true;
+                    out.mode = Command::Mode::DIRECT;
+                    out.v_mm_s = 0.0;
+                    out.omega_rad_s = 0.0;
+                    break;
+                }
+                servo_grab();
+                _grip_fired    = true;
+                _grip_fired_at = std::chrono::steady_clock::now();
+                out.mode = Command::Mode::DIRECT;
+                out.v_mm_s = 0.0;
+                out.omega_rad_s = 0.0;
                 break;
             }
 
@@ -860,7 +971,26 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             // just watch for arrival or timeout. Cases where realignment
             // isn't needed (|delta| < deadband) or the plan failed are
             // short-circuited in _transition() and never enter this body.
-            if (_controller.has_arrived()) {
+
+            // Wall-obstruction fallback: if the spline path heads into a
+            // wall (typical when home sits in a corner and post-release
+            // heading faces the wall), the obstacle filter in loop_control
+            // zeros forward velocity and the spline stalls. Latch into a
+            // gentle in-place rotation to home_theta — slower than the
+            // spline ideal but always finishes. Sticky so a brief lidar
+            // false-positive doesn't flip-flop us between modes.
+            if (!_realign_inplace && app::obstacle_ahead.load()) {
+                LOG("Mission") << "REALIGN: obstacle ahead, falling back to "
+                                  "in-place rotation.";
+                _controller.abort();
+                _realign_inplace = true;
+            }
+
+            double home_theta_local;
+            { std::lock_guard<std::mutex> lk(_m); home_theta_local = _home_theta; }
+            const double delta = wrap_pi(home_theta_local - pose.theta);
+
+            if (std::fabs(delta) < 0.05) {  // ~3°
                 _transition(State::SEARCH, pose);
                 out.mode = Command::Mode::STOP;
                 break;
@@ -868,6 +998,22 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             if (t_in > _turn_around_timeout_s) {
                 LOG("Mission") << "REALIGN timed out after " << t_in
                                << " s; bailing to SEARCH.";
+                _transition(State::SEARCH, pose);
+                out.mode = Command::Mode::STOP;
+                break;
+            }
+
+            if (_realign_inplace) {
+                // Gentle in-place rotation at 1.0 rad/s cap. Slow enough
+                // that cox gets several corrections during the spin and
+                // wheel-slip drift stays bounded.
+                out.mode = Command::Mode::DIRECT;
+                out.v_mm_s = 0.0;
+                out.omega_rad_s = clamp_d(2.0 * delta, -1.0, 1.0);
+                break;
+            }
+
+            if (_controller.has_arrived()) {
                 _transition(State::SEARCH, pose);
                 out.mode = Command::Mode::STOP;
                 break;

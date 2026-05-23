@@ -65,6 +65,14 @@ private:
     double _pre_roll_thresh = 0.52;   // ~30 deg, PRE_ROLL entry
     double _k_pre_roll = 2.0;    // P gain for PRE_ROLL omega target
     double _k_terminal = 2.0;    // P gain for terminal rotate omega
+    // In-place rotation cap. PRE_ROLL and TERMINAL_ROTATE both spin the
+    // chassis with v=0, which dominates the wheel-slip portion of the
+    // odometry noise (var_theta ~ K_ROT^2 * d_theta^2). At the full
+    // _omega_max (~5.4 rad/s) a 180° turn finishes in ~0.6s — faster than
+    // cox can fold in enough corrections to bound heading drift. Capping
+    // these phases to 1.0 rad/s spreads the rotation over several seconds
+    // so cox provides continuous heading anchoring while the wheels move.
+    double _inplace_omega_cap = 1.0;     // rad/s
 
     // Walk forward from `_closest_idx` along the path, advancing the hint
     // past any points we've already passed (cumulative arc length is what
