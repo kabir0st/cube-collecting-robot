@@ -94,8 +94,20 @@ bool Motor::start() {
       }
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     MotorDataType md;
-    constexpr int   ZERO_FRAMES = 8;
-    constexpr auto  ZERO_GAP    = std::chrono::milliseconds(25);  // 8 × 25ms = 200ms
+    // Two-stage zero flood. The SPI protocol has no reset/control byte, so
+    // the only way to clear any stale setpoint the Arduino is still acting
+    // on (from a prior Pi run or a bus-init glitch) is to overwrite it with
+    // zero commands. The first stage hammers zero frames back-to-back so
+    // the Arduino's command latch can't run on a stale value between
+    // frames; the second stage holds zero for long enough that any
+    // residual wheel motion has time to dissipate before the settle poll.
+    constexpr int   ZERO_FLOOD_FRAMES = 20;
+    for (int i = 0; i < ZERO_FLOOD_FRAMES; ++i) {
+        std::memset(&md, 0, sizeof(md));
+        Send_Read_Motor_Data(&md);
+    }
+    constexpr int   ZERO_FRAMES = 40;
+    constexpr auto  ZERO_GAP    = std::chrono::milliseconds(5);   // 40 × 5ms = 200ms
     for (int i = 0; i < ZERO_FRAMES; ++i) {
         std::memset(&md, 0, sizeof(md));
         Send_Read_Motor_Data(&md);
@@ -198,7 +210,14 @@ void Motor::_loop_motor_read_write() {
             Send_Read_Motor_Data(&md);
         }
     } zero_on_exit;
-    while (_motor_running.load() && !app::shutdown) {
+    // Loop life is governed by _motor_running alone. Do NOT also gate on
+    // app::shutdown: when SIGINT flips that flag, the IO loop must keep
+    // running so Motor::stop() (called via ~Motor from loop_control's
+    // teardown) can drive _v_target/_w_target to 0 and let the slew
+    // limiter ramp the wheels down. Exiting here on shutdown would freeze
+    // _v_cur at whatever it was and then ZeroFrameOnExit would slam the
+    // Arduino setpoint to 0 in one tick — the source of the stop twitch.
+    while (_motor_running.load()) {
         // for smoother v changes
         int32_t last_l, last_r;
         std::chrono::steady_clock::time_point last_ts;
