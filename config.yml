@@ -32,32 +32,51 @@ map:
   # The reference map is built from ~50 lidar frames at boot via RANSAC.
   # No hardcoded geometry — walls are whatever the lidar finds.
   #
-  # Tuned for a RECTANGULAR ARENA with 1-2 other robots inside:
-  #   - Walls are long & straight: tight inlier gate, high inlier req.
-  #   - Other robots span ~5-15 angle bins (300-500 mm of arc); we don't
-  #     want them mis-fit as walls. Long min_segment_len + high
-  #     inlier_points_req filters them out.
-  #   - Robots can occlude wall sections; max_lines > 4 gives slack so a
-  #     wall split into two visible pieces still both fit.
+  # Tuned for a 2.4m × 3.6m rectangular arena with home on a 2.4m short
+  # wall and 1-2 other robots inside the arena.
+  #
+  # Boot geometry — robot at home = (0, 0, 0) facing into the arena (+x
+  # along the 3.6m axis, +y across the 2.4m axis):
+  #   - Home wall  (2.4m):  behind robot, x ≈ -200   (close, ~150 beams)
+  #   - Far wall   (2.4m):  ahead of robot, x ≈ +3400 (farthest, ~40 beams)
+  #   - Side walls (3.6m):  y ≈ ±1200                 (~80 beams each)
+  # ~360 lidar beams total. The far wall is the limiting case for both
+  # inlier_points_req and min_inlier_fraction; the home wall (close,
+  # high beam count) is what max_lines + endpoint_padding most need to
+  # not over-split.
+  #
+  # Other robots span ~5-15 beams (300-500 mm of chord). Body footprint
+  # ≤ ~400 mm. We want them rejected even if they happen to present a
+  # flat edge — min_segment_len does the heavy lifting here since the
+  # shortest real wall is 2400 mm.
   ransac:
-    # Tight gate — arena walls are straight; tolerate a couple cm of
-    # lidar noise but no more.
-    inlier_thresh_mm: 50.0
-    # More trials per line so the partial-occlusion case (robot blocking
-    # the middle of a wall) still finds the dominant line.
+    # Lab arena walls are flat MDF/wood; lidar noise ≈ 5-10 mm at these
+    # ranges. Tightened from a generic 50 mm so anything outside the
+    # gate is sensor flicker or a non-wall object, not a noisy wall.
+    inlier_thresh_mm: 30.0
+    # More trials per line so the partial-occlusion case (robot parked
+    # at the midspan of a side wall) still finds the dominant line.
+    # Boot-only work; CPU is free here.
     max_iters_per_line: 500
-    # A small robot contributes ~5-15 angle-averaged points. Requiring 30
-    # rejects robot bodies while passing partially-occluded walls.
+    # Far wall has ~40 beams. 30 accepts it with slack while rejecting
+    # an opposing robot's ~5-15 beam arc.
     inlier_points_req: 30
-    # ~360 angle bins; a wall ≈ 60-100 bins (≈ 17-28% of points). 6%
-    # rejects robots (≈ 1-4%) and stops RANSAC once walls are exhausted.
-    min_inlier_fraction: 0.06
-    # 4 walls expected, +2 slack for occlusion-split walls.
+    # Far wall is ~11% of beams. 8% accepts the far wall while
+    # rejecting robots (~1-4%) and stops RANSAC once the four arena
+    # walls are exhausted.
+    min_inlier_fraction: 0.08
+    # 4 walls expected, +2 slack so a side wall split into two visible
+    # pieces by a robot at midspan still both fit.
     max_lines: 6
     endpoint_padding_mm: 50.0
-    # Robot body footprint ≤ ~400 mm. 600 mm rejects robot edges while
-    # accepting any plausible arena wall.
-    min_segment_len_mm: 600.0
+    # Shortest full wall is 2400 mm. Worst plausible partial occlusion
+    # (a 400 mm robot stopped at the midspan of a side wall) leaves two
+    # ~1000 mm pieces. 1200 mm rejects every robot chassis footprint
+    # and any in-arena clutter (boxes, posts) while still passing
+    # half-occluded walls. Critical for this geometry: at the prior
+    # 600 mm a flat chassis edge of another robot could pass as a
+    # "wall" and pollute the cox reference map.
+    min_segment_len_mm: 1200.0
 
 logger:
   # Lab-3 file logging (logs/<run_id>_{odom,cox,kalman}.txt).
