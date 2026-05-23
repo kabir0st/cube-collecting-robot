@@ -58,25 +58,30 @@ map:
     # at the midspan of a side wall) still finds the dominant line.
     # Boot-only work; CPU is free here.
     max_iters_per_line: 500
-    # Far wall has ~40 beams. 30 accepts it with slack while rejecting
-    # an opposing robot's ~5-15 beam arc.
-    inlier_points_req: 30
-    # Far wall is ~11% of beams. 8% accepts the far wall while
-    # rejecting robots (~1-4%) and stops RANSAC once the four arena
-    # walls are exhausted.
-    min_inlier_fraction: 0.08
+    # Was 30 (a "far wall ~40 beams with slack" floor). Empirically the
+    # close-behind wall (~263 mm) plus 2-3 other robots in the arena
+    # leaves the far walls with 18-25 useful beams after occlusion.
+    # 18 still beats any single robot's chassis arc (~5-15 beams) plus
+    # the min_segment_len_mm gate below catches anything shorter than a
+    # real wall.
+    inlier_points_req: 18
+    # Was 0.08 (8 %). With ~3500 aggregated points after angle binning,
+    # 8 % required ~280 inliers per line — fine for the first two walls
+    # but starves RANSAC of the remaining walls once those points are
+    # erased. 0.04 (~140 inliers) keeps it going long enough to find
+    # walls 3 and 4, then naturally stops when only sensor noise remains.
+    min_inlier_fraction: 0.04
     # 4 walls expected, +2 slack so a side wall split into two visible
     # pieces by a robot at midspan still both fit.
     max_lines: 6
     endpoint_padding_mm: 50.0
-    # Shortest full wall is 2400 mm. Worst plausible partial occlusion
-    # (a 400 mm robot stopped at the midspan of a side wall) leaves two
-    # ~1000 mm pieces. 1200 mm rejects every robot chassis footprint
-    # and any in-arena clutter (boxes, posts) while still passing
-    # half-occluded walls. Critical for this geometry: at the prior
-    # 600 mm a flat chassis edge of another robot could pass as a
-    # "wall" and pollute the cox reference map.
-    min_segment_len_mm: 1200.0
+    # Was 1200 mm. Shortest full wall is 2400 mm; with several arena
+    # robots occluding a single wall it can split into two ~700-900 mm
+    # pieces. 800 mm still beats a 400 mm robot chassis by 2x while
+    # preserving the heavily-occluded long walls. min_inlier_fraction
+    # + inlier_thresh_mm are the safety net against a flat chassis edge
+    # masquerading as a wall.
+    min_segment_len_mm: 800.0
 
 logger:
   # Lab-3 file logging (logs/<run_id>_{odom,cox,kalman}.txt).

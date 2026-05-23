@@ -249,48 +249,48 @@ namespace {
 //   cox (large sigma) automatically produces a weak correction, so we
 //   gain nothing by gatekeeping ourselves on `converged`. The estimate's
 //   covariance grows with ssq, so a poor-fit pose enters the KF with a
-//   large R and barely moves the state. We only refuse on actual garbage:
-//   too few inliers, or a rank-deficient information matrix (degenerate
-//   geometry like single-wall view).
+//   large R and barely moves the state. We refuse on actual garbage: too
+//   few inliers, or rank-deficient geometry (sigma explodes in the
+//   unconstrained direction -- e.g. single-wall corridor, sigma_y >> arena).
 //
 //   cox_strong_fix(): strict gate, used only to accept a relocalize sweep
 //   winner. Because we're about to kf.reset() to it (blowing away prior
 //   state), we need high confidence — there `converged` IS required.
-constexpr int   MIN_INLIERS_FUSE     = 60;
-// Reject rank-deficient information matrices. With the ridge term (1e-3)
-// floor on the smallest eigenvalue, a well-observed scan typically has
-// cond ~ 1e2-1e3; a long-corridor / single-wall scan blows past 1e6. Set
-// the gate well above the typical "good" upper bound to avoid false
-// rejects while still catching geometric degeneracy.
-constexpr float MAX_COND_FUSE        = 1.0e4f;
+//
+// History: previously gated on `cond_number <= 1e4`. Killed every fuse in
+// the 2-wall L-corner geometry (cond naturally ~1e6 even with sigma~2 mm)
+// while letting through single-wall fits where one sigma is healthy and the
+// other is 70 mm. Sigma gates directly check what cond was trying to proxy:
+// "is the pose actually pinned in every axis?".
+constexpr int   MIN_INLIERS_FUSE     = 20;
+constexpr float MAX_SIGMA_XY_FUSE    = 30.0f;   // mm
+constexpr float MAX_SIGMA_THETA_FUSE = 0.025f;  // rad (~1.4 deg)
 
 // "Strong fix" thresholds — used only by relocalize_local_sweep() to accept
 // a sweep winner before kf.reset(). Tightened for the 2.4m × 3.6m four-wall
 // arena where well-observed scans routinely deliver sigma_xy ≈ 10-20 mm and
 // sigma_theta ≈ 0.3-0.8°; the looser defaults (30 mm / 2°) accepted
 // borderline fits that produced ~50 mm hops in the KF after relocalize.
-constexpr int   MIN_INLIERS_FIX      = 30;
+constexpr int   MIN_INLIERS_FIX      = 20;
 constexpr float MAX_SIGMA_XY_FIX     = 25.0f;   // mm  (~2.5 cm 1sigma)
 constexpr float MAX_SIGMA_THETA_FIX  = 0.025f;  // rad (~1.4 deg)
-constexpr float MAX_COND_FIX         = 1.0e4f;
 
 bool cox_can_fuse(const PosEstimate& est) {
     // Note: `converged` is intentionally NOT in this gate. See block
     // comment above — a not-quite-converged estimate with healthy inliers
-    // and finite cond is still useful information for the KF.
+    // and finite sigmas is still useful information for the KF.
     return est.inliers >= MIN_INLIERS_FUSE
-        && std::isfinite(est.cond_number)
-        && est.cond_number <= MAX_COND_FUSE;
+        && std::isfinite(est.sigma_x) && est.sigma_x < MAX_SIGMA_XY_FUSE
+        && std::isfinite(est.sigma_y) && est.sigma_y < MAX_SIGMA_XY_FUSE
+        && std::isfinite(est.sigma_a) && est.sigma_a < MAX_SIGMA_THETA_FUSE;
 }
 
 bool cox_strong_fix(const PosEstimate& est) {
     return est.converged
         && est.inliers >= MIN_INLIERS_FIX
-        && est.sigma_x <  MAX_SIGMA_XY_FIX
-        && est.sigma_y <  MAX_SIGMA_XY_FIX
-        && est.sigma_a <  MAX_SIGMA_THETA_FIX
-        && std::isfinite(est.cond_number)
-        && est.cond_number <= MAX_COND_FIX;
+        && std::isfinite(est.sigma_x) && est.sigma_x < MAX_SIGMA_XY_FIX
+        && std::isfinite(est.sigma_y) && est.sigma_y < MAX_SIGMA_XY_FIX
+        && std::isfinite(est.sigma_a) && est.sigma_a < MAX_SIGMA_THETA_FIX;
 }
 
 // LOCAL relocalize sweep. The professor only nudges the robot a bit, so
