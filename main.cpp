@@ -1,21 +1,28 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <csignal>
+#include <iostream>
 #include <mutex>
 #include <thread>
 
-#include <global.hpp>
-#include <types.hpp>
-#include <loggers.hpp>
-#include <utils.hpp>
-#include <dashboard.hpp>
 #include <calibrations.hpp>
-#include <core.hpp>
-#include <data_logger.hpp>
-#include <tracker.hpp>
-#include <kalman.hpp>
-#include <telemetry.hpp>
+#include <global.hpp>
+#include <loggers.hpp>
+#include <motor.hpp>
+#include <types.hpp>
 
+// TEMPORARY CALIBRATION BUILD — drives the chassis 300 mm forward (per
+// encoders) and prints the per-wheel reported distance so the operator
+// can compare against a tape-measured ground truth and adjust
+// LEFT/RIGHT_TICKS_PER_MM in motor.hpp. Restore the mission main with:
+//     git checkout main.cpp
+// (or flip CALIBRATION_BUILD below to 0).
+#define CALIBRATION_BUILD 1
+
+// app:: atomics and ROBOT_SPEED are referenced from other compile units
+// in src/, so they must stay defined here regardless of which main() is
+// active.
 std::atomic<bool> app::shutdown{false};
 std::atomic<bool> app::lidar_ready{false};
 std::atomic<bool> app::lidar_stop{false};
@@ -25,17 +32,10 @@ std::atomic<bool> app::cox_first_fix{false};
 std::atomic<bool> app::motors_ready{false};
 std::vector<std::thread> threads;
 
-// Definition for the extern declared in global.hpp. Boot default is the
-// previous compile-time tuning (1.875); main() overwrites this from
-// `robot.speed` in config.yml before any motor / controller object is
-// constructed, so member initializers that read ROBOT_SPEED see the
-// configured value.
 double ROBOT_SPEED = 1.875;
-
 
 static void handle_sigint(int) {
     if (app::shutdown.exchange(true)) {
-        // giving a chance for the 20ms motor loop to sleep
         struct timespec ts = { 0, 100 * 1000 * 1000 };
         nanosleep(&ts, nullptr);
         _exit(130);
@@ -44,16 +44,114 @@ static void handle_sigint(int) {
 }
 
 void wait_for_threads() {
-    for (auto &t : threads)
-    {
+    for (auto &t : threads) {
         if (t.joinable()) t.join();
     }
 }
 
+#if CALIBRATION_BUILD
+
+int main() {
+    std::signal(SIGINT, handle_sigint);
+
+    constexpr double TARGET_MM   = 300.0;
+    constexpr double DRIVE_MM_S  = 120.0;   // cruise speed during roll
+
+    // ROBOT_SPEED still drives the motor's slew limiter, so pull it from
+    // config the same way the mission main does. A typo here just biases
+    // the brake-distance estimate.
+    Config cfg;
+    if (load_config("config.yml", cfg)) {
+        double rs = cfg.get_dbl("robot.speed", ROBOT_SPEED);
+        if (std::isfinite(rs) && rs > 0.0) {
+            ROBOT_SPEED = std::min(rs, 5.0);
+        }
+    }
+    LOG("Cal") << "ROBOT_SPEED=" << ROBOT_SPEED
+               << "  target=" << TARGET_MM << " mm"
+               << "  drive=" << DRIVE_MM_S << " mm/s";
+
+    Motor motor;
+    if (!motor.start()) {
+        LOGE("Cal") << "motor.start() failed";
+        return 1;
+    }
+
+    double l0 = 0.0, r0 = 0.0;
+    motor.get_encoders(l0, r0);
+    LOG("Cal") << "Seed encoders L=" << l0 << " mm  R=" << r0 << " mm";
+
+    // ACCEL_V_BASE_MM_S2 mirrors the constant in src/motor.cpp; the slew
+    // limiter ramps down at this rate × ROBOT_SPEED. Pre-command the stop
+    // one brake-window early so the chassis coasts to ~TARGET_MM rather
+    // than overshooting by the full ramp-down distance.
+    constexpr double ACCEL_V_BASE_MM_S2 = 150.0;
+    const double decel      = ACCEL_V_BASE_MM_S2 * ROBOT_SPEED;
+    const double brake_dist = (DRIVE_MM_S * DRIVE_MM_S) / (2.0 * decel);
+    const double stop_when  = std::max(0.0, TARGET_MM - brake_dist);
+    LOG("Cal") << "brake_dist=" << brake_dist
+               << " mm  stop_cmd_at=" << stop_when << " mm";
+
+    motor.set_velocity(DRIVE_MM_S, 0.0);
+
+    bool stopped = false;
+    while (!app::shutdown.load()) {
+        double l = 0.0, r = 0.0;
+        motor.get_encoders(l, r);
+        const double dL = l - l0;
+        const double dR = r - r0;
+        const double avg = 0.5 * (dL + dR);
+
+        if (!stopped && avg >= stop_when) {
+            motor.set_velocity(0.0, 0.0);
+            stopped = true;
+            LOG("Cal") << "stop cmd @ avg=" << avg
+                       << " mm (L=" << dL << "  R=" << dR << ")";
+        }
+        if (stopped) {
+            double v = 0.0, w = 0.0;
+            motor.get_current_v_w(v, w);
+            if (std::fabs(v) < 0.5) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    // Let any residual slew + wheel free-roll bleed off before sampling.
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    double l1 = 0.0, r1 = 0.0;
+    motor.get_encoders(l1, r1);
+    const double dL = l1 - l0;
+    const double dR = r1 - r0;
+
+    std::cout << "\n=== 300 mm calibration roll ===\n"
+              << "  L reported : " << dL << " mm\n"
+              << "  R reported : " << dR << " mm\n"
+              << "  Mean       : " << 0.5 * (dL + dR) << " mm\n\n"
+              << "Tape-measure the chassis travel A_mm, then update motor.hpp:\n"
+              << "  LEFT_TICKS_PER_MM  = "
+              << Motor::LEFT_TICKS_PER_MM  << " * " << dL << " / A_mm\n"
+              << "  RIGHT_TICKS_PER_MM = "
+              << Motor::RIGHT_TICKS_PER_MM << " * " << dR << " / A_mm\n"
+              << std::flush;
+
+    motor.stop();
+    return 0;
+}
+
+#else  // ---- mission main, preserved for `git checkout main.cpp`-free revert ----
+
+#include <dashboard.hpp>
+#include <core.hpp>
+#include <data_logger.hpp>
+#include <tracker.hpp>
+#include <kalman.hpp>
+#include <telemetry.hpp>
+#include <utils.hpp>
+
 int main() {
         std::signal(SIGINT, handle_sigint);
 
-    // loading configs 
+    // loading configs
     std::string config_path = "config.yml";
 
     Config cfg;
@@ -64,11 +162,6 @@ int main() {
                     << " (" << cfg.raw().size() << " keys).";
     }
 
-    // Apply ROBOT_SPEED FIRST, before any object that captures it at
-    // construction time (Motor, PurePursuit, StateMachine — all built down
-    // inside loop_control). Clamp to a sane range so a typo in config
-    // doesn't ramp accel into orbit; logs the resolved value so the
-    // operator can see what's actually in effect.
     {
         double rs = cfg.get_dbl("robot.speed", ROBOT_SPEED);
         if (!std::isfinite(rs) || rs <= 0.0) {
@@ -111,8 +204,6 @@ int main() {
     mission.home_margin   = cfg.get_dbl("mission.home_margin_mm",  mission.home_margin);
     mission.arm_length_mm = cfg.get_dbl("mission.arm_length_mm",   mission.arm_length_mm);
 
-    // Lab-3 goto: "x_mm,y_mm,theta_deg". When present, loop_control will
-    // call sm.go_to(...) instead of starting the SEARCH mission.
     {
         std::string g = cfg.get_str("mission.goto", "");
         if (!g.empty()) {
@@ -133,9 +224,6 @@ int main() {
         }
     }
 
-    // RANSAC parameters for the boot-time lidar map build. Defaults tuned
-    // for a rectangular arena with 1-2 other robots inside (see config.yml
-    // map.ransac block for the rationale per key).
     RansacParams map_ransac;
     map_ransac.inlier_thresh_mm    = cfg.get_dbl("map.ransac.inlier_thresh_mm",    25.0);
     map_ransac.max_iters_per_line  = cfg.get_int("map.ransac.max_iters_per_line",  400);
@@ -155,8 +243,6 @@ int main() {
         cfg.get_bool("logger.udp_enabled",   false),
         cfg.get_int ("logger.scan_subsample", 2));
 
-    // Lab-3 file logger: time + pose + uncertainty for odom, cox, kalman
-    // at 100 ms cadence. No-op if logger.files_enabled is false.
     DataLogger data_logger;
     data_logger.open(
         cfg.get_bool("logger.files_enabled", false),
@@ -187,14 +273,11 @@ int main() {
         return 1;
     }
 
-    // start rest of the system
     INA219 power_interface = configure_voltage_interface();
     Dashboard dash;
-    // shared datas
     TrackerResult target;
     LidarData lidar_data;
     KalmanFilter kf;
-    // 9 panels × 4 lines each = 36 lines (+ slack).
     dash.start(48);
 
     if (cfg.get_bool("battery.enabled", true)) {
@@ -205,12 +288,10 @@ int main() {
         LOG("Main") << "Battery monitor disabled via config.";
     }
 
-
     dash.add_row("Cox");
     threads.emplace_back(loop_localization,
         std::ref(dash), std::ref(lidar_data), std::ref(kf),
         std::cref(map_ransac), std::ref(data_logger));
-    // waiting for cox 1st seeds to be stable
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
     dash.add_row("Vision");
@@ -229,8 +310,9 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         dash.render();
     }
-    // shutdown
     wait_for_threads();
     data_logger.close();
     telemetry::shutdown();
 }
+
+#endif  // CALIBRATION_BUILD

@@ -11,7 +11,14 @@
 //   +π/2   : LiDAR's 0° points to the robot's left  (LiDAR rotated 90° CCW)
 //    π     : LiDAR's 0° points backward
 // Adjust this if pushing the robot forward does *not* make Cox.X increase.
-constexpr double LIDAR_MOUNT_OFFSET_RAD = -M_PI / 2.0;
+//
+// Verified empirically: with 0, push forward -> Cox.X increases, push right
+// -> Cox.Y decreases, CCW rotation -> Cox.theta increases (standard right-
+// handed body frame, matching the odometry/encoder convention so KF fusion
+// is consistent). Previously -π/2 left Cox 90° CW-rotated from odometry --
+// fusion still "worked" but the two estimates fought each other and the
+// dashboard X/Y didn't match the robot's actual heading.
+constexpr double LIDAR_MOUNT_OFFSET_RAD = 0.0;
 
 // Global speed multiplier applied to every linear/angular velocity cap and
 // acceleration limit. 1.0 = the original tuned baseline. Bump up to make
