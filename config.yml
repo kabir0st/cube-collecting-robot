@@ -26,7 +26,7 @@ mission:
   # override the default SEARCH mission and drive once to (x, y, theta).
   # State machine latches DONE on arrival; the process keeps running
   # until SIGINT so the data logger can finish writing.
-  # goto: "340,320,34"
+  # goto: "400,0,0"
 
 map:
   # The reference map is built from ~50 lidar frames at boot via RANSAC.
