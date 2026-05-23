@@ -3,8 +3,8 @@ camera:
   height: 480
   fps_target: 12
   focal_length_px: 650.0
-  grab_bottom_region_ratio: 0.30
-  grab_bottom_fill_ratio: 0.35
+  grab_bottom_region_ratio: 0.25
+  grab_bottom_fill_ratio: 0.65
   grab_angle_tol_deg: 5.0
   capture_distance_mm: 100.0
   capture_bearing_tol_rad: 0.12
@@ -84,7 +84,7 @@ logger:
   # Lab-4 UDP stream to Matlab listener.
   udp_enabled: true
   out_dir: logs
-  udp_host: 10.179.209.142
+  udp_host: 10.98.151.142
   udp_port: 5005
   tick_ms: 100
   # Take every N-th lidar beam for the UDP scan overlay. 1 = full ~360 pts,
@@ -93,3 +93,12 @@ logger:
 
 battery:
   enabled: true
+
+filter:
+  ready: true
+  has_wrap_around: false
+  dominant_color: "158.751,140.711,190.567"
+  lower1: "149,54,41"
+  upper1: "168,195,225"
+  lower2: "0,0,0"
+  upper2: "0,0,0"
