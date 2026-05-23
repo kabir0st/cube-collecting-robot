@@ -75,6 +75,15 @@ public:
     State state() const;
     static const char* state_name(State s);
 
+    // True when the gripper is closed around a box (CARRY_HOME, RELEASE,
+    // TURN_AROUND/REALIGN). The closed gripper + held box sits in the
+    // lidar's forward arc inside OBSTACLE_DIST_MM, so the global obstacle
+    // gate must be disabled during these states or the robot stalls
+    // rotating in place on its own payload. SEARCH and APPROACH keep the
+    // gate enabled — there the gripper is open and the arms swing wide
+    // enough to clear the lidar plane.
+    bool is_carrying_payload() const;
+
 private:
     // Orchestrated subsystems (refs; lifetimes owned by main).
     TrackerResult&         _vision;

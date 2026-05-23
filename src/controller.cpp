@@ -218,6 +218,13 @@ StateMachine::State StateMachine::state() const {
     return _state.load();
 }
 
+bool StateMachine::is_carrying_payload() const {
+    const State s = _state.load();
+    return s == State::CARRY_HOME
+        || s == State::RELEASE
+        || s == State::TURN_AROUND;
+}
+
 void StateMachine::_transition(State new_state, const Pos2D& current) {
     const State old_state = _state.load();
 
