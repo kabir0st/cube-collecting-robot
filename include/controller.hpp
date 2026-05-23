@@ -225,13 +225,28 @@ private:
     // incoming one. Resets _state_entered.
     void _transition(State new_state, const Pos2D& current);
 
-    // CARRY_HOME entry: build a 3-point B-cubic spline (current → midpoint
-    // → home) and load it into the controller. Returns false if the
-    // spline generator returned an empty path (caller should route the
-    // mission to SAFE_STOP rather than silently bouncing through CARRY_HOME).
+    // CARRY_HOME entry: build a tangent-aware B-cubic spline from `current`
+    // pose (with current heading) to the box-biased home position (with
+    // path-tangent arrival heading), via _plan_tangent_spline. Returns
+    // false if the spline generator returned an empty path (caller should
+    // route the mission to SAFE_STOP rather than silently bouncing).
     bool _plan_path_home(const Pos2D& current);
 
     bool _plan_path_to(const Pos2D& current,
                        double gx, double gy, double gtheta,
                        double margin_mm, double v_max_mm_s);
+
+    // Tangent-aware 4-control-point B-cubic spline:
+    //   (start, start + L·start_tangent, goal - L·goal_tangent, goal)
+    // Forces the spline's start tangent to match `current.theta` and its
+    // end tangent to match `gtheta`. The robot can drive the resulting
+    // arc forward without an in-place PRE_ROLL spin-up (the lookahead is
+    // already in front of the robot's heading) and without a TERMINAL_ROTATE
+    // alignment at the end (heading converges to gtheta during PURSUIT).
+    // Caller is responsible for choosing a `gtheta` that doesn't make the
+    // spline colinear with current heading on a flat axis — REALIGN adds
+    // a small lateral offset for that reason.
+    bool _plan_tangent_spline(const Pos2D& current,
+                              double gx, double gy, double gtheta,
+                              double margin_mm, double v_max_mm_s);
 };
