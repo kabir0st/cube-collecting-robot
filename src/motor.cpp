@@ -33,7 +33,7 @@ namespace {
     // burst of bad SPI reads — otherwise bit-flipped values eventually
     // fit under the threshold and corrupt the encoder accumulator.
     constexpr double MAX_DT_S          = 0.200;
-    constexpr auto   LOOP_PERIOD       = std::chrono::milliseconds(20);
+    constexpr auto   LOOP_PERIOD       = std::chrono::milliseconds(10);
 
     // Acceleration baselines (per second). The actual per-tick step is
     // computed inside the motor IO loop using the runtime ROBOT_SPEED,
