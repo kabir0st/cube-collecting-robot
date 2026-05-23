@@ -251,8 +251,32 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
     }
 
     if (new_state == State::CARRY_HOME) {
-        if (!_plan_path_home(current)) {
-            new_state = State::SAFE_STOP;
+        // Pre-rotate gate: large post-grab |delta| to home produces a
+        // U-turn spline whose curvature exceeds v_max / omega_max, and
+        // PurePursuit orbits at the omega cap instead of tracking. Spin
+        // in place toward home first; the step body plans the spline
+        // once heading is inside the deadband.
+        double hx_l, hy_l, ht_l, arm_l;
+        {
+            std::lock_guard<std::mutex> lk(_m);
+            hx_l = _home_x; hy_l = _home_y;
+            ht_l = _home_theta; arm_l = _arm_length_mm;
+        }
+        const double gx = hx_l - arm_l * std::cos(ht_l);
+        const double gy = hy_l - arm_l * std::sin(ht_l);
+        const double tan_to_goal =
+            std::atan2(gy - current.y, gx - current.x);
+        const double delta = wrap_pi(tan_to_goal - current.theta);
+        if (std::fabs(delta) < _carry_realign_deadband_rad) {
+            _carry_realign_active = false;
+            if (!_plan_path_home(current)) {
+                new_state = State::SAFE_STOP;
+            }
+        } else {
+            _carry_realign_active = true;
+            LOG("Mission") << "CARRY_HOME pre-rotate: delta="
+                           << (delta * 180.0 / M_PI)
+                           << " deg toward home bearing";
         }
     }
 
@@ -925,6 +949,46 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             // CARRY_HOME → SEARCH → servo_release() → re-grab → repeat
             // oscillation that looked like grabs/releases during turns.
             // The drive-home plan is committed; _carry_timeout_s caps it.
+
+            // Pre-rotate phase (no spline loaded yet): slowly spin in
+            // place toward home bearing. Once inside the deadband, plan
+            // the spline and fall through to PATH_FOLLOW on the same tick.
+            if (_carry_realign_active) {
+                if (t_in > _carry_timeout_s) {
+                    _transition(State::SAFE_STOP, pose);
+                    out.mode = Command::Mode::STOP;
+                    break;
+                }
+                double hx_l, hy_l, ht_l, arm_l;
+                {
+                    std::lock_guard<std::mutex> lk(_m);
+                    hx_l = _home_x; hy_l = _home_y;
+                    ht_l = _home_theta; arm_l = _arm_length_mm;
+                }
+                const double gx = hx_l - arm_l * std::cos(ht_l);
+                const double gy = hy_l - arm_l * std::sin(ht_l);
+                const double tan_to_goal =
+                    std::atan2(gy - pose.y, gx - pose.x);
+                const double delta = wrap_pi(tan_to_goal - pose.theta);
+                if (std::fabs(delta) < _carry_realign_deadband_rad) {
+                    _carry_realign_active = false;
+                    if (!_plan_path_home(pose)) {
+                        _transition(State::SAFE_STOP, pose);
+                        out.mode = Command::Mode::STOP;
+                        break;
+                    }
+                    out.mode = Command::Mode::PATH_FOLLOW;
+                    break;
+                }
+                out.mode = Command::Mode::DIRECT;
+                out.v_mm_s = 0.0;
+                out.omega_rad_s =
+                    clamp_d(_carry_realign_k_omega * delta,
+                            -_carry_realign_omega_cap,
+                             _carry_realign_omega_cap);
+                break;
+            }
+
             if (_controller.has_arrived()) {
                 _transition(State::RELEASE, pose);
                 out.mode = Command::Mode::DIRECT;

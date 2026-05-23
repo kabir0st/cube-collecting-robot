@@ -223,6 +223,16 @@ private:
     double _search_timeout_s    = 60.0;
     double _approach_timeout_s  = 20.0;
     double _carry_timeout_s     = 90.0;
+    // CARRY_HOME pre-rotate: gentle in-place spin toward the bearing of
+    // the (box-biased) home point before the spline path-follow engages.
+    // Skipped when |delta| < deadband. The cap is intentionally lower
+    // than PRE_ROLL's 0.8 rad/s — the box is gripped, the chassis is
+    // payload-loaded, and we want cox to fold several scan matches per
+    // spin without motion-comp drift.
+    double _carry_realign_k_omega      = 2.0;   // P gain (rad/s per rad)
+    double _carry_realign_omega_cap    = 0.6;   // rad/s
+    double _carry_realign_deadband_rad = 0.05;  // ~3°
+    bool   _carry_realign_active       = false;
     // Hard timeout on TURN_AROUND (now REALIGN-to-home_theta) so a jammed
     // motor doesn't wedge the mission. If we cannot reach the target
     // heading within this many seconds, give up and fall back to SEARCH
