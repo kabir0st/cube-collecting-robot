@@ -135,7 +135,7 @@ void loop_control(Dashboard& dash,
                   const MissionConfig& mission,
                   DataLogger& logger) {
     // sequence (fwd 400 mm -> +90° + 300 mm -> back home)
-    constexpr bool IS_TEST = false;
+    constexpr bool IS_TEST = true;
 
     Motor motor;
     Odometry odom;

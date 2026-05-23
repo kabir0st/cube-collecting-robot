@@ -22,7 +22,7 @@ class Motor {
         // ticks_per_mm = raw_ticks / actual_mm.
         static constexpr double LEFT_TICKS_PER_MM  = 121.04;
         static constexpr double RIGHT_TICKS_PER_MM = 118.42;
-        static constexpr double WHEELBASE_MM       = 185.0;
+        static constexpr double WHEELBASE_MM       = 175.0;
 
         Motor();
         ~Motor();
