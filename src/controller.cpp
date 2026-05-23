@@ -251,32 +251,16 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
     }
 
     if (new_state == State::CARRY_HOME) {
-        // Pre-rotate gate: large post-grab |delta| to home produces a
-        // U-turn spline whose curvature exceeds v_max / omega_max, and
-        // PurePursuit orbits at the omega cap instead of tracking. Spin
-        // in place toward home first; the step body plans the spline
-        // once heading is inside the deadband.
-        double hx_l, hy_l, ht_l, arm_l;
+        double hx_l, hy_l, hm_l;
         {
             std::lock_guard<std::mutex> lk(_m);
-            hx_l = _home_x; hy_l = _home_y;
-            ht_l = _home_theta; arm_l = _arm_length_mm;
+            hx_l = _home_x; hy_l = _home_y; hm_l = _home_margin;
         }
-        const double gx = hx_l - arm_l * std::cos(ht_l);
-        const double gy = hy_l - arm_l * std::sin(ht_l);
         const double tan_to_goal =
-            std::atan2(gy - current.y, gx - current.x);
-        const double delta = wrap_pi(tan_to_goal - current.theta);
-        if (std::fabs(delta) < _carry_realign_deadband_rad) {
-            _carry_realign_active = false;
-            if (!_plan_path_home(current)) {
-                new_state = State::SAFE_STOP;
-            }
-        } else {
-            _carry_realign_active = true;
-            LOG("Mission") << "CARRY_HOME pre-rotate: delta="
-                           << (delta * 180.0 / M_PI)
-                           << " deg toward home bearing";
+            std::atan2(hy_l - current.y, hx_l - current.x);
+        if (!_plan_path_to(current, hx_l, hy_l, tan_to_goal,
+                           hm_l, 60.0 * ROBOT_SPEED)) {
+            new_state = State::SAFE_STOP;
         }
     }
 
@@ -436,114 +420,6 @@ bool StateMachine::_plan_tangent_spline(const Pos2D& current,
     path.back().margin = margin_mm;
     path.back().theta  = gtheta;
     _controller.set_path(path);
-    return true;
-}
-
-bool StateMachine::_plan_path_home(const Pos2D& current) {
-    // Snapshot mission config once.
-    double hx, hy, ht, hm, arm;
-    {
-        std::lock_guard<std::mutex> lk(_m);
-        hx  = _home_x; hy = _home_y; ht = _home_theta; hm = _home_margin;
-        arm = _arm_length_mm;
-    }
-    (void)ht;  // home_theta no longer baked into the path
-
-    // Bias the *robot* goal back by arm_length along the home heading so the
-    // *box* (which sits arm_length ahead of the robot) ends up at home.
-    const double gx = hx - arm * std::cos(ht);
-    const double gy = hy - arm * std::sin(ht);
-
-    // Arrival heading = direction from current to goal (path tangent).
-    const double tangent_to_goal =
-        std::atan2(gy - current.y, gx - current.x);
-    const double delta_yaw = wrap_pi(tangent_to_goal - current.theta);
-
-    const double dx_total = gx - current.x;
-    const double dy_total = gy - current.y;
-    const double dist = std::hypot(dx_total, dy_total);
-
-    // 5-control tangent-aware spline with lateral midpoint apex:
-    //   (start, start+L·start_tangent, midpoint+apex, goal-L·goal_tangent, goal)
-    //
-    // The typical CARRY_HOME geometry has post-grab heading opposite to the
-    // direction toward home (robot was facing the box). A pure 4-control
-    // tangent spline collapses to a near-1D path on that axis and
-    // PurePursuit's cross-track y_l ~ 0 leaves the robot unable to U-turn.
-    // The midpoint with a lateral apex offset forces a 2D curve so the
-    // lookahead has non-trivial cross-track and PURSUIT can drive the turn.
-    //
-    // Apex direction = perpendicular to *start* heading (the geometric
-    // apex of a smooth arc sits on the start side of the chord), with
-    // sign(delta_yaw) picking left (CCW) vs right (CW).
-    constexpr double L_T_MIN_MM      = 80.0;
-    constexpr double L_T_MAX_MM      = 300.0;
-    constexpr double APEX_LAT_MAX_MM = 300.0;
-    const double L_t  = clamp_d(0.3 * dist, L_T_MIN_MM, L_T_MAX_MM);
-    const double colin    = std::pow(std::sin(delta_yaw / 2.0), 2);  // 0..1
-    const double apex_mag = APEX_LAT_MAX_MM * colin;
-    const double apex_sign = (delta_yaw >= 0.0) ? 1.0 : -1.0;
-    const double apex_perp_x = -std::sin(current.theta);
-    const double apex_perp_y =  std::cos(current.theta);
-
-    PathPoint p_start;
-    p_start.x = current.x;
-    p_start.y = current.y;
-    p_start.theta = current.theta;
-
-    PathPoint p_start_t;
-    p_start_t.x = current.x + L_t * std::cos(current.theta);
-    p_start_t.y = current.y + L_t * std::sin(current.theta);
-
-    PathPoint p_mid;
-    p_mid.x = 0.5 * (current.x + gx) + apex_sign * apex_mag * apex_perp_x;
-    p_mid.y = 0.5 * (current.y + gy) + apex_sign * apex_mag * apex_perp_y;
-
-    PathPoint p_goal_t;
-    p_goal_t.x = gx - L_t * std::cos(tangent_to_goal);
-    p_goal_t.y = gy - L_t * std::sin(tangent_to_goal);
-
-    PathPoint p_goal;
-    p_goal.x = gx;
-    p_goal.y = gy;
-    p_goal.theta = tangent_to_goal;
-    p_goal.margin = hm;
-
-    std::vector<PathPoint> controls;
-    controls.reserve(5);
-    controls.push_back(p_start);
-    controls.push_back(p_start_t);
-    controls.push_back(p_mid);
-    controls.push_back(p_goal_t);
-    controls.push_back(p_goal);
-
-    std::vector<PathPoint> path = bcubic_spline(
-        controls,
-        20,
-        40.0 * ROBOT_SPEED,
-        hm,
-        100.0 * ROBOT_SPEED,
-        30.0);
-
-    if (path.empty()) {
-        LOGE("Mission") << "CARRY_HOME spline empty from ("
-                        << current.x << ", " << current.y << ", "
-                        << current.theta << ") to ("
-                        << gx << ", " << gy << ", "
-                        << tangent_to_goal << ")";
-        return false;
-    }
-    path.back().margin = hm;
-    path.back().theta  = tangent_to_goal;
-    _controller.set_path(path);
-
-    LOG("Mission") << "CARRY_HOME plan (5-ctrl): from ("
-                   << current.x << ", " << current.y << ", " << current.theta
-                   << ") -> robot-goal (" << gx << ", " << gy << ", "
-                   << tangent_to_goal << "), delta="
-                   << (delta_yaw * 180.0 / M_PI) << " deg, apex_lat="
-                   << (apex_sign * apex_mag) << " mm [box -> ("
-                   << hx << ", " << hy << ")]";
     return true;
 }
 
@@ -943,52 +819,6 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
         }
 
         case State::CARRY_HOME: {
-            // We do NOT bail to SEARCH on !snap.captured here. Once the
-            // gripper closes, the arms occlude the box and the tracker
-            // routinely loses the lock — the prior bail caused
-            // CARRY_HOME → SEARCH → servo_release() → re-grab → repeat
-            // oscillation that looked like grabs/releases during turns.
-            // The drive-home plan is committed; _carry_timeout_s caps it.
-
-            // Pre-rotate phase (no spline loaded yet): slowly spin in
-            // place toward home bearing. Once inside the deadband, plan
-            // the spline and fall through to PATH_FOLLOW on the same tick.
-            if (_carry_realign_active) {
-                if (t_in > _carry_timeout_s) {
-                    _transition(State::SAFE_STOP, pose);
-                    out.mode = Command::Mode::STOP;
-                    break;
-                }
-                double hx_l, hy_l, ht_l, arm_l;
-                {
-                    std::lock_guard<std::mutex> lk(_m);
-                    hx_l = _home_x; hy_l = _home_y;
-                    ht_l = _home_theta; arm_l = _arm_length_mm;
-                }
-                const double gx = hx_l - arm_l * std::cos(ht_l);
-                const double gy = hy_l - arm_l * std::sin(ht_l);
-                const double tan_to_goal =
-                    std::atan2(gy - pose.y, gx - pose.x);
-                const double delta = wrap_pi(tan_to_goal - pose.theta);
-                if (std::fabs(delta) < _carry_realign_deadband_rad) {
-                    _carry_realign_active = false;
-                    if (!_plan_path_home(pose)) {
-                        _transition(State::SAFE_STOP, pose);
-                        out.mode = Command::Mode::STOP;
-                        break;
-                    }
-                    out.mode = Command::Mode::PATH_FOLLOW;
-                    break;
-                }
-                out.mode = Command::Mode::DIRECT;
-                out.v_mm_s = 0.0;
-                out.omega_rad_s =
-                    clamp_d(_carry_realign_k_omega * delta,
-                            -_carry_realign_omega_cap,
-                             _carry_realign_omega_cap);
-                break;
-            }
-
             if (_controller.has_arrived()) {
                 _transition(State::RELEASE, pose);
                 out.mode = Command::Mode::DIRECT;
@@ -996,19 +826,11 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 out.omega_rad_s = 0.0;
                 break;
             }
-
             if (t_in > _carry_timeout_s) {
                 _transition(State::SAFE_STOP, pose);
                 out.mode = Command::Mode::STOP;
                 break;
             }
-
-            // No periodic re-plan: the tangent-aware spline already curves
-            // smoothly out of the entry heading, and set_path() would reset
-            // PurePursuit to PRE_ROLL — causing visible stop-rotate-go
-            // thrash every cycle. KF + cox corrections plus PurePursuit's
-            // cross-track curvature term handle pose drift continuously
-            // without a fresh plan.
             out.mode = Command::Mode::PATH_FOLLOW;
             break;
         }

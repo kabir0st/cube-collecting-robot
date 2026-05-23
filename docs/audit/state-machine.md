@@ -86,11 +86,10 @@ Timeouts:
 ### CARRY_HOME
 [src/controller.cpp:678-720](../../src/controller.cpp#L678)
 
-- `_plan_path_home()` builds a 3-point B-cubic spline (current → midpoint
-  → home) on entry and re-builds every `_carry_replan_s` (5 s).
-- The path goal is biased back by `_arm_length_mm` so the *box* lands at
-  `home_*`, not the robot.
-- Follows the path; transition on `pp.has_arrived()`.
+- `_plan_path_to()` builds a 3-point B-cubic spline (current → midpoint
+  → home) on entry, targeting `(_home_x, _home_y)` directly.
+- Follows the path; transition to RELEASE on `pp.has_arrived()` (arrival
+  margin = `_home_margin`).
 
 Timeouts:
 - `_carry_timeout_s` (90 s) → SAFE_STOP.
@@ -161,9 +160,9 @@ All defaults live in [include/controller.hpp:150-174](../../include/controller.h
    `servo_grab()` blocks the control thread for ~1.2 s. Plan around it
    if you rate-limit something.
 3. **Path failures are silent except for the log line.** If
-   `_plan_path_home()` returns false, the state machine transitions to
-   SAFE_STOP and the dashboard's `state` field is the only visible
-   indication.
+   `_plan_path_to()` returns false on a CARRY_HOME entry, the state
+   machine transitions to SAFE_STOP and the dashboard's `state` field
+   is the only visible indication.
 4. **`pp.get_active_target()` returns a zeroed `PathPoint` when no path
    is loaded** — telemetry consumers see (0,0,0) at the start of every
    mission until a state actually loads a path.

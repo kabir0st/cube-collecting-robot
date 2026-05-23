@@ -119,8 +119,7 @@ target as failed (avoid re-engaging same box for `_failed_target_skip_s`).
 - Decrease: faster bail on unreachable boxes.
 
 ### `_carry_timeout_s = 90.0`
-Max time in CARRY_HOME (covers both the pre-rotate phase and the
-spline path follow) before SAFE_STOP.
+Max time in CARRY_HOME (straight-line drive to home) before SAFE_STOP.
 - Increase: long path-home distances or slow speeds.
 - Decrease: catch a wedged carry sooner.
 
@@ -188,21 +187,6 @@ world target. Give up and fall back to SEARCH inside this radius.
 - Increase: more tolerance for transient vision drops.
 - Decrease: faster bail on lost targets.
 
-### CARRY_HOME (with payload)
-
-#### `_carry_realign_k_omega = 2.0`, `_carry_realign_omega_cap = 0.6 rad/s`, `_carry_realign_deadband_rad = 0.05` (~3°)
-Pre-rotate phase: when CARRY_HOME is entered with a large bearing-to-home
-delta, spin in place at `omega = clamp(k * delta, ±cap)` until inside
-the deadband, then plan the spline.
-- `omega_cap` is intentionally below PurePursuit's `_inplace_omega_cap = 0.8`
-  — the box is gripped and cox needs the slower spin to keep tracking.
-- Increase `omega_cap`: faster pre-alignment, but cox lock may flicker
-  during the spin (kf_lost spikes).
-- Decrease `omega_cap`: rock-solid cox during turns, longer realign time.
-- Increase `deadband`: spline kicks in sooner with more residual heading
-  error. Risk: spline curvature spikes if delta is still large.
-- Decrease `deadband`: cleaner spline geometry, longer pre-rotate.
-
 ### RELEASE / TURN_AROUND
 
 #### `_release_v = -40 mm/s` (backward)
@@ -225,20 +209,6 @@ Same shape, for the hardcoded TEST sequence.
 ## 5. Path-planning constants
 
 In [src/controller.cpp](../src/controller.cpp):
-
-### CARRY_HOME spline ([_plan_path_home](../src/controller.cpp#L418))
-- `L_T_MIN_MM = 80`, `L_T_MAX_MM = 300` — tangent extension at start
-  and goal control points. Forces the spline to leave/enter along the
-  robot's heading.
-- `APEX_LAT_MAX_MM = 300` — lateral apex offset at the midpoint.
-  Scales with `sin²(δ/2)`, peaks at 180° turns. Without it a U-turn
-  spline collapses to a 1D line and PurePursuit's cross-track stays
-  ~0.
-- Increase `L_T_MAX_MM`: smoother tangent transitions for moderate
-  turns. Worsens fishhook curvature for U-turns (the pre-rotate
-  guard covers this; remove the guard at your own peril).
-- Increase `APEX_LAT_MAX_MM`: more lateral sweep on the U-turn.
-  Watch for collisions with side walls.
 
 ### REALIGN spline ([_transition](../src/controller.cpp#L269))
 - `DELTA_DEADBAND_RAD = 0.05` (~3°): skip realign if already aligned.
@@ -415,15 +385,8 @@ flickers on tight turns, drop `robot.speed` back down or raise
 slips.
 
 **Cox keeps losing during turns.**
-Drop `_inplace_omega_cap` (PRE_ROLL/TERMINAL_ROTATE) and
-`_carry_realign_omega_cap` (CARRY_HOME pre-rotate). Both default
+Drop `_inplace_omega_cap` (PRE_ROLL/TERMINAL_ROTATE). Defaults
 intentionally low.
-
-**CARRY_HOME orbits in a tight circle instead of going home.**
-This is the failure mode the pre-rotate guard exists for. If you see
-it again: verify `_carry_realign_active` is being set on entry
-(look for the `CARRY_HOME pre-rotate: delta=…` log line). The
-guard kicks in when `|δ| > _carry_realign_deadband_rad`.
 
 **Bot stops dead in front of nothing.**
 The obstacle gate fired. Either widen `GRIPPER_MASK_*` (your held
