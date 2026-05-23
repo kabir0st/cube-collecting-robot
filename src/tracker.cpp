@@ -168,18 +168,10 @@ void loop_vision_tracking(Dashboard& dash,
         // Bottom-region "grabbable" zone — depends only on cfg, so
         // compute once per frame regardless of detection. Drawn in the
         // debug overlay below so the gate is tunable by eye.
-        //
-        // The region is now a CENTERED CORRIDOR (not full image width).
-        // This is what enforces "both edges of the box inside the
-        // boundary" — a laterally-offset box fails the containment test
-        // even when its area-overlap with the bottom strip is large.
         const int top_y = static_cast<int>(
             cfg.height * (1.0 - cfg.grab_bottom_region_ratio));
-        const int corridor_w = static_cast<int>(
-            cfg.width * cfg.grab_bottom_width_ratio);
-        const int corridor_x = (cfg.width - corridor_w) / 2;
-        const cv::Rect bottom_region(corridor_x, top_y,
-                                     corridor_w, cfg.height - top_y);
+        const cv::Rect bottom_region(0, top_y,
+                                     cfg.width, cfg.height - top_y);
 
         // Compute per-frame gates. When no blob was selected, all gates
         // are false — the state machines below then treat the frame as a
@@ -219,16 +211,12 @@ void loop_vision_tracking(Dashboard& dash,
                 rr_valid = true;
             }
 
-            // Three-way grab gate: both bbox edges inside the corridor,
-            // sufficient bottom-region fill (vertical proximity), AND
-            // near-axis-aligned. The existing GRAB_FRAMES debouncer below
-            // covers all three since this is a boolean AND.
-            const bool edges_inside =
-                selected_bbox.x >= bottom_region.x &&
-                selected_bbox.br().x <= bottom_region.br().x;
+            // Two-way grab gate: sufficient bottom-region fill (vertical
+            // proximity) AND near-axis-aligned. The existing GRAB_FRAMES
+            // debouncer below covers both since this is a boolean AND.
             const bool fill_ok  = bottom_fill >= cfg.grab_bottom_fill_ratio;
             const bool angle_ok = angle_misalignment_deg <= cfg.grab_angle_tol_deg;
-            grab_gate = edges_inside && fill_ok && angle_ok;
+            grab_gate = fill_ok && angle_ok;
 
             in_capture_range = dist_mm > 0.0
                 && dist_mm <= cfg.capture_distance_mm
