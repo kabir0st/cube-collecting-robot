@@ -264,9 +264,14 @@ constexpr int   MIN_INLIERS_FUSE     = 60;
 // rejects while still catching geometric degeneracy.
 constexpr float MAX_COND_FUSE        = 1.0e4f;
 
+// "Strong fix" thresholds — used only by relocalize_local_sweep() to accept
+// a sweep winner before kf.reset(). Tightened for the 2.4m × 3.6m four-wall
+// arena where well-observed scans routinely deliver sigma_xy ≈ 10-20 mm and
+// sigma_theta ≈ 0.3-0.8°; the looser defaults (30 mm / 2°) accepted
+// borderline fits that produced ~50 mm hops in the KF after relocalize.
 constexpr int   MIN_INLIERS_FIX      = 30;
-constexpr float MAX_SIGMA_XY_FIX     = 30.0f;   // mm  (~3 cm 1sigma)
-constexpr float MAX_SIGMA_THETA_FIX  = 0.035f;  // rad (~2 deg)
+constexpr float MAX_SIGMA_XY_FIX     = 25.0f;   // mm  (~2.5 cm 1sigma)
+constexpr float MAX_SIGMA_THETA_FIX  = 0.025f;  // rad (~1.4 deg)
 constexpr float MAX_COND_FIX         = 1.0e4f;
 
 bool cox_can_fuse(const PosEstimate& est) {
@@ -363,8 +368,16 @@ void loop_scan_cox_estimation(
     // corrections push the KF's own confidence past safety. Stricter than
     // these and a brief cox dropout false-triggers a sweep; looser and
     // the robot drives blind for too long before recovering.
-    constexpr double KF_LOST_SIGMA_XY_MM = 300.0;
-    constexpr double KF_LOST_SIGMA_TH    = 15.0 * M_PI / 180.0;
+    //
+    // Tuned for the 2.4m × 3.6m arena. The prior 300mm / 15° defaults are
+    // generic for mid-sized halls: in this geometry sigma_xy = 300mm puts
+    // the robot a foot past the closest wall before relocalize fires
+    // (12% of the long axis), and 15° of heading uncertainty maps to
+    // sin(15°) × 3.6m ≈ 930mm of lateral error at the far wall — way
+    // beyond the home zone. Tightened to ~5.5% of long axis and 10° so
+    // the sweep fires while there's still arena around the robot.
+    constexpr double KF_LOST_SIGMA_XY_MM = 200.0;
+    constexpr double KF_LOST_SIGMA_TH    = 10.0 * M_PI / 180.0;
 
     CoxScanMatchAlgorithm scan_cox(ref_map, lidar_data);
     PosEstimate est{};
