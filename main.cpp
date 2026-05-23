@@ -22,6 +22,7 @@ std::atomic<bool> app::lidar_stop{false};
 std::atomic<bool> app::obstacle_ahead{false};
 std::atomic<bool> app::relocalizing{false};
 std::atomic<bool> app::cox_first_fix{false};
+std::atomic<bool> app::motors_ready{false};
 std::vector<std::thread> threads;
 
 // Definition for the extern declared in global.hpp. Boot default is the

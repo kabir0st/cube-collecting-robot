@@ -44,4 +44,11 @@ namespace app {
     // cox_can_fuse() and is folded into the KF. loop_control blocks the
     // mission start on this so we never drive on the seeded (0,0,0) pose.
     extern std::atomic<bool> cox_first_fix;
+    // Latched true once loop_control has called motor.start() and given
+    // the chassis a moment to settle. loop_localization blocks lidar
+    // frame collection on this so the reference map references the
+    // post-startup pose. Without it, an SPI-handshake wheel pulse can
+    // displace the body AFTER the map is built, leaving the cox seed at
+    // (0,0,0) outside its first-fix basin of convergence.
+    extern std::atomic<bool> motors_ready;
 }

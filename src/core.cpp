@@ -70,6 +70,19 @@ void loop_localization(Dashboard& dash,
                        LidarData& lidar_data, KalmanFilter& kf,
                        const RansacParams& ransac,
                        DataLogger& logger) {
+    // Block until the motor thread has finished its SPI handshake and the
+    // chassis has settled. The map built below is implicitly anchored to
+    // whatever pose the robot is in during frame collection -- letting any
+    // motor-startup wheel pulse happen first means the twitch is folded
+    // into the map instead of becoming a hidden offset that pushes the
+    // cox first-fix seed outside its basin of convergence.
+    LOG("Main") << "Waiting for motors_ready before starting lidar...";
+    while (!app::motors_ready.load(std::memory_order_acquire)
+        && !app::shutdown.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (app::shutdown.load()) return;
+
     hh::Lidar lidar;
     if (!start_lidar(lidar)) {
         return;
@@ -138,14 +151,22 @@ void loop_control(Dashboard& dash,
     if (!motor.start())
     {
         LOGE("Main") << "Motor start failed";
+        // Unblock loop_localization, which is waiting on motors_ready.
+        app::shutdown.store(true);
         return;
     }
+    // Give the chassis a beat to settle after the SPI handshake before
+    // signaling loop_localization. Any one-shot wheel pulse at controller
+    // init lands inside this window so the encoder seed (and the lidar
+    // frames collected immediately after) reflect the rest position.
+    std::this_thread::sleep_for(std::chrono::seconds(1));
     {
         // resetting
         double l0_mm, r0_mm;
         motor.get_encoders(l0_mm, r0_mm);
         odom.reset(l0_mm, r0_mm);
     }
+    app::motors_ready.store(true, std::memory_order_release);
 
     // Home is fixed at the localization origin (0, 0, 0).
     sm.configure(0.0, 0.0, 0.0,
@@ -154,16 +175,22 @@ void loop_control(Dashboard& dash,
     // Block any mission entry (TEST, SEARCH, or future GOTO seeded from
     // here) until cox has produced a fix that the KF actually accepted.
     // Otherwise the SM kicks off on the seeded (0,0,0) pose and the robot
-    // drives before localization is real. The 15 s timeout exists so a
-    // misconfigured map / bad scan doesn't hang forever we fall through
-    // and drive on dead reckoning, matching the pre-gate behaviour.
+    // drives before localization is real. The budget covers:
+    //   - 10 s of lidar frame collection in loop_localization (gated on
+    //     motors_ready, which we just set)
+    //   - ~1-2 s of RANSAC wall extraction
+    //   - up to ~10 s of cox's own boot sweep if spontaneous fits don't
+    //     converge (see [[boot_sweep_done]] in cox.cpp)
+    // Fall through on timeout so a fully misconfigured map / bad scan
+    // doesn't hang forever -- we drive on dead reckoning, matching the
+    // pre-gate behaviour, but emit a loud error.
     {
-        constexpr auto WAIT_TIMEOUT = std::chrono::seconds(15);
+        constexpr auto WAIT_TIMEOUT = std::chrono::seconds(30);
         const auto t_start = std::chrono::steady_clock::now();
         while (!app::cox_first_fix.load(std::memory_order_acquire)
             && !app::shutdown.load()) {
             if (std::chrono::steady_clock::now() - t_start > WAIT_TIMEOUT) {
-                LOGE("Main") << "Cox first-fix wait timed out after 15s — "
+                LOGE("Main") << "Cox first-fix wait timed out after 30s — "
                                 "starting on dead-reckoned pose.";
                 break;
             }

@@ -382,6 +382,17 @@ void loop_scan_cox_estimation(
     CoxScanMatchAlgorithm scan_cox(ref_map, lidar_data);
     PosEstimate est{};
 
+    // Boot-sweep one-shot. If spontaneous per-tick fits don't produce a
+    // first fix within BOOT_SWEEP_AFTER, run the same local sweep used
+    // by the in-mission lost-recovery path around the seeded KF pose.
+    // Catches the common failure mode where the map was built from a
+    // pre-twitch pose but the body now sits tens of mm / a few degrees
+    // off -- outside cox's per-tick basin (~50-100mm/15°) but well
+    // within the sweep window (±400 mm / ±45°).
+    const auto cox_loop_start = std::chrono::steady_clock::now();
+    constexpr auto BOOT_SWEEP_AFTER = std::chrono::seconds(3);
+    bool boot_sweep_done = false;
+
     while (!app::shutdown && !app::lidar_stop) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -411,6 +422,37 @@ void loop_scan_cox_estimation(
             R.tt = est.cov[8];
             kf.correct(z, R);
             app::cox_first_fix.store(true, std::memory_order_release);
+        }
+
+        // 1b. BOOT SWEEP fallback. Runs at most once, only if spontaneous
+        //     fits never converged in the opening window. relocalizing is
+        //     set so loop_control holds the motors -- normally redundant
+        //     during the first-fix wait, but defensive in case future
+        //     mission logic ever races this path.
+        if (!boot_sweep_done
+            && !app::cox_first_fix.load(std::memory_order_acquire)
+            && std::chrono::steady_clock::now() - cox_loop_start > BOOT_SWEEP_AFTER) {
+            boot_sweep_done = true;
+            LOG("Cox") << "no first fix after "
+                       << BOOT_SWEEP_AFTER.count()
+                       << "s -- running boot sweep around ("
+                       << kf_pose.x << ", " << kf_pose.y << ", "
+                       << (kf_pose.theta * 180.0 / M_PI) << " deg).";
+            app::relocalizing.store(true);
+            PosEstimate winner{};
+            if (relocalize_local_sweep(scan_cox, kf_pose, winner)) {
+                kf.reset(winner.pos, moderate_recovery_cov());
+                est = winner;
+                app::cox_first_fix.store(true, std::memory_order_release);
+                LOG("Cox") << "boot sweep OK -- KF pinned to ("
+                           << winner.pos.x << ", " << winner.pos.y << ", "
+                           << (winner.pos.theta * 180.0 / M_PI) << " deg).";
+            } else {
+                LOGE("Cox") << "boot sweep produced no strong fix; "
+                               "control will fall back to dead reckoning "
+                               "when its wait expires.";
+            }
+            app::relocalizing.store(false);
         }
 
         // 2. KF-COV-TRIGGERED RELOCALIZE. After the correct above, check
