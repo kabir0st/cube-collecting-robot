@@ -5,6 +5,7 @@
 #include <mutex>
 #include <types.hpp>
 #include <dashboard.hpp>
+#include <data_logger.hpp>
 #include <kalman.hpp>
 
 class CoxScanMatchAlgorithm {
@@ -30,4 +31,4 @@ class CoxScanMatchAlgorithm {
 
 void loop_scan_cox_estimation(
     std::vector<LineSeg>& ref_map, LidarData& lidar_data,
-    Dashboard& dash, KalmanFilter& kf);
+    Dashboard& dash, KalmanFilter& kf, DataLogger& logger);

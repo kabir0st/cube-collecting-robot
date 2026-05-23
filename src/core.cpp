@@ -68,7 +68,8 @@ void loop_check_battery(INA219& power_interface, Dashboard& dash) {
 
 void loop_localization(Dashboard& dash,
                        LidarData& lidar_data, KalmanFilter& kf,
-                       const RansacParams& ransac) {
+                       const RansacParams& ransac,
+                       DataLogger& logger) {
     hh::Lidar lidar;
     if (!start_lidar(lidar)) {
         return;
@@ -107,7 +108,7 @@ void loop_localization(Dashboard& dash,
     std::thread thread_loop_scan_cox(
         loop_scan_cox_estimation, std::ref(ref_map),
         std::ref(lidar_data),
-        std::ref(dash), std::ref(kf)
+        std::ref(dash), std::ref(kf), std::ref(logger)
     );
     thread_loop_scan_cox.join();
     thread_loop_collect_frames.join();
@@ -118,7 +119,8 @@ void loop_localization(Dashboard& dash,
 void loop_control(Dashboard& dash,
                   KalmanFilter& kf, TrackerResult& target,
                   LidarData& lidar_data,
-                  const MissionConfig& mission) {
+                  const MissionConfig& mission,
+                  DataLogger& logger) {
     // sequence (fwd 400 mm -> +90° + 300 mm -> back home)
     constexpr bool IS_TEST = false;
 
@@ -126,6 +128,11 @@ void loop_control(Dashboard& dash,
     Odometry odom;
     PurePursuitController pp;
     StateMachine sm(target, pp);
+    // Parallel dead-reckoning-only EKF: receives the same predict() steps
+    // as `kf` but is never corrected by Cox. Its snapshot is what Lab-3
+    // reports as the "odometry" estimate + uncertainty.
+    KalmanFilter odom_only;
+    odom_only.reset(Pos2D(0.0, 0.0, 0.0), KalmanFilter::default_cov());
     double total_d = 0;
     double total_a = 0;
     if (!motor.start())
@@ -167,7 +174,12 @@ void loop_control(Dashboard& dash,
         }
     }
 
-    if (IS_TEST) {
+    if (mission.goto_enabled) {
+        LOG("Main") << "Mission: GOTO ("
+                    << mission.goto_x_mm << ", " << mission.goto_y_mm
+                    << ", " << mission.goto_theta_rad << " rad)";
+        sm.go_to(mission.goto_x_mm, mission.goto_y_mm, mission.goto_theta_rad);
+    } else if (IS_TEST) {
         sm.start_test();
     } else {
         sm.start();
@@ -206,6 +218,9 @@ void loop_control(Dashboard& dash,
             kf.predict(step.d_mm, step.d_theta,
                        step.var_d, step.var_theta,
                        step.cov_d_theta);
+            odom_only.predict(step.d_mm, step.d_theta,
+                              step.var_d, step.var_theta,
+                              step.cov_d_theta);
         }
 
         Pos2D p;
@@ -261,7 +276,8 @@ void loop_control(Dashboard& dash,
         dash.set("Mission", "state",
                  std::string(StateMachine::state_name(sm.state())));
 
-        // Gated telemetry: ~10 Hz regardless of the 25 Hz control loop.
+        // Gated telemetry + Lab-3 file logging: 10 Hz regardless of the
+        // 25 Hz control loop. Cox is logged from its own 100 ms loop.
         static auto last_send = std::chrono::steady_clock::now();
         const auto now = std::chrono::steady_clock::now();
         if (now - last_send >= std::chrono::milliseconds(100)) {
@@ -272,6 +288,13 @@ void loop_control(Dashboard& dash,
                                   pp.get_active_target(),
                                   pp.has_active_target(),
                                   lidar_data);
+
+            const double t_s = logger.now_s();
+            logger.log_kalman(t_s, p, cov);
+            Pos2D     odom_p;
+            Pose2DCov odom_cov;
+            odom_only.snapshot(odom_p, odom_cov);
+            logger.log_odom(t_s, odom_p, odom_cov);
         }
     }
     motor.stop();

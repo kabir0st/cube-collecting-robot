@@ -357,7 +357,7 @@ Pose2DCov moderate_recovery_cov() {
 
 void loop_scan_cox_estimation(
     std::vector<LineSeg>& ref_map, LidarData& lidar_data,
-    Dashboard& dash, KalmanFilter& kf) {
+    Dashboard& dash, KalmanFilter& kf, DataLogger& logger) {
     // KF-covariance thresholds for "I'm genuinely lost". This is the
     // principled signal: cumulative odometry drift + missing or weak cox
     // corrections push the KF's own confidence past safety. Stricter than
@@ -379,6 +379,9 @@ void loop_scan_cox_estimation(
         seed.y     = static_cast<float>(kf_pose.y);
         seed.theta = static_cast<float>(kf_pose.theta);
         est = scan_cox.estimate(seed);
+        // Lab-3: log every cox attempt (converged or not). The native
+        // loop sleep above is already 100 ms.
+        logger.log_cox(logger.now_s(), est);
 
         // 1. ALWAYS-FUSE policy. If cox even minimally converged with a
         //    handful of inliers, hand it to the KF. A noisy cox produces a

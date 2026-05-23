@@ -1,6 +1,8 @@
-#include <thread>
-#include <mutex>
+#include <cmath>
+#include <cstdio>
 #include <csignal>
+#include <mutex>
+#include <thread>
 
 #include <global.hpp>
 #include <types.hpp>
@@ -9,6 +11,7 @@
 #include <dashboard.hpp>
 #include <calibrations.hpp>
 #include <core.hpp>
+#include <data_logger.hpp>
 #include <tracker.hpp>
 #include <kalman.hpp>
 #include <telemetry.hpp>
@@ -107,6 +110,28 @@ int main() {
     mission.home_margin   = cfg.get_dbl("mission.home_margin_mm",  mission.home_margin);
     mission.arm_length_mm = cfg.get_dbl("mission.arm_length_mm",   mission.arm_length_mm);
 
+    // Lab-3 goto: "x_mm,y_mm,theta_deg". When present, loop_control will
+    // call sm.go_to(...) instead of starting the SEARCH mission.
+    {
+        std::string g = cfg.get_str("mission.goto", "");
+        if (!g.empty()) {
+            double gx = 0.0, gy = 0.0, gth_deg = 0.0;
+            if (std::sscanf(g.c_str(), "%lf , %lf , %lf",
+                            &gx, &gy, &gth_deg) == 3) {
+                mission.goto_enabled   = true;
+                mission.goto_x_mm      = gx;
+                mission.goto_y_mm      = gy;
+                mission.goto_theta_rad = gth_deg * M_PI / 180.0;
+                LOG("Main") << "GOTO target: (" << gx << ", " << gy
+                            << ", " << gth_deg << " deg)";
+            } else {
+                LOGE("Main") << "mission.goto = \"" << g
+                             << "\" — expected \"x,y,theta_deg\". "
+                                "Falling back to default mission.";
+            }
+        }
+    }
+
     // RANSAC parameters for the boot-time lidar map build. Defaults tuned
     // for a rectangular arena with 1-2 other robots inside (see config.yml
     // map.ransac block for the rationale per key).
@@ -128,6 +153,13 @@ int main() {
         cfg.get_int ("logger.udp_port",      5005),
         cfg.get_bool("logger.udp_enabled",   false),
         cfg.get_int ("logger.scan_subsample", 2));
+
+    // Lab-3 file logger: time + pose + uncertainty for odom, cox, kalman
+    // at 100 ms cadence. No-op if logger.files_enabled is false.
+    DataLogger data_logger;
+    data_logger.open(
+        cfg.get_bool("logger.files_enabled", false),
+        cfg.get_str ("logger.out_dir",       "logs"));
 
     FilterResult filter;
     if (load_filter_result(cfg, filter)) {
@@ -176,7 +208,7 @@ int main() {
     dash.add_row("Cox");
     threads.emplace_back(loop_localization,
         std::ref(dash), std::ref(lidar_data), std::ref(kf),
-        std::cref(map_ransac));
+        std::cref(map_ransac), std::ref(data_logger));
     // waiting for cox 1st seeds to be stable
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
@@ -190,7 +222,7 @@ int main() {
     dash.add_row("Mission");
     threads.emplace_back(loop_control,
         std::ref(dash), std::ref(kf), std::ref(target),
-        std::ref(lidar_data), std::cref(mission));
+        std::ref(lidar_data), std::cref(mission), std::ref(data_logger));
 
     while(!app::shutdown) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -198,5 +230,6 @@ int main() {
     }
     // shutdown
     wait_for_threads();
+    data_logger.close();
     telemetry::shutdown();
 }
