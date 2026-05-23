@@ -11,29 +11,15 @@ camera:
   show_debug_view: true
 
 robot:
-  # Global speed multiplier applied to every linear/angular velocity cap
-  # AND acceleration limit. 1.0 = original tuned baseline. 1.875 was the
-  # last hard-coded value. Increase for a snappier robot; decrease for
-  # bench-safe slow motion. The motion stack stays in proportion — cruise
-  # time has the same shape, just stretched/compressed in time.
-  #
-  # Soft ceiling with the current chassis caps (~504 mm/s, ~5.45 rad/s)
-  # is ~3.6 before omega starts clipping on sharp turns; main() hard-clamps
-  # to 5.0 with a warning if exceeded.
   speed: 3.6
-
-  # All extents measured from the LIDAR mount point (= the tracked pose
-  # center used by cox / KF / odometry). Used for wall-clearance and home
-  # placement math. Update if the robot is rebuilt.
   back_extent_mm:  150.0   # rear of chassis behind LIDAR
   left_extent_mm:   70.0
   right_extent_mm:  70.0
-  # Front extent (with arm extended + held box) = arm_length_mm + 30 mm.
 
 mission:
   # Home is centered on the robot's starting pose (the localization
   # origin (0, 0, 0)). Only the zone size and arm geometry are tunable.
-  home_margin_mm: 152.4   # 0.5 ft — radius of the 1 ft home zone
+  home_margin_mm: 50   # 0.5 ft — radius of the 1 ft home zone
   arm_length_mm: 165.0     # LIDAR center -> arm tip (held box position)
 
 map:
