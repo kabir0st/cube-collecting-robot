@@ -100,6 +100,12 @@ private:
     double _home_y      = 0.0;
     double _home_theta  = 0.0;
     double _home_margin = 50.0;
+    // SEARCH "ignore boxes already at home" filter: any detected box whose
+    // world position is within this radius of (_home_x, _home_y) is treated
+    // as a previously-delivered drop and skipped. Decoupled from
+    // _home_margin (the arrival tolerance) because a released box can
+    // settle well off the chassis-stop center.
+    double _home_skip_radius_mm = 500.0;
 
     // Geometry of the gripper. Box position when captured =
     //   robot.xy + _arm_length_mm * (cos theta, sin theta).
@@ -208,7 +214,7 @@ private:
     double _search_omega        = 0.5 * ROBOT_SPEED;   // rad/s, ~29°/s spin cruise (ramp stays gentle via ACCEL_W_BASE)
     double _search_min_dwell_s  = 0.0;   // engage on sight; failed-target skip handles bounce protection
     double _search_v_forward_mm_s   = 60.0 * ROBOT_SPEED;  // forward speed during the FORWARD leg
-    double _search_forward_target_mm = 800.0;              // 80 cm leg before each look-around rotation
+    double _search_forward_target_mm = 1000.0;             // 100 cm leg before each look-around rotation
     double _approach_v          = 30.0 * ROBOT_SPEED;  // mm/s, visual-servo cruise
     double _approach_k_omega    = 1.8;   // rad/s per rad of bearing
     double _approach_omega_max  = 1.2 * ROBOT_SPEED;   // clamp on steering rate

@@ -277,14 +277,16 @@ void loop_control(Dashboard& dash,
         // rotate away from the obstacle ("sidestep"). Reverse motion is
         // also allowed so the robot can back out of a near-miss.
         //
-        // The narrow gripper cone (±GRIPPER_MASK_HALF_DEG, < GRIPPER_MASK_DIST_MM)
-        // is filtered out in loop_collect_frames so the robot's own
-        // closed gripper / held box doesn't pin obstacle_ahead during
-        // CARRY_HOME. Real walls in the wider arc still trigger normally.
+        // The obstacle gate is suppressed entirely while carrying a payload
+        // (CARRY_HOME, RELEASE, TURN_AROUND) so the robot can drive up to
+        // the home wall and release the box, and so the held box itself
+        // (which protrudes past the narrow gripper mask) can't trip the
+        // wider obstacle arc.
         if (app::relocalizing.load()) {
             v_cmd = 0.0;
             w_cmd = 0.0;
-        } else if (app::obstacle_ahead.load() && v_cmd > 0.0) {
+        } else if (app::obstacle_ahead.load() && v_cmd > 0.0
+                   && !sm.is_carrying_payload()) {
             v_cmd = 0.0;
         }
 

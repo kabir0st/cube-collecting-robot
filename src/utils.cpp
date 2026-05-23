@@ -14,7 +14,7 @@
 #include <ctime>
 #include <iomanip>
 
-constexpr double OBSTACLE_DIST_MM      = 140.0;
+constexpr double OBSTACLE_DIST_MM      = 230.0;
 constexpr double OBSTACLE_ARC_HALF_DEG = 60.0;
 
 // Narrow cone (±GRIPPER_MASK_HALF_DEG from straight ahead) where the

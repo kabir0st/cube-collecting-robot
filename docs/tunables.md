@@ -33,10 +33,27 @@ heading.
 - Decrease: tighter delivery; mission may stall if cox/KF can't
   converge below the radius.
 
+### `_home_skip_radius_mm = 500` — [include/controller.hpp](../include/controller.hpp)
+Radius around home inside which SEARCH ignores a detected box (treats
+it as already delivered). Decoupled from `home_margin_mm` because the
+released box can settle well off the chassis-stop center and a tight
+arrival margin would let SEARCH re-engage drops.
+- Increase: ignore boxes further from home center.
+- Decrease: only filter very-on-target drops; risk of re-engaging
+  delivered boxes that drifted off.
+
+In addition to the radius, SEARCH also skips any box whose projection
+onto `(cos(home_theta), sin(home_theta))` from home is negative
+("behind home"). The search sweep is forward-only and the wall sits
+on the back side of home, so anything in that half-plane is either a
+delivered drop or impossible. No tunable — the cut is the home line
+itself.
+
 ### `mission.arm_length_mm` — [config.yml](../config.yml)
-LIDAR center → gripped-box center, along robot heading. Used to bias the
-CARRY_HOME goal so the **box** ends up at home, not the chassis.
-- Re-measure if the gripper hardware changes. Not a tuning knob.
+LIDAR center → gripped-box center, along robot heading. Currently
+unused by CARRY_HOME (which drives straight to `home_x, home_y` with
+no offset); kept for future calibration.
+- Re-measure if the gripper hardware changes.
 
 ### `camera.show_debug_view` — [config.yml](../config.yml)
 Opens an OpenCV window with the tracker's annotated frame.
@@ -246,13 +263,17 @@ Used by GOTO / TEST to settle the KF before declaring arrival.
 
 ## 7. Obstacle avoidance ([src/utils.cpp:17-31](../src/utils.cpp#L17))
 
-- `OBSTACLE_DIST_MM = 140` — any lidar return inside ±60° forward arc
+- `OBSTACLE_DIST_MM = 230` — any lidar return inside ±60° forward arc
   at less than this triggers `obstacle_ahead` (zeroes `v_cmd`, keeps
-  `w_cmd`).
+  `w_cmd`). The gate is **suppressed entirely** while carrying a
+  payload (CARRY_HOME, RELEASE, TURN_AROUND) — see
+  [src/core.cpp](../src/core.cpp) — so the robot can drive up to the
+  home wall and release.
 - `OBSTACLE_ARC_HALF_DEG = 60` — width of the trigger cone.
 - `GRIPPER_MASK_HALF_DEG = 20`, `GRIPPER_MASK_DIST_MM = 200` —
   narrower cone the closed gripper / held box occupies. Filtered out
-  in CARRY_HOME so the bot doesn't pin itself on its own payload.
+  at the lidar layer (belt-and-suspenders alongside the payload-state
+  gate above).
 - Increase `OBSTACLE_DIST_MM`: earlier stop, safer in cluttered arenas
   but stalls more often on near-miss walls.
 - Decrease: more confident driving up to walls, risk of bumper-tap.

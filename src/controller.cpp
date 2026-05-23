@@ -474,12 +474,13 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
     // One mutex acquire per tick on each of _m and the vision lock
     const TrackerResult::Snapshot snap = _vision.get_snapshot();
     std::chrono::steady_clock::time_point entered_at;
-    double hx, hy, hm, arm;
+    double hx, hy, ht, hskip, arm;
     int    attempts, max_attempts;
     {
         std::lock_guard<std::mutex> lk(_m);
         entered_at   = _state_entered;
-        hx  = _home_x; hy = _home_y; hm = _home_margin;
+        hx  = _home_x; hy = _home_y; ht = _home_theta;
+        hskip = _home_skip_radius_mm;
         arm = _arm_length_mm;
         attempts     = _approach_attempts;
         max_attempts = _max_approach_attempts;
@@ -528,12 +529,23 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                                    det_x, det_y);
                     const double det_to_home = std::hypot(det_x - hx,
                                                           det_y - hy);
-                    if (det_to_home < hm) {
+                    // Half-plane skip: project (det - home) onto the
+                    // home-forward axis (cos(ht), sin(ht)). Negative
+                    // projection = box sits behind home along the
+                    // search-forward axis, which is wall territory we
+                    // never sweep into. Combined with the radius skip
+                    // below for off-center drops on the arena side.
+                    const double along_home =
+                        (det_x - hx) * std::cos(ht) +
+                        (det_y - hy) * std::sin(ht);
+                    const bool behind_home = along_home < 0.0;
+                    if (det_to_home < hskip || behind_home) {
                         if (!_search_skip_streak) {
                             LOG("Mission")
                                 << "Skipping at-home box at world ("
                                 << det_x << ", " << det_y << "), "
-                                << det_to_home << " mm from home";
+                                << det_to_home << " mm from home, "
+                                << "along_home=" << along_home << " mm";
                             _search_skip_streak = true;
                         }
                         at_home_skip = true;
