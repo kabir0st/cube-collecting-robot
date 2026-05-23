@@ -157,6 +157,14 @@ struct CameraConfig {
 
     double grab_bottom_region_ratio = 0.40;
     double grab_bottom_fill_ratio   = 0.50;
+    // Central horizontal corridor used for the strict edge-containment
+    // gate: both left and right edges of the detected bbox must fall
+    // inside this corridor before grabbable can latch. Expressed as a
+    // fraction of frame width and centered on the optical axis.
+    double grab_bottom_width_ratio  = 0.95;
+    // Max axis-misalignment of the detected box (from cv::minAreaRect),
+    // in degrees. Squares are 90°-symmetric so the residual is in [0,45].
+    double grab_angle_tol_deg       = 5.0;
 
     // Detections whose centroid falls inside the top fraction of the frame
     // are rejected outright (typical use: ignore pink things on walls/lab

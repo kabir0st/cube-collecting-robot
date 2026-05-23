@@ -92,6 +92,10 @@ int main() {
         "camera.grab_bottom_region_ratio", cam_cfg.grab_bottom_region_ratio);
     cam_cfg.grab_bottom_fill_ratio = cfg.get_dbl(
         "camera.grab_bottom_fill_ratio", cam_cfg.grab_bottom_fill_ratio);
+    cam_cfg.grab_bottom_width_ratio = cfg.get_dbl(
+        "camera.grab_bottom_width_ratio", cam_cfg.grab_bottom_width_ratio);
+    cam_cfg.grab_angle_tol_deg = cfg.get_dbl(
+        "camera.grab_angle_tol_deg", cam_cfg.grab_angle_tol_deg);
     cam_cfg.capture_distance_mm = cfg.get_dbl(
         "camera.capture_distance_mm", cam_cfg.capture_distance_mm);
     cam_cfg.capture_bearing_tol_rad = cfg.get_dbl(

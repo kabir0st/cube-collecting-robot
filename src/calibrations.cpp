@@ -110,16 +110,19 @@ bool CalibrateCamera::create_filter_mask(FilterResult& result){
     const bool spans_red_edges =
         h_min <= red_edge_window && h_max >= (180.f - red_edge_window);
 
-    // Tightened margins: a noisy / poorly-white-balanced camera spreads
-    // background pixels into a wider band of HSV than a clean one, so the
-    // *wider* the margin the more non-target pixels survive the inRange and
-    // form spurious blobs. Narrowing the band keeps only "really pink"
-    // pixels and rejects the bulk of camera noise. Costs a bit of robustness
-    // to dramatic lighting changes — if the box is also dim/washed-out the
-    // calibration ROI should be re-captured under the same lighting.
-    const float hue_margin = 6.f;
-    const float s_margin   = 10.f;
-    const float v_margin   = 20.f;
+    // Asymmetric margins: shadows DARKEN pixels (V drops sharply, S a bit)
+    // but never the opposite, so we expand the LOWER bounds aggressively
+    // while keeping the UPPER bounds tight. Tight uppers still reject the
+    // bulk of background noise and overexposed highlights (the original
+    // "tightened margins" intent); generous lowers keep detection alive
+    // when the robot casts its own shadow on the box at close range —
+    // which is exactly the moment the grab gate needs the box to stay
+    // visible. Hue is preserved by shadow, so its margin stays symmetric.
+    const float hue_margin     = 6.f;
+    const float s_margin_lower = 25.f;
+    const float s_margin_upper = 10.f;
+    const float v_margin_lower = 50.f;
+    const float v_margin_upper = 20.f;
 
     if ((h_max - h_min) > 90.f && hue_is_reliable && spans_red_edges){
         sort(h_vals.begin(), h_vals.end());
@@ -138,18 +141,18 @@ bool CalibrateCamera::create_filter_mask(FilterResult& result){
 
 
         // High side: ~170 → 180
-        result.lower1 = cv::Scalar (std::max(0.f, h_high_min - hue_margin), std::max(0.f, s_lower - s_margin), std::max(0.f, v_lower - v_margin));
-        result.upper1 = cv::Scalar (180.f, std::min(255.f, s_upper + s_margin), std::min(255.f, v_upper + v_margin));
+        result.lower1 = cv::Scalar (std::max(0.f, h_high_min - hue_margin), std::max(0.f, s_lower - s_margin_lower), std::max(0.f, v_lower - v_margin_lower));
+        result.upper1 = cv::Scalar (180.f, std::min(255.f, s_upper + s_margin_upper), std::min(255.f, v_upper + v_margin_upper));
 
         // Low side: 0 → ~8
-        result.lower2 = cv::Scalar (0.f, std::max(0.f, s_lower - s_margin), std::max(0.f, v_lower - v_margin));
-        result.upper2 = cv::Scalar (std::min(180.f, h_low_max + hue_margin), std::min(255.f, s_upper + s_margin), std::min(255.f, v_upper + v_margin));
+        result.lower2 = cv::Scalar (0.f, std::max(0.f, s_lower - s_margin_lower), std::max(0.f, v_lower - v_margin_lower));
+        result.upper2 = cv::Scalar (std::min(180.f, h_low_max + hue_margin), std::min(255.f, s_upper + s_margin_upper), std::min(255.f, v_upper + v_margin_upper));
         result.has_wrap_around = true;
     }
     else
     {
-        result.lower1 = cv::Scalar (std::max(0.f, h_min - hue_margin), std::max(0.f, s_lower - s_margin), std::max(0.f, v_lower - v_margin));
-        result.upper1 = cv::Scalar (std::min(180.f, h_max + hue_margin), std::min(255.f, s_upper + s_margin), std::min(255.f, v_upper + v_margin));
+        result.lower1 = cv::Scalar (std::max(0.f, h_min - hue_margin), std::max(0.f, s_lower - s_margin_lower), std::max(0.f, v_lower - v_margin_lower));
+        result.upper1 = cv::Scalar (std::min(180.f, h_max + hue_margin), std::min(255.f, s_upper + s_margin_upper), std::min(255.f, v_upper + v_margin_upper));
         result.has_wrap_around = false;
     }
     return true;

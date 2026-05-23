@@ -168,10 +168,18 @@ void loop_vision_tracking(Dashboard& dash,
         // Bottom-region "grabbable" zone — depends only on cfg, so
         // compute once per frame regardless of detection. Drawn in the
         // debug overlay below so the gate is tunable by eye.
+        //
+        // The region is now a CENTERED CORRIDOR (not full image width).
+        // This is what enforces "both edges of the box inside the
+        // boundary" — a laterally-offset box fails the containment test
+        // even when its area-overlap with the bottom strip is large.
         const int top_y = static_cast<int>(
             cfg.height * (1.0 - cfg.grab_bottom_region_ratio));
-        const cv::Rect bottom_region(0, top_y,
-                                     cfg.width, cfg.height - top_y);
+        const int corridor_w = static_cast<int>(
+            cfg.width * cfg.grab_bottom_width_ratio);
+        const int corridor_x = (cfg.width - corridor_w) / 2;
+        const cv::Rect bottom_region(corridor_x, top_y,
+                                     corridor_w, cfg.height - top_y);
 
         // Compute per-frame gates. When no blob was selected, all gates
         // are false — the state machines below then treat the frame as a
@@ -193,7 +201,34 @@ void loop_vision_tracking(Dashboard& dash,
                 static_cast<double>((selected_bbox & bottom_region).area());
             const double bottom_fill  =
                 (region_area > 0.0) ? overlap_area / region_area : 0.0;
-            grab_gate = bottom_fill >= cfg.grab_bottom_fill_ratio;
+
+            // Orientation: cv::minAreaRect.angle is in (-90, 0]. Bringing
+            // anything below -45 up by +90 maps it into (-45, 45]; the
+            // absolute value is then the residual misalignment from
+            // axis-aligned in [0, 45]. Boxes are 90°-symmetric so this is
+            // the only angle we need to gate on. minAreaRect is undefined
+            // for <5-point contours — pessimistic default fails the gate.
+            cv::RotatedRect rr;
+            bool rr_valid = false;
+            double angle_misalignment_deg = 90.0;
+            if (contours[selected].size() >= 5) {
+                rr = cv::minAreaRect(contours[selected]);
+                double a = rr.angle;
+                if (a < -45.0) a += 90.0;
+                angle_misalignment_deg = std::abs(a);
+                rr_valid = true;
+            }
+
+            // Three-way grab gate: both bbox edges inside the corridor,
+            // sufficient bottom-region fill (vertical proximity), AND
+            // near-axis-aligned. The existing GRAB_FRAMES debouncer below
+            // covers all three since this is a boolean AND.
+            const bool edges_inside =
+                selected_bbox.x >= bottom_region.x &&
+                selected_bbox.br().x <= bottom_region.br().x;
+            const bool fill_ok  = bottom_fill >= cfg.grab_bottom_fill_ratio;
+            const bool angle_ok = angle_misalignment_deg <= cfg.grab_angle_tol_deg;
+            grab_gate = edges_inside && fill_ok && angle_ok;
 
             in_capture_range = dist_mm > 0.0
                 && dist_mm <= cfg.capture_distance_mm
@@ -204,6 +239,15 @@ void loop_vision_tracking(Dashboard& dash,
             cv::circle(frame, cv::Point(selected_center), 5,
                        cv::Scalar(0, 255, 0), -1);
             cv::rectangle(frame, selected_bbox, cv::Scalar(0, 0, 255), 2);
+            // Green rotated rect shows what the angle gate is reading.
+            if (rr_valid) {
+                cv::Point2f pts[4];
+                rr.points(pts);
+                for (int k = 0; k < 4; ++k) {
+                    cv::line(frame, pts[k], pts[(k + 1) % 4],
+                             cv::Scalar(0, 255, 0), 2);
+                }
+            }
 
             result.set_target(bearing, dist_mm, selected_area);
             has_last_position = true;
