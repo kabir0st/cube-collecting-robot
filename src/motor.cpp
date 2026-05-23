@@ -40,7 +40,7 @@ namespace {
     // because ROBOT_SPEED is set from config in main() and these constants
     // would otherwise capture the static-init default before the config
     // load runs.
-    constexpr double ACCEL_V_BASE_MM_S2  = 150.0;  // forward accel @ ROBOT_SPEED=1
+    constexpr double ACCEL_V_BASE_MM_S2  = 350.0;  // forward accel @ ROBOT_SPEED=1
     constexpr double ACCEL_W_BASE_RAD_S2 =   1.5;  // yaw accel     @ ROBOT_SPEED=1
     constexpr double DT_S = std::chrono::duration<double>(LOOP_PERIOD).count();
 }

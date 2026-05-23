@@ -205,10 +205,10 @@ private:
     double _halt_target_y = 0.0;
 
     // Tunables. Conservative defaults; safe to tweak from main if needed.
-    double _search_omega        = 0.35 * ROBOT_SPEED;  // rad/s, ~20°/s so camera gets enough frames
+    double _search_omega        = 0.5 * ROBOT_SPEED;   // rad/s, ~29°/s spin cruise (ramp stays gentle via ACCEL_W_BASE)
     double _search_min_dwell_s  = 0.0;   // engage on sight; failed-target skip handles bounce protection
-    double _search_v_forward_mm_s   = 40.0 * ROBOT_SPEED;  // forward speed during the FORWARD leg
-    double _search_forward_target_mm = 1000.0;             // 100 cm leg before each look-around rotation
+    double _search_v_forward_mm_s   = 60.0 * ROBOT_SPEED;  // forward speed during the FORWARD leg
+    double _search_forward_target_mm = 800.0;              // 80 cm leg before each look-around rotation
     double _approach_v          = 30.0 * ROBOT_SPEED;  // mm/s, visual-servo cruise
     double _approach_k_omega    = 1.8;   // rad/s per rad of bearing
     double _approach_omega_max  = 1.2 * ROBOT_SPEED;   // clamp on steering rate
