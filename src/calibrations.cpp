@@ -538,7 +538,7 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
         points.emplace_back(bx, by);
     }
     LOG("MAP") << "Usable Points for MAP : " << points.size();
-    
+
     // floor threshold that scales with sensor noise;
     params.inlier_thresh_mm = std::max(15.0, lidar_data.sensor_noise.load() + 10);
     std::mt19937 rng(params.seed != 0 ? params.seed : std::random_device{}());
@@ -546,8 +546,19 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
     // starting RANSAC algorithm
     const size_t inline_floor = std::ceil(
         params.min_inlier_fraction * points.size());
-    
+
+    LOG("MAP") << "RANSAC gates: inlier_thresh_mm=" << params.inlier_thresh_mm
+               << " inlier_points_req=" << params.inlier_points_req
+               << " min_inlier_fraction=" << params.min_inlier_fraction
+               << " (inline_floor=" << inline_floor << ")"
+               << " min_segment_len_mm=" << params.min_segment_len_mm
+               << " max_lines=" << params.max_lines;
+
+    bool starved = false;
+    int  iter    = 0;
         while(points.size() >= inline_floor && walls.size() < static_cast<size_t>(params.max_lines)) {
+            ++iter;
+            const size_t pts_before = points.size();
             if (points.size() < 2) break;
             std::uniform_int_distribution<int> pick(0, points.size() - 1);
             // best 2 points hypothesis
@@ -573,9 +584,15 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
                 if ( inl.size() > best.size())
                     best.swap(inl);
             }
-            if (best.size() < static_cast<size_t>(params.inlier_points_req))
+            if (best.size() < static_cast<size_t>(params.inlier_points_req)) {
+                LOG("MAP") << "  iter=" << iter << " pts=" << pts_before
+                           << " best_inliers=" << best.size()
+                           << " < req=" << params.inlier_points_req
+                           << " -> STARVED, ending RANSAC";
+                starved = true;
                 break;
- 
+            }
+
         // -- Refit on inliers, then re-collect inliers around the refit -
         const LineFit fit = refit_tls(points, best);
         const double r_refit = fit.nx * fit.cx + fit.ny * fit.cy;
@@ -584,6 +601,11 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
                                                     params.inlier_thresh_mm);
         if (static_cast<int>(refined.size()) < params.inlier_points_req) {
             // Refit drifted too far; drop original inliers and try again.
+            LOG("MAP") << "  iter=" << iter << " pts=" << pts_before
+                       << " best_inliers=" << best.size()
+                       << " refined=" << refined.size()
+                       << " < req=" << params.inlier_points_req
+                       << " -> refit drifted, dropping inliers and retrying";
             erase_inliers(points, best);
             continue;
         }
@@ -624,12 +646,35 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
             static_cast<double>(seg.by - seg.ay));
         if (params.min_segment_len_mm > 0.0
             && seg_len < params.min_segment_len_mm) {
+            LOG("MAP") << "  iter=" << iter << " pts=" << pts_before
+                       << " best=" << best.size() << " refined=" << refined.size()
+                       << " seg_len=" << seg_len
+                       << " < min_segment_len_mm=" << params.min_segment_len_mm
+                       << " -> REJECTED (too short)";
             erase_inliers(points, refined);
             continue;
         }
         walls.push_back(seg);
+        LOG("MAP") << "  iter=" << iter << " pts=" << pts_before
+                   << " best=" << best.size() << " refined=" << refined.size()
+                   << " seg_len=" << seg_len
+                   << " -> ACCEPTED wall #" << walls.size()
+                   << " endpoints=(" << seg.ax << "," << seg.ay << ")->("
+                   << seg.bx << "," << seg.by << ")"
+                   << " n=(" << seg.nx << "," << seg.ny << ") r=" << seg.r;
 
         erase_inliers(points, refined);
+    }
+    if (starved) {
+        LOG("MAP") << "Terminated: RANSAC starved after " << iter
+                   << " iter(s), " << points.size() << " pts remaining";
+    } else if (walls.size() >= static_cast<size_t>(params.max_lines)) {
+        LOG("MAP") << "Terminated: max_lines=" << params.max_lines
+                   << " reached after " << iter << " iter(s)";
+    } else {
+        LOG("MAP") << "Terminated: points exhausted (" << points.size()
+                   << " < inline_floor=" << inline_floor << ") after "
+                   << iter << " iter(s)";
     }
     LOG("MAP") << "Found " << walls.size() << " Walls.";
     return walls;
