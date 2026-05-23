@@ -217,8 +217,8 @@ private:
     // of that point and the target is still not visible, give up and
     // fall back to SEARCH (rotate).
     double _dead_reckon_arrival_mm = 100.0;
-    double _release_v           = -40.0; // mm/s, backward
-    double _release_seconds     = 2.0;   // ~80 mm back-up at 40 mm/s — clears the box from a subsequent in-place rotation, and covers the 1.6s servo OPEN slew with margin
+    double _release_v           = -50.0; // mm/s, backward
+    double _release_seconds     = 4.0;   // ~80 mm back-up at 40 mm/s — clears the box from a subsequent in-place rotation, and covers the 1.6s servo OPEN slew with margin
     double _release_hard_timeout_s = 5.0;// give up if box stays stuck on arms
     double _search_timeout_s    = 60.0;
     double _approach_timeout_s  = 20.0;
