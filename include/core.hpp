@@ -9,7 +9,7 @@
 struct MissionConfig {
     // Home is hardcoded as the robot's starting pose (0, 0, 0). Only the
     // zone radius and arm geometry are tunable.
-    double home_margin   = 152.4;
+    double home_margin   = 100;
     double arm_length_mm = 80.0;
 };
 
