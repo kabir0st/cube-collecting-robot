@@ -328,8 +328,8 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
     // new_state to SEARCH (currently TURN_AROUND's delta-deadband and
     // plan-failure paths) still triggers the side-effects. Drop the
     // skip-streak log gate, clear the latched APPROACH target, reset the
-    // FORWARD-then-ROTATE state, abort any leftover spline, and re-latch
-    // the gripper open.
+    // look-left/look-right/forward state, abort any leftover spline, and
+    // re-latch the gripper open.
     if (new_state == State::SEARCH) {
         _search_skip_streak    = false;
         _last_target_valid     = false;
@@ -610,10 +610,12 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 _search_skip_streak = false;
             }
 
-            // Very-simple search: forward _search_forward_target_mm, then
-            // rotate 2π in place, repeat. Sidestep on lidar obstacle.
+            // Bounded look-left/look-right scan, then forward.
+            // Start a cycle with the sweep accumulator zeroed; advance
+            // phase when the accumulator crosses the threshold for that
+            // direction.
             if (!_ssearch.initialized) {
-                _ssearch.phase = SimpleSearch::Phase::FORWARD;
+                _ssearch.phase = SimpleSearch::Phase::LOOK_LEFT;
                 _ssearch.forward_traveled_mm  = 0.0;
                 _ssearch.rotation_accumulated = 0.0;
                 _ssearch.last_x     = pose.x;
@@ -622,55 +624,73 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 _ssearch.initialized = true;
             }
 
-            if (_ssearch.phase == SimpleSearch::Phase::FORWARD) {
+            // Signed instantaneous heading delta — used by both sweep
+            // phases. wrap_pi handles ±π wrap so spin direction is
+            // preserved across the discontinuity.
+            const double dth_signed =
+                wrap_pi(pose.theta - _ssearch.last_theta);
+
+            if (_ssearch.phase == SimpleSearch::Phase::LOOK_LEFT) {
+                _ssearch.rotation_accumulated += dth_signed;
+                _ssearch.last_theta = pose.theta;
+                if (_ssearch.rotation_accumulated >= M_PI / 2.0) {
+                    _ssearch.phase = SimpleSearch::Phase::LOOK_RIGHT;
+                    _ssearch.rotation_accumulated = 0.0;
+                }
+                out.mode = Command::Mode::DIRECT;
+                out.v_mm_s = 0.0;
+                out.omega_rad_s = _search_omega;          // CCW
+                break;
+            }
+
+            if (_ssearch.phase == SimpleSearch::Phase::LOOK_RIGHT) {
+                _ssearch.rotation_accumulated += dth_signed;
+                _ssearch.last_theta = pose.theta;
+                if (_ssearch.rotation_accumulated <= -M_PI) {
+                    _ssearch.phase = SimpleSearch::Phase::FORWARD;
+                    _ssearch.forward_traveled_mm = 0.0;
+                    _ssearch.last_x = pose.x;
+                    _ssearch.last_y = pose.y;
+                }
+                out.mode = Command::Mode::DIRECT;
+                out.v_mm_s = 0.0;
+                out.omega_rad_s = -_search_omega;         // CW
+                break;
+            }
+
+            // Phase::FORWARD
+            if (app::obstacle_ahead.load()) {
                 // Obstacle in the forward arc -> rotate in place to clear
                 // it. Accumulate nothing on the forward odometer; the leg
                 // resumes once the path is open.
-                if (app::obstacle_ahead.load()) {
-                    _ssearch.last_x     = pose.x;
-                    _ssearch.last_y     = pose.y;
-                    _ssearch.last_theta = pose.theta;
-                    out.mode = Command::Mode::DIRECT;
-                    out.v_mm_s = 0.0;
-                    out.omega_rad_s = _search_omega;
-                    break;
-                }
+                _ssearch.last_x     = pose.x;
+                _ssearch.last_y     = pose.y;
+                _ssearch.last_theta = pose.theta;
+                out.mode = Command::Mode::DIRECT;
+                out.v_mm_s = 0.0;
+                out.omega_rad_s = _search_omega;
+                break;
+            }
+            {
                 const double dx = pose.x - _ssearch.last_x;
                 const double dy = pose.y - _ssearch.last_y;
                 _ssearch.forward_traveled_mm += std::hypot(dx, dy);
                 _ssearch.last_x     = pose.x;
                 _ssearch.last_y     = pose.y;
                 _ssearch.last_theta = pose.theta;
-
-                if (_ssearch.forward_traveled_mm >= _search_forward_target_mm) {
-                    _ssearch.phase = SimpleSearch::Phase::ROTATE;
-                    _ssearch.rotation_accumulated = 0.0;
-                    _ssearch.last_theta = pose.theta;
-                    out.mode = Command::Mode::DIRECT;
-                    out.v_mm_s = 0.0;
-                    out.omega_rad_s = _search_omega;
-                    break;
-                }
+            }
+            if (_ssearch.forward_traveled_mm >= _search_forward_target_mm) {
+                _ssearch.phase = SimpleSearch::Phase::LOOK_LEFT;
+                _ssearch.rotation_accumulated = 0.0;
+                _ssearch.last_theta = pose.theta;
                 out.mode = Command::Mode::DIRECT;
-                out.v_mm_s = _search_v_forward_mm_s;
-                out.omega_rad_s = 0.0;
+                out.v_mm_s = 0.0;
+                out.omega_rad_s = _search_omega;
                 break;
             }
-
-            // Phase::ROTATE: spin in place until ~2π accumulated, then start
-            // a new forward leg.
-            const double dth = std::abs(wrap_pi(pose.theta - _ssearch.last_theta));
-            _ssearch.rotation_accumulated += dth;
-            _ssearch.last_theta = pose.theta;
-            if (_ssearch.rotation_accumulated >= 2.0 * M_PI) {
-                _ssearch.phase = SimpleSearch::Phase::FORWARD;
-                _ssearch.forward_traveled_mm = 0.0;
-                _ssearch.last_x = pose.x;
-                _ssearch.last_y = pose.y;
-            }
             out.mode = Command::Mode::DIRECT;
-            out.v_mm_s = 0.0;
-            out.omega_rad_s = _search_omega;
+            out.v_mm_s = _search_v_forward_mm_s;
+            out.omega_rad_s = 0.0;
             break;
         }
 
@@ -1090,9 +1110,13 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                          out.mode == Command::Mode::DIRECT      ? "direct" :
                                                                   "stop"));
     if (_ssearch.initialized) {
-        dash.set("Mission", "search",
-                 std::string(_ssearch.phase == SimpleSearch::Phase::FORWARD
-                                 ? "FWD" : "ROT"));
+        const char* ph = "?";
+        switch (_ssearch.phase) {
+            case SimpleSearch::Phase::LOOK_LEFT:  ph = "L";   break;
+            case SimpleSearch::Phase::LOOK_RIGHT: ph = "R";   break;
+            case SimpleSearch::Phase::FORWARD:    ph = "FWD"; break;
+        }
+        dash.set("Mission", "search", std::string(ph));
         dash.set("Mission", "fwd_mm", _ssearch.forward_traveled_mm);
         dash.set("Mission", "rot_deg",
                  _ssearch.rotation_accumulated * 180.0 / M_PI);

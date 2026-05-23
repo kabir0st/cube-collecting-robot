@@ -144,16 +144,22 @@ private:
     double _last_failed_target_y     = 0.0;
     std::chrono::steady_clock::time_point _last_failed_at;
 
-    // Very-simple search behavior: drive forward _search_forward_target_mm,
-    // then rotate 2π in place, repeat. No map waypoints, no spline planning.
-    // Obstacle avoidance lives inside FORWARD: while app::obstacle_ahead is
-    // true the robot rotates in place to sidestep before resuming forward
-    // travel.
+    // Simple search behavior:
+    //   1) LOOK_LEFT: rotate +90° from the heading at sweep start.
+    //   2) LOOK_RIGHT: rotate continuously CW until -90° from sweep start
+    //      (a 180° sweep through center to the right side).
+    //   3) FORWARD: drive _search_forward_target_mm at the current heading
+    //      (which is 90° CW of where the cycle started).
+    // The forward heading naturally rotates -90° each cycle, walking the
+    // search pattern around the arena. No 360° in-place spin: cox sees
+    // bounded rotation and consistent wall geometry through the sweep.
+    // Obstacle avoidance lives inside FORWARD: while app::obstacle_ahead
+    // is true the robot rotates in place to sidestep before resuming.
     struct SimpleSearch {
-        enum class Phase { FORWARD, ROTATE };
-        Phase  phase = Phase::FORWARD;
+        enum class Phase { LOOK_LEFT, LOOK_RIGHT, FORWARD };
+        Phase  phase = Phase::LOOK_LEFT;
         double forward_traveled_mm  = 0.0;
-        double rotation_accumulated = 0.0;
+        double rotation_accumulated = 0.0;   // signed; rad
         // Last pose sample used for delta accumulation. Latched on first
         // tick after entry and refreshed every tick thereafter.
         double last_x     = 0.0;
