@@ -94,9 +94,7 @@ const char* StateMachine::state_name(State s) {
 StateMachine::StateMachine(TrackerResult& vision,
                            PurePursuitController& controller)
     : _vision(vision), _controller(controller) {
-    const auto now = std::chrono::steady_clock::now();
-    _state_entered = now;
-    _last_replan_at = now;
+    _state_entered = std::chrono::steady_clock::now();
 }
 
 void StateMachine::configure(double home_x, double home_y, double home_theta,
@@ -260,10 +258,8 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
         servo_release();
     }
 
-    if (new_state == State::TURN_AROUND) {
-        _turn_start_set   = false;
-        _turn_accumulated = 0.0;
-    }
+    // No TURN_AROUND entry bookkeeping needed — REALIGN reads pose.theta
+    // and _home_theta directly each tick.
 
     {
         const auto now = std::chrono::steady_clock::now();
@@ -280,7 +276,6 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
         }
         _state.store(new_state);
         _state_entered  = now;
-        _last_replan_at = now;        // (CARRY_HOME entry just re-planned)
     }
     LOG("Mission") << state_name(old_state) << " -> " << state_name(new_state);
 }
@@ -312,10 +307,18 @@ bool StateMachine::_plan_path_home(const Pos2D& current) {
     p_mid.x = 0.5 * (current.x + gx);
     p_mid.y = 0.5 * (current.y + gy);
 
+    // Final heading = path tangent at the goal (midpoint -> goal). The 3
+    // colinear controls collapse to a straight line, so this matches the
+    // direction PURSUIT converges the robot to as it arrives. Setting the
+    // goal theta to the tangent makes TERMINAL_ROTATE a no-op (delta ≈ 0),
+    // eliminating the cosmetic final spin to home_theta. The post-release
+    // REALIGN state restores the canonical home heading after backup.
+    const double tangent_to_goal = std::atan2(gy - p_mid.y, gx - p_mid.x);
+
     PathPoint p_goal;
     p_goal.x = gx;
     p_goal.y = gy;
-    p_goal.theta = ht;
+    p_goal.theta = tangent_to_goal;
     p_goal.margin = hm;
 
     std::vector<PathPoint> controls;
@@ -340,7 +343,10 @@ bool StateMachine::_plan_path_home(const Pos2D& current) {
     }
 
     path.back().margin = hm;
-    path.back().theta  = ht;
+    path.back().theta  = tangent_to_goal;
+    // Suppress unused-variable warning: ht (home_theta) is no longer baked
+    // into the path; REALIGN handles heading reset after release.
+    (void)ht;
 
     _controller.set_path(path);
     LOG("Mission") << "CARRY_HOME plan: " << path.size() << " pts, "
@@ -401,20 +407,17 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
     // One mutex acquire per tick on each of _m and the vision lock
     const TrackerResult::Snapshot snap = _vision.get_snapshot();
     std::chrono::steady_clock::time_point entered_at;
-    std::chrono::steady_clock::time_point last_replan;
     double hx, hy, hm, arm;
     int    attempts, max_attempts;
     {
         std::lock_guard<std::mutex> lk(_m);
         entered_at   = _state_entered;
-        last_replan  = _last_replan_at;
         hx  = _home_x; hy = _home_y; hm = _home_margin;
         arm = _arm_length_mm;
         attempts     = _approach_attempts;
         max_attempts = _max_approach_attempts;
     }
     const double t_in    = seconds_since(entered_at);
-    const double t_since_replan = seconds_since(last_replan);
     const State s = _state.load();
 
     // Box position derived from robot pose + arm length along heading.
@@ -596,13 +599,19 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             // 1. Servo grab already fired. Treat the grip as committed: once
             //    the jaws are closing, the gripper arms occlude the box and
             //    `snap.captured` becomes unreliable, so we don't wait on
-            //    vision. Hold v=0 for _grip_settle_s while the servo
-            //    physically slews, then transition straight to CARRY_HOME.
-            //    Worst case (grab missed) the robot drags nothing and opens
-            //    an empty gripper at home — far better than the previous
-            //    oscillation where vision flicker spammed grab/release.
+            //    vision. Hold v=0 until servo_done(0) reports the jaws have
+            //    finished slewing CLOSED (full 1.6s at 1°/20ms), then
+            //    transition to CARRY_HOME. A 3s watchdog prevents a wedged
+            //    servo from deadlocking APPROACH forever.
             if (_grip_fired) {
-                if (seconds_since(_grip_fired_at) >= _grip_settle_s) {
+                const bool slew_done = servo_done(0);
+                const bool watchdog  = seconds_since(_grip_fired_at) >= 3.0;
+                if (slew_done || watchdog) {
+                    if (watchdog && !slew_done) {
+                        LOGE("Mission") << "Grip watchdog fired after 3s "
+                                           "without servo_done; proceeding to "
+                                           "CARRY_HOME anyway.";
+                    }
                     { std::lock_guard<std::mutex> lk(_m); _approach_attempts = 0; }
                     _transition(State::CARRY_HOME, pose);
                     out.mode = Command::Mode::PATH_FOLLOW;
@@ -738,24 +747,11 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 break;
             }
 
-            // Periodic re-plan so a Kalman jump (Cox correction) doesn't
-            // leave us trying to follow a stale spline. Reuses
-            // _plan_path_home, which rebuilds from the *current* pose.
-            //
-            // Skip when the controller has already reached the goal position
-            // (TERMINAL_ROTATE / DONE): re-planning there would reset the
-            // closest-index hint and kick the controller back to PRE_ROLL /
-            // PURSUIT, wasting the alignment work it just did.
-            if (t_since_replan > _carry_replan_s && !_controller.is_near_goal()) {
-                if (!_plan_path_home(pose)) {
-                    _transition(State::SAFE_STOP, pose);
-                    out.mode = Command::Mode::STOP;
-                    break;
-                }
-                std::lock_guard<std::mutex> lk(_m);
-                _last_replan_at = std::chrono::steady_clock::now();
-            }
-
+            // No periodic re-plan: the 3-point spline collapses to a straight
+            // line, and set_path() would reset PurePursuit to PRE_ROLL —
+            // causing visible stop-rotate-go thrash every cycle. KF + cox
+            // corrections plus PurePursuit's cross-track curvature term
+            // handle pose drift continuously without a fresh plan.
             out.mode = Command::Mode::PATH_FOLLOW;
             break;
         }
@@ -784,23 +780,17 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
         }
 
         case State::TURN_AROUND: {
-            // 180° in-place pivot before re-entering SEARCH, so the camera
-            // is pointing away from the just-delivered box (and the at-home
-            // filter has a chance to skip it cleanly when it does come into
-            // frame again).
-            if (!_turn_start_set) {
-                _turn_start_theta = pose.theta;
-                _turn_accumulated = 0.0;
-                _turn_start_set   = true;
-                out.mode = Command::Mode::DIRECT;
-                out.v_mm_s = 0.0;
-                out.omega_rad_s = _search_omega;
-                break;
-            }
-            const double dtheta = std::abs(wrap_pi(pose.theta - _turn_start_theta));
-            _turn_accumulated += dtheta;
-            _turn_start_theta = pose.theta;
-            if (_turn_accumulated >= M_PI) {
+            // REALIGN: rotate in place to the mission-start home_theta. The
+            // robot is at the back-off position (RELEASE has just driven it
+            // ~80 mm behind the delivered box) and we want the wall closest
+            // to home to stay behind the robot — so the next SEARCH FORWARD
+            // leg drives into the arena, not into the wall. The at-home
+            // filter in SEARCH skips the just-delivered box even if it falls
+            // back into the camera frame after this rotation.
+            double home_theta_local;
+            { std::lock_guard<std::mutex> lk(_m); home_theta_local = _home_theta; }
+            const double delta = wrap_pi(home_theta_local - pose.theta);
+            if (std::fabs(delta) < 0.05) {  // ~3°
                 _transition(State::SEARCH, pose);
                 out.mode = Command::Mode::STOP;
                 break;
@@ -810,17 +800,17 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             // timeouts still apply and we can either retry or eventually
             // reach SAFE_STOP.
             if (t_in > _turn_around_timeout_s) {
-                LOG("Mission") << "TURN_AROUND timed out after "
-                               << t_in << " s with only "
-                               << (_turn_accumulated * 180.0 / M_PI)
-                               << " deg accumulated; bailing to SEARCH.";
+                LOG("Mission") << "REALIGN timed out after " << t_in
+                               << " s with " << (delta * 180.0 / M_PI)
+                               << " deg remaining; bailing to SEARCH.";
                 _transition(State::SEARCH, pose);
                 out.mode = Command::Mode::STOP;
                 break;
             }
             out.mode = Command::Mode::DIRECT;
             out.v_mm_s = 0.0;
-            out.omega_rad_s = _search_omega;
+            out.omega_rad_s = clamp_d(2.0 * delta,
+                                      -_search_omega, _search_omega);
             break;
         }
 

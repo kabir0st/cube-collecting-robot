@@ -85,7 +85,6 @@ private:
     std::atomic<State> _state{State::IDLE};
     mutable std::mutex _m;
     std::chrono::steady_clock::time_point _state_entered;
-    std::chrono::steady_clock::time_point _last_replan_at;
 
     // Mission target.
     double _home_x      = 0.0;
@@ -152,15 +151,12 @@ private:
     // Gripper sequencing inside APPROACH. On grabbable we first defer one
     // tick with v=0 (so the motor has a control cycle to decelerate from
     // chase speed), then fire the smooth-close on the next tick and wait
-    // for `captured` to flip.
+    // for servo_done(0) (with a 3s watchdog) before handing off to
+    // CARRY_HOME — earlier transitions started driving while the gripper
+    // was still slewing and the box would slip.
     bool _grip_stop_sent = false;       // tick N: motor told to stop
     bool _grip_fired     = false;       // tick N+1+: smooth close fired
     std::chrono::steady_clock::time_point _grip_fired_at;
-
-    // 180° pivot bookkeeping for TURN_AROUND.
-    bool   _turn_start_set = false;
-    double _turn_start_theta = 0.0;
-    double _turn_accumulated = 0.0;
 
     // GOTO state: latched single target pose. Set by go_to(), consumed once
     // on entry to State::GOTO inside _transition() to build the spline.
@@ -198,7 +194,6 @@ private:
     double _search_min_dwell_s  = 0.0;   // engage on sight; failed-target skip handles bounce protection
     double _search_v_forward_mm_s   = 40.0 * ROBOT_SPEED;  // forward speed during the FORWARD leg
     double _search_forward_target_mm = 1000.0;             // 100 cm leg before each look-around rotation
-    double _grip_settle_s       = 0.5;   // mechanical close time for the servo slew (8 steps × 20 ms ≈ 160 ms + slack); we no longer wait on vision because the gripper occludes the box
     double _approach_v          = 30.0 * ROBOT_SPEED;  // mm/s, visual-servo cruise
     double _approach_k_omega    = 1.8;   // rad/s per rad of bearing
     double _approach_omega_max  = 1.2 * ROBOT_SPEED;   // clamp on steering rate
@@ -208,16 +203,16 @@ private:
     // fall back to SEARCH (rotate).
     double _dead_reckon_arrival_mm = 100.0;
     double _release_v           = -40.0; // mm/s, backward
-    double _release_seconds     = 1.25;  // ~50 mm back-up at 40 mm/s
+    double _release_seconds     = 2.0;   // ~80 mm back-up at 40 mm/s — clears the box from a subsequent in-place rotation, and covers the 1.6s servo OPEN slew with margin
     double _release_hard_timeout_s = 5.0;// give up if box stays stuck on arms
     double _search_timeout_s    = 60.0;
     double _approach_timeout_s  = 20.0;
     double _carry_timeout_s     = 90.0;
-    double _carry_replan_s      = 5.0;   // re-plan spline this often during CARRY_HOME
-    // Hard timeout on TURN_AROUND so a jammed motor doesn't wedge the
-    // mission. If we cannot accumulate ~π of rotation within this many
-    // seconds, give up and fall back to SEARCH so the mission can still
-    // make progress (or hit its own timeout/budget guard).
+    // Hard timeout on TURN_AROUND (now REALIGN-to-home_theta) so a jammed
+    // motor doesn't wedge the mission. If we cannot reach the target
+    // heading within this many seconds, give up and fall back to SEARCH
+    // so the mission can still make progress (or hit its own
+    // timeout/budget guard).
     double _turn_around_timeout_s = 8.0;
     // Failed-target avoidance: how close (mm) and how recent (s) a
     // SEARCH detection must be to a previously-failed target before we
