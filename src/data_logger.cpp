@@ -15,9 +15,11 @@ std::string now_stamp() {
     std::time_t t = std::time(nullptr);
     std::tm tm{};
     localtime_r(&t, &tm);
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y%m%d_%H%M%S");
-    return oss.str();
+    // strftime instead of std::put_time — the Pi's libstdc++ is old enough
+    // that put_time is missing from <iomanip> despite -std=c++11.
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm);
+    return std::string(buf);
 }
 
 bool ensure_dir(const std::string& path) {
