@@ -130,6 +130,12 @@ void loop_vision_tracking(Dashboard& dash,
         cv::findContours(mask, contours,
                          cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
+        // Upper dead-zone: detections whose centroid falls in the top
+        // `detect_top_exclude_ratio` of the frame are skipped. Computed once
+        // per frame so the contour loop just does a y-compare.
+        const int dead_zone_y = static_cast<int>(
+            cfg.height * cfg.detect_top_exclude_ratio);
+
         // Score = area, penalized by distance from the last detection.
         int          selected       = -1;
         double       selected_score = -DBL_MAX;
@@ -145,6 +151,7 @@ void loop_vision_tracking(Dashboard& dash,
             const cv::Point2f center(
                 static_cast<float>(M.m10 / M.m00),
                 static_cast<float>(M.m01 / M.m00));
+            if (center.y < static_cast<float>(dead_zone_y)) continue;
             double score = area;
             if (has_last_position) {
                 score -= 8.0 * cv::norm(center - last_center);
@@ -186,7 +193,30 @@ void loop_vision_tracking(Dashboard& dash,
                 static_cast<double>((selected_bbox & bottom_region).area());
             const double bottom_fill  =
                 (region_area > 0.0) ? overlap_area / region_area : 0.0;
-            grab_gate = bottom_fill >= cfg.grab_bottom_fill_ratio;
+
+            // Orientation: cv::minAreaRect.angle is in (-90, 0]. Bringing
+            // anything below -45 up by +90 maps it into (-45, 45]; the
+            // absolute value is then the residual misalignment from
+            // axis-aligned in [0, 45]. Boxes are 90°-symmetric so this is
+            // the only angle we need to gate on. minAreaRect is undefined
+            // for <5-point contours — pessimistic default fails the gate.
+            cv::RotatedRect rr;
+            bool rr_valid = false;
+            double angle_misalignment_deg = 90.0;
+            if (contours[selected].size() >= 5) {
+                rr = cv::minAreaRect(contours[selected]);
+                double a = rr.angle;
+                if (a < -45.0) a += 90.0;
+                angle_misalignment_deg = std::abs(a);
+                rr_valid = true;
+            }
+
+            // Two-way grab gate: sufficient bottom-region fill (vertical
+            // proximity) AND near-axis-aligned. The existing GRAB_FRAMES
+            // debouncer below covers both since this is a boolean AND.
+            const bool fill_ok  = bottom_fill >= cfg.grab_bottom_fill_ratio;
+            const bool angle_ok = angle_misalignment_deg <= cfg.grab_angle_tol_deg;
+            grab_gate = fill_ok && angle_ok;
 
             in_capture_range = dist_mm > 0.0
                 && dist_mm <= cfg.capture_distance_mm
@@ -197,6 +227,15 @@ void loop_vision_tracking(Dashboard& dash,
             cv::circle(frame, cv::Point(selected_center), 5,
                        cv::Scalar(0, 255, 0), -1);
             cv::rectangle(frame, selected_bbox, cv::Scalar(0, 0, 255), 2);
+            // Green rotated rect shows what the angle gate is reading.
+            if (rr_valid) {
+                cv::Point2f pts[4];
+                rr.points(pts);
+                for (int k = 0; k < 4; ++k) {
+                    cv::line(frame, pts[k], pts[(k + 1) % 4],
+                             cv::Scalar(0, 255, 0), 2);
+                }
+            }
 
             result.set_target(bearing, dist_mm, selected_area);
             has_last_position = true;
@@ -207,6 +246,10 @@ void loop_vision_tracking(Dashboard& dash,
         }
 
         cv::rectangle(frame, bottom_region, cv::Scalar(0, 255, 255), 1);
+        // Upper exclusion zone — magenta so it doesn't blend with the
+        // yellow grab-region or the red bbox.
+        const cv::Rect top_region(0, 0, cfg.width, dead_zone_y);
+        cv::rectangle(frame, top_region, cv::Scalar(255, 0, 255), 1);
 
         // -------- Lost state machine --------
         if (detected) {

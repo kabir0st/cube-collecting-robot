@@ -14,8 +14,21 @@
 #include <ctime>
 #include <iomanip>
 
-constexpr double OBSTACLE_DIST_MM      = 140.0;
+constexpr double OBSTACLE_DIST_MM      = 230.0;
 constexpr double OBSTACLE_ARC_HALF_DEG = 60.0;
+
+// Narrow cone (±GRIPPER_MASK_HALF_DEG from straight ahead) where the
+// closed gripper and held box sit. Beams INSIDE this cone closer than
+// GRIPPER_MASK_DIST_MM are filtered out of obstacle detection so the
+// robot's own payload doesn't pin obstacle_ahead=true during CARRY_HOME
+// (the closed gripper sits ~100-130 mm from the LIDAR at ±0-15°). External
+// obstacles in the wider arc (±15° to ±60°) still trigger normally — a
+// real wall ahead is typically wide enough to subtend more than the
+// gripper cone, so a wall directly in front would still be caught by
+// beams outside the mask once the robot's wide-arc lidar return reaches
+// it.
+constexpr double GRIPPER_MASK_HALF_DEG = 20.0;
+constexpr double GRIPPER_MASK_DIST_MM  = 200.0;
 
 bool start_lidar(hh::Lidar& lidar) {
     if (lidar.connect() != LIDAR_SUCCESS) {
@@ -82,7 +95,18 @@ void loop_collect_frames(hh::Lidar& lidar, LidarData& lidar_data) {
             const bool in_forward_arc =
                 (angle <= OBSTACLE_ARC_HALF_DEG) ||
                 (angle >= 360.0 - OBSTACLE_ARC_HALF_DEG);
-            if (in_forward_arc && dist < OBSTACLE_DIST_MM) {
+            const bool in_gripper_mask =
+                (angle <= GRIPPER_MASK_HALF_DEG) ||
+                (angle >= 360.0 - GRIPPER_MASK_HALF_DEG);
+            // Mask: beam is the robot's own gripper / payload, not a real
+            // obstacle. The gripper is stationary in the robot frame at
+            // ~100-130 mm ahead, so anything inside the narrow cone closer
+            // than ~200 mm is filtered. A wall behind the gripper is
+            // occluded by the gripper itself anyway, so this also drops a
+            // measurement that wasn't useful.
+            const bool gripper_artifact =
+                in_gripper_mask && dist < GRIPPER_MASK_DIST_MM;
+            if (in_forward_arc && dist < OBSTACLE_DIST_MM && !gripper_artifact) {
                 frame_blocked = true;
             }
         }
@@ -107,10 +131,15 @@ std::map<double, std::vector<double>> get_angle_mapped_lidar_data(LidarData& lid
 
 
 std::pair<std::vector<double>, std::vector<double>> get_latest_frame_lidar_data(LidarData& lidar_data) {
-    std::array<Frame, FRAME_COUNT - 1> latest_frames = lidar_data.get_latest_snapshot();
-    // get_latest_snapshot returns frames oldest -> newest; the last entry
-    // is the freshest complete frame.
-    const Frame& f = latest_frames.back();
+    // buffer_id points to the slot currently being written; the most recent
+    // *complete* frame is one slot behind it. Copy only that slot under the
+    // lidar_data lock — copying all FRAME_COUNT-1 frames per cox tick would
+    // dominate runtime with the 50-slot buffer.
+    std::lock_guard<std::mutex> guard(lidar_data.lock);
+    const std::size_t n = lidar_data.frames.size();
+    const std::size_t bid = static_cast<std::size_t>(lidar_data.buffer_id.load());
+    const std::size_t prev = (bid + n - 1) % n;
+    const Frame& f = lidar_data.frames[prev];
     return { std::vector<double>(f.ang.begin(), f.ang.end()),
              std::vector<double>(f.dist.begin(), f.dist.end()) };
 }

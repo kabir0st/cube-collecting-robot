@@ -1,0 +1,1 @@
+sudo WIRINGPI_CODES=1 ./app

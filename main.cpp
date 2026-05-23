@@ -1,6 +1,8 @@
-#include <thread>
-#include <mutex>
+#include <cmath>
+#include <cstdio>
 #include <csignal>
+#include <mutex>
+#include <thread>
 
 #include <global.hpp>
 #include <types.hpp>
@@ -9,6 +11,7 @@
 #include <dashboard.hpp>
 #include <calibrations.hpp>
 #include <core.hpp>
+#include <data_logger.hpp>
 #include <tracker.hpp>
 #include <kalman.hpp>
 #include <telemetry.hpp>
@@ -18,7 +21,16 @@ std::atomic<bool> app::lidar_ready{false};
 std::atomic<bool> app::lidar_stop{false};
 std::atomic<bool> app::obstacle_ahead{false};
 std::atomic<bool> app::relocalizing{false};
+std::atomic<bool> app::cox_first_fix{false};
+std::atomic<bool> app::motors_ready{false};
 std::vector<std::thread> threads;
+
+// Definition for the extern declared in global.hpp. Boot default is the
+// previous compile-time tuning (1.875); main() overwrites this from
+// `robot.speed` in config.yml before any motor / controller object is
+// constructed, so member initializers that read ROBOT_SPEED see the
+// configured value.
+double ROBOT_SPEED = 1.875;
 
 
 static void handle_sigint(int) {
@@ -51,6 +63,29 @@ int main() {
         LOG("Main") << "Loaded config from " << config_path
                     << " (" << cfg.raw().size() << " keys).";
     }
+
+    // Apply ROBOT_SPEED FIRST, before any object that captures it at
+    // construction time (Motor, PurePursuit, StateMachine — all built down
+    // inside loop_control). Clamp to a sane range so a typo in config
+    // doesn't ramp accel into orbit; logs the resolved value so the
+    // operator can see what's actually in effect.
+    {
+        double rs = cfg.get_dbl("robot.speed", ROBOT_SPEED);
+        if (!std::isfinite(rs) || rs <= 0.0) {
+            LOGE("Main") << "robot.speed = " << rs
+                         << " is invalid; falling back to default "
+                         << ROBOT_SPEED;
+        } else {
+            if (rs > 5.0) {
+                LOGE("Main") << "robot.speed = " << rs
+                             << " is above the soft ceiling (5.0); clamping. "
+                                "Accel ramps & omega will saturate at chassis caps.";
+                rs = 5.0;
+            }
+            ROBOT_SPEED = rs;
+        }
+        LOG("Main") << "ROBOT_SPEED = " << ROBOT_SPEED;
+    }
     CameraConfig cam_cfg(
         cfg.get_int("camera.width",      640),
         cfg.get_int("camera.height",     480),
@@ -61,6 +96,8 @@ int main() {
         "camera.grab_bottom_region_ratio", cam_cfg.grab_bottom_region_ratio);
     cam_cfg.grab_bottom_fill_ratio = cfg.get_dbl(
         "camera.grab_bottom_fill_ratio", cam_cfg.grab_bottom_fill_ratio);
+    cam_cfg.grab_angle_tol_deg = cfg.get_dbl(
+        "camera.grab_angle_tol_deg", cam_cfg.grab_angle_tol_deg);
     cam_cfg.capture_distance_mm = cfg.get_dbl(
         "camera.capture_distance_mm", cam_cfg.capture_distance_mm);
     cam_cfg.capture_bearing_tol_rad = cfg.get_dbl(
@@ -71,46 +108,59 @@ int main() {
         "camera.show_debug_view", cam_cfg.show_debug_view);
 
     MissionConfig mission;
-    mission.home_x_mm     = cfg.get_dbl("mission.home_x_mm",       mission.home_x_mm);
-    mission.home_y_mm     = cfg.get_dbl("mission.home_y_mm",       mission.home_y_mm);
-    mission.home_theta    = cfg.get_dbl("mission.home_theta_rad",  mission.home_theta);
     mission.home_margin   = cfg.get_dbl("mission.home_margin_mm",  mission.home_margin);
     mission.arm_length_mm = cfg.get_dbl("mission.arm_length_mm",   mission.arm_length_mm);
-    const double mission_home_theta = mission.home_theta;
 
-    // Arena geometry + validation tolerances. Degrees in the YAML are
-    // converted to radians here so the rest of the codebase only deals in
-    // mm/rad.
-    ArenaConfig arena_cfg;
-    arena_cfg.in_arena           = cfg.get_bool("arena.in_arena",           arena_cfg.in_arena);
-    arena_cfg.width_mm           = cfg.get_dbl ("arena.arena_width_mm",     arena_cfg.width_mm);
-    arena_cfg.length_mm          = cfg.get_dbl ("arena.arena_length_mm",    arena_cfg.length_mm);
-    arena_cfg.validation_tol_mm  = cfg.get_dbl ("arena.validation_tol_mm",  arena_cfg.validation_tol_mm);
-    arena_cfg.validation_tol_rad = cfg.get_dbl ("arena.validation_tol_deg", 5.0) * M_PI / 180.0;
+    // Lab-3 goto: "x_mm,y_mm,theta_deg". When present, loop_control will
+    // call sm.go_to(...) instead of starting the SEARCH mission.
+    {
+        std::string g = cfg.get_str("mission.goto", "");
+        if (!g.empty()) {
+            double gx = 0.0, gy = 0.0, gth_deg = 0.0;
+            if (std::sscanf(g.c_str(), "%lf , %lf , %lf",
+                            &gx, &gy, &gth_deg) == 3) {
+                mission.goto_enabled   = true;
+                mission.goto_x_mm      = gx;
+                mission.goto_y_mm      = gy;
+                mission.goto_theta_rad = gth_deg * M_PI / 180.0;
+                LOG("Main") << "GOTO target: (" << gx << ", " << gy
+                            << ", " << gth_deg << " deg)";
+            } else {
+                LOGE("Main") << "mission.goto = \"" << g
+                             << "\" — expected \"x,y,theta_deg\". "
+                                "Falling back to default mission.";
+            }
+        }
+    }
 
-    // RANSAC presets -- the one used is selected at runtime in core.cpp by
-    // `in_arena`. Both blocks parsed unconditionally so the dashboard /
-    // logs surface whichever one is active.
-    auto load_ransac = [&](const std::string& prefix, RansacParams& p) {
-        p.inlier_thresh_mm    = cfg.get_dbl(prefix + ".inlier_thresh_mm",    p.inlier_thresh_mm);
-        p.max_iters_per_line  = cfg.get_int(prefix + ".max_iters_per_line",  p.max_iters_per_line);
-        p.inlier_points_req   = cfg.get_int(prefix + ".inlier_points_req",   p.inlier_points_req);
-        p.min_inlier_fraction = cfg.get_dbl(prefix + ".min_inlier_fraction", p.min_inlier_fraction);
-        p.max_lines           = cfg.get_int(prefix + ".max_lines",           p.max_lines);
-        p.endpoint_padding_mm = cfg.get_dbl(prefix + ".endpoint_padding_mm", p.endpoint_padding_mm);
-        p.min_segment_len_mm  = cfg.get_dbl(prefix + ".min_segment_len_mm",  p.min_segment_len_mm);
-    };
-    load_ransac("arena.ransac_arena", arena_cfg.ransac_arena);
-    load_ransac("arena.ransac_room",  arena_cfg.ransac_room);
+    // RANSAC parameters for the boot-time lidar map build. Defaults tuned
+    // for a rectangular arena with 1-2 other robots inside (see config.yml
+    // map.ransac block for the rationale per key).
+    RansacParams map_ransac;
+    map_ransac.inlier_thresh_mm    = cfg.get_dbl("map.ransac.inlier_thresh_mm",    25.0);
+    map_ransac.max_iters_per_line  = cfg.get_int("map.ransac.max_iters_per_line",  400);
+    map_ransac.inlier_points_req   = cfg.get_int("map.ransac.inlier_points_req",   30);
+    map_ransac.min_inlier_fraction = cfg.get_dbl("map.ransac.min_inlier_fraction", 0.06);
+    map_ransac.max_lines           = cfg.get_int("map.ransac.max_lines",           6);
+    map_ransac.endpoint_padding_mm = cfg.get_dbl("map.ransac.endpoint_padding_mm", 50.0);
+    map_ransac.min_segment_len_mm  = cfg.get_dbl("map.ransac.min_segment_len_mm",  600.0);
 
-    LOG("Main") << "Arena: in_arena=" << (arena_cfg.in_arena ? "yes" : "no")
-                << " size=" << arena_cfg.width_mm << "x" << arena_cfg.length_mm << " mm";
+    LOG("Main") << "Map RANSAC: max_lines=" << map_ransac.max_lines
+                << " min_seg=" << map_ransac.min_segment_len_mm
+                << " mm thresh=" << map_ransac.inlier_thresh_mm << " mm";
 
     telemetry::init(
         cfg.get_str ("logger.udp_host",      "127.0.0.1"),
         cfg.get_int ("logger.udp_port",      5005),
         cfg.get_bool("logger.udp_enabled",   false),
         cfg.get_int ("logger.scan_subsample", 2));
+
+    // Lab-3 file logger: time + pose + uncertainty for odom, cox, kalman
+    // at 100 ms cadence. No-op if logger.files_enabled is false.
+    DataLogger data_logger;
+    data_logger.open(
+        cfg.get_bool("logger.files_enabled", false),
+        cfg.get_str ("logger.out_dir",       "logs"));
 
     FilterResult filter;
     if (load_filter_result(cfg, filter)) {
@@ -125,6 +175,8 @@ int main() {
             } else {
                 LOG("Main") << "Failed to write filter calibration to " << config_path;
             }
+            std::cout << "Waiting 1 seconds before starting . ..\n";
+            std::this_thread::sleep_for(std::chrono::seconds(1));
         } else {
             LOG("Main") << "Calibration aborted; filter not saved.";
         }
@@ -134,9 +186,6 @@ int main() {
                         "Refusing to start.";
         return 1;
     }
-
-    std::cout << "Waiting 3 seconds before starting . ..\n";
-    std::this_thread::sleep_for(std::chrono::seconds(3));
 
     // start rest of the system
     INA219 power_interface = configure_voltage_interface();
@@ -160,15 +209,13 @@ int main() {
     dash.add_row("Cox");
     threads.emplace_back(loop_localization,
         std::ref(dash), std::ref(lidar_data), std::ref(kf),
-        std::cref(arena_cfg), mission_home_theta);
+        std::cref(map_ransac), std::ref(data_logger));
     // waiting for cox 1st seeds to be stable
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    std::this_thread::sleep_for(std::chrono::seconds(2));
 
     dash.add_row("Vision");
     threads.emplace_back(loop_vision_tracking,
         std::ref(dash), filter, cam_cfg, std::ref(target));
-    dash.render();
-    std::this_thread::sleep_for(std::chrono::seconds(3));
     dash.render();
     dash.add_row("Motor");
     dash.add_row("Odometry");
@@ -176,7 +223,7 @@ int main() {
     dash.add_row("Mission");
     threads.emplace_back(loop_control,
         std::ref(dash), std::ref(kf), std::ref(target),
-        std::ref(lidar_data), std::cref(mission));
+        std::ref(lidar_data), std::cref(mission), std::ref(data_logger));
 
     while(!app::shutdown) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -184,5 +231,6 @@ int main() {
     }
     // shutdown
     wait_for_threads();
+    data_logger.close();
     telemetry::shutdown();
 }

@@ -205,10 +205,13 @@ void PurePursuitController::compute(const Pos2D& pose,
                                             v_target, w_target);
                 } else {
                     // Rotate in place toward the lookahead bearing.
-                    // Proportional target — the Motor smoother shapes
-                    // acceleration; the ω_max clamp below caps amplitude.
+                    // Proportional target — but capped to _inplace_omega_cap
+                    // (gentler than _omega_max) so cox has time to fold
+                    // corrections into the KF heading during the spin.
                     v_target = 0.0;
-                    w_target = _k_pre_roll * err;
+                    w_target = std::max(-_inplace_omega_cap,
+                              std::min( _inplace_omega_cap,
+                                        _k_pre_roll * err));
                 }
                 break;
             }
@@ -229,8 +232,13 @@ void PurePursuitController::compute(const Pos2D& pose,
                     v_target = 0.0;
                     w_target = 0.0;
                 } else {
+                    // Same in-place omega cap as PRE_ROLL — TERMINAL_ROTATE
+                    // is the symmetric end-of-path version of the same
+                    // wheel-slip-dominant scenario.
                     v_target = 0.0;
-                    w_target = _k_terminal * delta;
+                    w_target = std::max(-_inplace_omega_cap,
+                              std::min( _inplace_omega_cap,
+                                        _k_terminal * delta));
                 }
                 break;
             }

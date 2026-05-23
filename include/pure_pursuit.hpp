@@ -60,11 +60,24 @@ private:
     // Tunables.
     double _L_d = 250.0;  // mm, lookahead distance
     double _v_max = 75.0 * ROBOT_SPEED;   // mm/s, absolute clamp
-    double _omega_max = 1.5 * ROBOT_SPEED;    // rad/s, absolute clamp
+    // Yaw cap NOT scaled with ROBOT_SPEED. Driving faster doesn't make cox
+    // better at folding in heading corrections, so the rate at which we're
+    // *allowed* to yaw is capped by sensor cadence (cox @ 10 Hz), not by
+    // chassis hardware. At 2.0 rad/s a curve-following PURSUIT step yields
+    // ~11° per cox tick — about the upper bound where motion-compensated
+    // scan matching still tracks.
+    double _omega_max = 2.0;    // rad/s, absolute clamp
     double _heading_done_rad = 0.05;   // ~3 deg, TERMINAL_ROTATE exit
     double _pre_roll_thresh = 0.52;   // ~30 deg, PRE_ROLL entry
     double _k_pre_roll = 2.0;    // P gain for PRE_ROLL omega target
     double _k_terminal = 2.0;    // P gain for terminal rotate omega
+    // In-place rotation cap. PRE_ROLL and TERMINAL_ROTATE both spin the
+    // chassis with v=0, which dominates the wheel-slip portion of the
+    // odometry noise (var_theta ~ K_ROT^2 * d_theta^2). At 0.8 rad/s a
+    // 180° flip takes ~3.9 s (≈40 cox ticks at 10 Hz) and a 90° corner
+    // takes ~2.0 s (≈20 ticks) — enough heading anchoring for the
+    // 3-minute mission budget without spending it all spinning in place.
+    double _inplace_omega_cap = 0.8;     // rad/s
 
     // Walk forward from `_closest_idx` along the path, advancing the hint
     // past any points we've already passed (cumulative arc length is what

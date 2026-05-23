@@ -7,8 +7,12 @@
 #include <mutex>
 #include <opencv2/opencv.hpp>
 
-// only keep 3 latest frames
-constexpr std::size_t FRAME_COUNT = 3;
+// Circular buffer of lidar frames. Sized to give the boot-time map
+// builder (find_walls / get_lidar_sensor_noise) enough data to extract
+// stable walls via RANSAC. Runtime cox uses only the newest frame, so
+// the buffer depth costs ~290 KB of RAM and a one-shot snapshot copy
+// per boot — both negligible.
+constexpr std::size_t FRAME_COUNT = 50;
 
 struct Frame {
     int id;
@@ -153,6 +157,14 @@ struct CameraConfig {
 
     double grab_bottom_region_ratio = 0.40;
     double grab_bottom_fill_ratio   = 0.50;
+    // Max axis-misalignment of the detected box (from cv::minAreaRect),
+    // in degrees. Squares are 90°-symmetric so the residual is in [0,45].
+    double grab_angle_tol_deg       = 5.0;
+
+    // Detections whose centroid falls inside the top fraction of the frame
+    // are rejected outright (typical use: ignore pink things on walls/lab
+    // posters above the floor plane).
+    double detect_top_exclude_ratio = 0.25;
 
     CameraConfig(int w, int h, int f):
         width(w), height(h), fps_target(f) {}

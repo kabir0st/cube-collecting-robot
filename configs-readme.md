@@ -21,6 +21,10 @@
 
 ### `robot`
 
+| Key | Default | What it does | Increase / Decrease effect |
+|---|---|---|---|
+| `robot.speed` | `1.875` | Global multiplier on every linear/angular velocity cap AND acceleration limit. Loaded by `main.cpp` at startup and stored in the runtime `ROBOT_SPEED` global. | **Increase:** snappier robot (cruise + turn + ramp rates all scale together). **Decrease:** slower / bench-safe. Soft ceiling ~3.6 with current chassis caps before omega starts clipping on sharp turns; hard-clamped to 5.0 with a warning. |
+
 > **Note:** The robot extents are currently **not wired into code** (they are comments for geometry planning). They are intended for wall-clearance and home-placement math.
 
 | Key | Default | What it does | Increase / Decrease effect |
@@ -33,47 +37,28 @@
 
 > **Note:** Only `mission.home_theta_rad` is used today (seed pose for localization). The other mission keys are loaded only if `StateMachine::configure()` is wired in.
 
-| Key | Default | What it does | Increase / Decrease effect |
-|---|---|---|---|
-| `mission.home_x_mm` | `275.0` | Target **box** landing X in arena frame (mm). | **Increase:** drop zone moves deeper into arena. **Decrease:** drop zone closer to back wall. |
-| `mission.home_y_mm` | `0.0` | Target **box** landing Y in arena frame (mm). | **Increase / Decrease:** shifts drop zone left/right in arena frame. |
-| `mission.home_theta_rad` | `0.0` | Home pose heading (rad) used to seed the KF when `arena.in_arena=true`. | **Increase:** rotate seed heading CCW. **Decrease:** rotate seed heading CW. |
-| `mission.home_margin_mm` | `25.0` | Arrival radius used by the path follower at home. | **Increase:** easier to “arrive” but less precise. **Decrease:** tighter precision, may stall if too small. |
-| `mission.arm_length_mm` | `80.0` | Distance from robot center to box when held. | **Increase:** biases robot stop point further back from the box drop. **Decrease:** biases stop point forward. |
-
-### `arena`
+Home is hardcoded to the robot's **starting pose** — the localization origin (0, 0, 0). The home zone is a 1 ft x 1 ft area, with `home_margin_mm` = 0.5 ft as the arrival radius. Only the zone radius and arm geometry are tunable.
 
 | Key | Default | What it does | Increase / Decrease effect |
 |---|---|---|---|
-| `arena.in_arena` | `false` | Selects **analytical arena map** (`true`) vs **RANSAC map** (`false`), and also selects `ransac_arena` vs `ransac_room`. | **True:** strict arena geometry and validation. **False:** builds map from walls in the room. |
-| `arena.arena_width_mm` | `2400.0` | Arena width used to build the analytical map. | **Increase / Decrease:** scales left/right walls and search bounds. |
-| `arena.arena_length_mm` | `3600.0` | Arena length used to build the analytical map. | **Increase / Decrease:** scales front wall and search bounds. |
-| `arena.validation_tol_mm` | `100.0` | Position tolerance when validating observed walls vs expected map. | **Increase:** more tolerant, fewer false aborts; risks accepting wrong walls. **Decrease:** stricter, may abort with slight noise. |
-| `arena.validation_tol_deg` | `5.0` | Angle tolerance in **degrees** for wall validation (converted to radians at load). | **Increase:** tolerates more angular error. **Decrease:** stricter angle match. |
+| `mission.home_margin_mm` | `152.4` | Arrival radius (≈ 0.5 ft) used at home — half the side of the 1 ft home zone. | **Increase:** larger home zone, easier to "arrive". **Decrease:** tighter precision. |
+| `mission.arm_length_mm` | `80.0` | Distance from robot center to the box when held. | **Increase:** biases robot stop point further back from the drop. **Decrease:** biases stop point forward. |
 
-#### `arena.ransac_arena` (tight, clean arena)
+### `map`
 
-| Key | Default | What it does | Increase / Decrease effect |
-|---|---|---|---|
-| `arena.ransac_arena.inlier_thresh_mm` | `25.0` | Perpendicular distance gate for line inliers. | **Increase:** accepts noisier points; may fit wrong lines. **Decrease:** tighter but may reject real wall points. |
-| `arena.ransac_arena.max_iters_per_line` | `200` | RANSAC trials per line. | **Increase:** more robust but slower. **Decrease:** faster but less robust. |
-| `arena.ransac_arena.inlier_points_req` | `20` | Minimum inliers for a line. | **Increase:** stricter. **Decrease:** accepts weaker lines. |
-| `arena.ransac_arena.min_inlier_fraction` | `0.10` | Minimum fraction of points that must be inliers. | **Increase:** stricter; may fail in sparse data. **Decrease:** more permissive. |
-| `arena.ransac_arena.max_lines` | `5` | Cap on walls extracted. | **Increase:** can accept more walls (risk clutter). **Decrease:** fewer walls. |
-| `arena.ransac_arena.endpoint_padding_mm` | `50.0` | Extends wall endpoints for downstream matching. | **Increase:** makes endpoints longer, more forgiving. **Decrease:** tighter endpoints. |
-| `arena.ransac_arena.min_segment_len_mm` | `500.0` | Reject segments shorter than this. | **Increase:** suppresses short spurious lines. **Decrease:** allows shorter walls. |
+The reference map for cox localization is built from ~50 lidar frames at boot using RANSAC. There is no hardcoded arena geometry — walls are whatever the lidar finds.
 
-#### `arena.ransac_room` (looser, cluttered room)
+Defaults are tuned for a **rectangular arena with 1-2 other robots inside**: tight inlier gates keep walls straight, high inlier requirements reject robot-body clusters, and the segment-length filter discards anything shorter than a real wall.
 
 | Key | Default | What it does | Increase / Decrease effect |
 |---|---|---|---|
-| `arena.ransac_room.inlier_thresh_mm` | `40.0` | Perpendicular distance gate for line inliers. | **Increase:** tolerates more clutter/noise. **Decrease:** stricter. |
-| `arena.ransac_room.max_iters_per_line` | `300` | RANSAC trials per line. | **Increase:** more robust, slower. **Decrease:** faster. |
-| `arena.ransac_room.inlier_points_req` | `10` | Minimum inliers for a line. | **Increase:** stricter. **Decrease:** accepts weaker lines. |
-| `arena.ransac_room.min_inlier_fraction` | `0.02` | Minimum fraction of points that must be inliers. | **Increase:** stricter, may fail in clutter. **Decrease:** permissive. |
-| `arena.ransac_room.max_lines` | `10` | Cap on walls extracted. | **Increase:** allows more candidates. **Decrease:** fewer lines. |
-| `arena.ransac_room.endpoint_padding_mm` | `50.0` | Extends wall endpoints for downstream matching. | **Increase:** more forgiving endpoints. **Decrease:** tighter endpoints. |
-| `arena.ransac_room.min_segment_len_mm` | `800.0` | Reject segments shorter than this. | **Increase:** filters furniture edges more aggressively. **Decrease:** allows shorter segments. |
+| `map.ransac.inlier_thresh_mm` | `25.0` | Perpendicular distance gate for line inliers. | **Increase:** tolerates more noise; risks fitting around obstacles. **Decrease:** tighter fits, may drop noisy wall points. |
+| `map.ransac.max_iters_per_line` | `400` | RANSAC trials per line. | **Increase:** more robust under robot occlusion, slower. **Decrease:** faster. |
+| `map.ransac.inlier_points_req` | `30` | Minimum inliers (angle-averaged points) for a line. | **Increase:** stricter, rejects robots more aggressively but may miss partially-occluded walls. **Decrease:** accepts weaker lines (may mis-fit robots). |
+| `map.ransac.min_inlier_fraction` | `0.06` | Minimum fraction of points that must be inliers. | **Increase:** stricter; stops RANSAC sooner. **Decrease:** more permissive. |
+| `map.ransac.max_lines` | `6` | Cap on walls extracted. 4 walls + 2 slack for occlusion-split walls. | **Increase:** allows more candidates (risk clutter). **Decrease:** fewer lines. |
+| `map.ransac.endpoint_padding_mm` | `50.0` | Extends wall endpoints for downstream matching. | **Increase:** more forgiving endpoints. **Decrease:** tighter endpoints. |
+| `map.ransac.min_segment_len_mm` | `600.0` | Reject segments shorter than this. Robot bodies are ≤ 400 mm wide. | **Increase:** filters robots more aggressively, may drop short walls. **Decrease:** allows shorter segments (risk fitting robot edges). |
 
 ### `logger`
 

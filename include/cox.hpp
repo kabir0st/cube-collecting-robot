@@ -5,12 +5,12 @@
 #include <mutex>
 #include <types.hpp>
 #include <dashboard.hpp>
+#include <data_logger.hpp>
 #include <kalman.hpp>
 
 class CoxScanMatchAlgorithm {
     private:
         std::vector<LineSeg> walls;
-        Pos2D current_pos;
         int max_itr;
         LidarData &lidar_data;
 
@@ -25,11 +25,10 @@ class CoxScanMatchAlgorithm {
     public:
         CoxScanMatchAlgorithm(
             const std::vector<LineSeg> &map,
-            Pos2D initial_pos,
             LidarData& lidar_data);
         PosEstimate estimate(Pos2D init_pos);
 };
 
 void loop_scan_cox_estimation(
     std::vector<LineSeg>& ref_map, LidarData& lidar_data,
-    Dashboard& dash, KalmanFilter& kf);
+    Dashboard& dash, KalmanFilter& kf, DataLogger& logger);

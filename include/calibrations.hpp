@@ -72,67 +72,15 @@ double get_lidar_sensor_noise(LidarData &lidar_data);
 std::vector<LineSeg> find_walls(LidarData &lidar_data,
                                 const RansacParams& params);
 
-// POD bag for all `arena:` config keys. Loaded once in main and passed by
-// const ref into loop_localization. Tolerances are stored already in mm/rad
-// (degrees in the YAML are converted at load time).
-struct ArenaConfig {
-    bool   in_arena              = true;
-    double width_mm              = 2400.0;
-    double length_mm             = 3600.0;
-    double validation_tol_mm     = 100.0;
-    double validation_tol_rad    = 5.0 * M_PI / 180.0;
-
-    // Two RANSAC presets, picked by `in_arena`:
-    //   - ransac_arena: clean rectangular arena, ~4 long walls, robot
-    //     sitting inside. Tight gates, high inlier requirement, hard cap
-    //     at 4 lines.
-    //   - ransac_room: real-room operation with furniture / clutter
-    //     occluding the walls. Looser gates, lower inlier requirement,
-    //     extract more candidates and filter by minimum segment length
-    //     so chair / desk edges are rejected.
-    RansacParams ransac_arena = []{
-        RansacParams p;
-        p.inlier_thresh_mm    = 25.0;
-        p.inlier_points_req   = 20;
-        p.min_inlier_fraction = 0.10;
-        p.max_lines           = 4;
-        p.min_segment_len_mm  = 500.0;
-        return p;
-    }();
-    RansacParams ransac_room = []{
-        RansacParams p;
-        p.inlier_thresh_mm    = 40.0;
-        p.inlier_points_req   = 10;
-        p.min_inlier_fraction = 0.02;
-        p.max_lines           = 10;
-        p.min_segment_len_mm  = 800.0;
-        return p;
-    }();
-};
-
-// Build the four-segment analytical rectangle: home wall behind the robot at
-// x=0, far wall at x=length_mm, side walls at y=±width_mm/2. Normals point
-// into the arena so Cox's residual is positive for interior points (matches
-// the convention in src/cox.cpp:45).
-std::vector<LineSeg> build_arena_map(double width_mm, double length_mm);
-
-// Compare observed RANSAC walls against the analytical rectangle. Returns
-// true iff every observed wall matches one of the expected walls within
-// the given tolerances. Accepts (n, r) == (-n, -r) (RANSAC always emits
-// positive r, two expected walls have negative r). A *missing* expected
-// wall is OK (corner occlusion); an *extra* observed wall that matches
-// nothing is a fail. Logs unmatched walls.
-bool validate_arena_walls(const std::vector<LineSeg>& expected,
-                          const std::vector<LineSeg>& observed,
-                          double tol_mm, double tol_rad);
-
 namespace calib {
 
-struct ArenaBounds {
+// Axis-aligned bounding box of the reference map, computed once at boot
+// from find_walls' output and read by the search planner.
+struct MapBounds {
     double min_x = 0.0, max_x = 0.0, min_y = 0.0, max_y = 0.0;
 };
 
-void compute_arena_bounds(const std::vector<LineSeg>& walls);
-bool get_arena_bounds(ArenaBounds& out);
+void compute_map_bounds(const std::vector<LineSeg>& walls);
+bool get_map_bounds(MapBounds& out);
 
 }  // namespace calib

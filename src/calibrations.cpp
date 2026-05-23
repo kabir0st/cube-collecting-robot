@@ -1,5 +1,6 @@
 
 #include <numeric>
+#include <array>
 #include <cmath>
 #include <algorithm>
 #include <atomic>
@@ -109,9 +110,19 @@ bool CalibrateCamera::create_filter_mask(FilterResult& result){
     const bool spans_red_edges =
         h_min <= red_edge_window && h_max >= (180.f - red_edge_window);
 
-    const float hue_margin = 10.f;
-    const float s_margin = 20.f;
-    const float v_margin = 40.f;  
+    // Asymmetric margins: shadows DARKEN pixels (V drops sharply, S a bit)
+    // but never the opposite, so we expand the LOWER bounds aggressively
+    // while keeping the UPPER bounds tight. Tight uppers still reject the
+    // bulk of background noise and overexposed highlights (the original
+    // "tightened margins" intent); generous lowers keep detection alive
+    // when the robot casts its own shadow on the box at close range —
+    // which is exactly the moment the grab gate needs the box to stay
+    // visible. Hue is preserved by shadow, so its margin stays symmetric.
+    const float hue_margin     = 6.f;
+    const float s_margin_lower = 25.f;
+    const float s_margin_upper = 10.f;
+    const float v_margin_lower = 50.f;
+    const float v_margin_upper = 20.f;
 
     if ((h_max - h_min) > 90.f && hue_is_reliable && spans_red_edges){
         sort(h_vals.begin(), h_vals.end());
@@ -130,18 +141,18 @@ bool CalibrateCamera::create_filter_mask(FilterResult& result){
 
 
         // High side: ~170 → 180
-        result.lower1 = cv::Scalar (std::max(0.f, h_high_min - hue_margin), std::max(0.f, s_lower - s_margin), std::max(0.f, v_lower - v_margin));
-        result.upper1 = cv::Scalar (180.f, std::min(255.f, s_upper + s_margin), std::min(255.f, v_upper + v_margin));
+        result.lower1 = cv::Scalar (std::max(0.f, h_high_min - hue_margin), std::max(0.f, s_lower - s_margin_lower), std::max(0.f, v_lower - v_margin_lower));
+        result.upper1 = cv::Scalar (180.f, std::min(255.f, s_upper + s_margin_upper), std::min(255.f, v_upper + v_margin_upper));
 
         // Low side: 0 → ~8
-        result.lower2 = cv::Scalar (0.f, std::max(0.f, s_lower - s_margin), std::max(0.f, v_lower - v_margin));
-        result.upper2 = cv::Scalar (std::min(180.f, h_low_max + hue_margin), std::min(255.f, s_upper + s_margin), std::min(255.f, v_upper + v_margin));
+        result.lower2 = cv::Scalar (0.f, std::max(0.f, s_lower - s_margin_lower), std::max(0.f, v_lower - v_margin_lower));
+        result.upper2 = cv::Scalar (std::min(180.f, h_low_max + hue_margin), std::min(255.f, s_upper + s_margin_upper), std::min(255.f, v_upper + v_margin_upper));
         result.has_wrap_around = true;
     }
     else
     {
-        result.lower1 = cv::Scalar (std::max(0.f, h_min - hue_margin), std::max(0.f, s_lower - s_margin), std::max(0.f, v_lower - v_margin));
-        result.upper1 = cv::Scalar (std::min(180.f, h_max + hue_margin), std::min(255.f, s_upper + s_margin), std::min(255.f, v_upper + v_margin));
+        result.lower1 = cv::Scalar (std::max(0.f, h_min - hue_margin), std::max(0.f, s_lower - s_margin_lower), std::max(0.f, v_lower - v_margin_lower));
+        result.upper1 = cv::Scalar (std::min(180.f, h_max + hue_margin), std::min(255.f, s_upper + s_margin_upper), std::min(255.f, v_upper + v_margin_upper));
         result.has_wrap_around = false;
     }
     return true;
@@ -527,7 +538,7 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
         points.emplace_back(bx, by);
     }
     LOG("MAP") << "Usable Points for MAP : " << points.size();
-    
+
     // floor threshold that scales with sensor noise;
     params.inlier_thresh_mm = std::max(15.0, lidar_data.sensor_noise.load() + 10);
     std::mt19937 rng(params.seed != 0 ? params.seed : std::random_device{}());
@@ -535,8 +546,19 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
     // starting RANSAC algorithm
     const size_t inline_floor = std::ceil(
         params.min_inlier_fraction * points.size());
-    
+
+    LOG("MAP") << "RANSAC gates: inlier_thresh_mm=" << params.inlier_thresh_mm
+               << " inlier_points_req=" << params.inlier_points_req
+               << " min_inlier_fraction=" << params.min_inlier_fraction
+               << " (inline_floor=" << inline_floor << ")"
+               << " min_segment_len_mm=" << params.min_segment_len_mm
+               << " max_lines=" << params.max_lines;
+
+    bool starved = false;
+    int  iter    = 0;
         while(points.size() >= inline_floor && walls.size() < static_cast<size_t>(params.max_lines)) {
+            ++iter;
+            const size_t pts_before = points.size();
             if (points.size() < 2) break;
             std::uniform_int_distribution<int> pick(0, points.size() - 1);
             // best 2 points hypothesis
@@ -562,9 +584,15 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
                 if ( inl.size() > best.size())
                     best.swap(inl);
             }
-            if (best.size() < static_cast<size_t>(params.inlier_points_req))
+            if (best.size() < static_cast<size_t>(params.inlier_points_req)) {
+                LOG("MAP") << "  iter=" << iter << " pts=" << pts_before
+                           << " best_inliers=" << best.size()
+                           << " < req=" << params.inlier_points_req
+                           << " -> STARVED, ending RANSAC";
+                starved = true;
                 break;
- 
+            }
+
         // -- Refit on inliers, then re-collect inliers around the refit -
         const LineFit fit = refit_tls(points, best);
         const double r_refit = fit.nx * fit.cx + fit.ny * fit.cy;
@@ -573,6 +601,11 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
                                                     params.inlier_thresh_mm);
         if (static_cast<int>(refined.size()) < params.inlier_points_req) {
             // Refit drifted too far; drop original inliers and try again.
+            LOG("MAP") << "  iter=" << iter << " pts=" << pts_before
+                       << " best_inliers=" << best.size()
+                       << " refined=" << refined.size()
+                       << " < req=" << params.inlier_points_req
+                       << " -> refit drifted, dropping inliers and retrying";
             erase_inliers(points, best);
             continue;
         }
@@ -613,146 +646,50 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
             static_cast<double>(seg.by - seg.ay));
         if (params.min_segment_len_mm > 0.0
             && seg_len < params.min_segment_len_mm) {
+            LOG("MAP") << "  iter=" << iter << " pts=" << pts_before
+                       << " best=" << best.size() << " refined=" << refined.size()
+                       << " seg_len=" << seg_len
+                       << " < min_segment_len_mm=" << params.min_segment_len_mm
+                       << " -> REJECTED (too short)";
             erase_inliers(points, refined);
             continue;
         }
         walls.push_back(seg);
+        LOG("MAP") << "  iter=" << iter << " pts=" << pts_before
+                   << " best=" << best.size() << " refined=" << refined.size()
+                   << " seg_len=" << seg_len
+                   << " -> ACCEPTED wall #" << walls.size()
+                   << " endpoints=(" << seg.ax << "," << seg.ay << ")->("
+                   << seg.bx << "," << seg.by << ")"
+                   << " n=(" << seg.nx << "," << seg.ny << ") r=" << seg.r;
 
         erase_inliers(points, refined);
     }
+    if (starved) {
+        LOG("MAP") << "Terminated: RANSAC starved after " << iter
+                   << " iter(s), " << points.size() << " pts remaining";
+    } else if (walls.size() >= static_cast<size_t>(params.max_lines)) {
+        LOG("MAP") << "Terminated: max_lines=" << params.max_lines
+                   << " reached after " << iter << " iter(s)";
+    } else {
+        LOG("MAP") << "Terminated: points exhausted (" << points.size()
+                   << " < inline_floor=" << inline_floor << ") after "
+                   << iter << " iter(s)";
+    }
     LOG("MAP") << "Found " << walls.size() << " Walls.";
     return walls;
-}
-
-std::vector<LineSeg> build_arena_map(double width_mm, double length_mm) {
-    // Frame: home at midpoint of the back wall (x=0), robot faces +x.
-    // Normals point INTO the arena so y = nx*pwx + ny*pwy - r is positive
-    // for interior points (Cox convention, src/cox.cpp:45).
-    const float half_w = static_cast<float>(0.5 * width_mm);
-    const float L      = static_cast<float>(length_mm);
-
-    std::vector<LineSeg> walls;
-    walls.reserve(4);
-
-    // Back wall (home wall, behind robot at boot): x = 0, normal +x.
-    LineSeg back;
-    back.nx = 1.0f; back.ny = 0.0f; back.r = 0.0f;
-    back.ax = 0.0f; back.ay = -half_w;
-    back.bx = 0.0f; back.by = +half_w;
-    walls.push_back(back);
-
-    // Front wall: x = L, normal -x. r = -L so y = -pwx - (-L) = L - pwx > 0.
-    LineSeg front;
-    front.nx = -1.0f; front.ny = 0.0f; front.r = -L;
-    front.ax = L; front.ay = -half_w;
-    front.bx = L; front.by = +half_w;
-    walls.push_back(front);
-
-    // Right wall (+y side): y = +half_w, normal -y. r = -half_w.
-    LineSeg right;
-    right.nx = 0.0f; right.ny = -1.0f; right.r = -half_w;
-    right.ax = 0.0f; right.ay = +half_w;
-    right.bx = L;    right.by = +half_w;
-    walls.push_back(right);
-
-    // Left wall (-y side): y = -half_w, normal +y. r = -half_w.
-    LineSeg left;
-    left.nx = 0.0f; left.ny = 1.0f; left.r = -half_w;
-    left.ax = 0.0f; left.ay = -half_w;
-    left.bx = L;    left.by = -half_w;
-    walls.push_back(left);
-
-    LOG("MAP") << "Built analytical arena map: " << width_mm << " x "
-               << length_mm << " mm (4 walls).";
-    return walls;
-}
-
-namespace {
-
-// True if (n_obs, r_obs) describes the same infinite line as
-// (n_exp, r_exp), allowing for opposite-sign normal conventions
-// (RANSAC emits positive r; the analytical map has negative r on two
-// walls).
-bool same_line(const LineSeg& obs, const LineSeg& exp,
-               double tol_mm, double tol_rad,
-               double& signed_match_sign) {
-    // Angle between normals, modulo orientation.
-    const double dot = obs.nx * exp.nx + obs.ny * exp.ny;
-    const double abs_dot = std::min(1.0, std::fabs(dot));
-    const double ang = std::acos(abs_dot);
-    if (ang > tol_rad) return false;
-
-    // Sign that makes the normals point the same way.
-    const double sgn = (dot >= 0.0) ? 1.0 : -1.0;
-    // r in the obs frame, expressed in the exp frame's normal direction.
-    const double r_obs_adj = sgn * obs.r;
-    if (std::fabs(r_obs_adj - exp.r) > tol_mm) return false;
-
-    signed_match_sign = sgn;
-    return true;
-}
-
-// True if both endpoints of `obs` lie within tol_mm of the infinite line
-// defined by `exp.n, exp.r` (using exp's sign convention).
-bool endpoints_on_line(const LineSeg& obs, const LineSeg& exp, double tol_mm) {
-    const double d_a = std::fabs(exp.nx * obs.ax + exp.ny * obs.ay - exp.r);
-    const double d_b = std::fabs(exp.nx * obs.bx + exp.ny * obs.by - exp.r);
-    return d_a <= tol_mm && d_b <= tol_mm;
-}
-
-}  // namespace
-
-bool validate_arena_walls(const std::vector<LineSeg>& expected,
-                          const std::vector<LineSeg>& observed,
-                          double tol_mm, double tol_rad) {
-    if (expected.empty()) {
-        LOGE("MAP") << "validate_arena_walls: expected map is empty";
-        return false;
-    }
-    if (observed.empty()) {
-        LOGE("MAP") << "validate_arena_walls: RANSAC found no walls";
-        return false;
-    }
-
-    size_t unmatched = 0;
-    for (const LineSeg& obs : observed) {
-        bool matched = false;
-        for (const LineSeg& exp : expected) {
-            double sgn = 1.0;
-            if (!same_line(obs, exp, tol_mm, tol_rad, sgn)) continue;
-            if (!endpoints_on_line(obs, exp, tol_mm)) continue;
-            matched = true;
-            break;
-        }
-        if (!matched) {
-            ++unmatched;
-            LOGE("MAP") << "Unmatched observed wall: n=(" << obs.nx << ", "
-                        << obs.ny << ") r=" << obs.r
-                        << " endpoints (" << obs.ax << ", " << obs.ay
-                        << ") -> (" << obs.bx << ", " << obs.by << ")";
-        }
-    }
-    if (unmatched > 0) {
-        LOGE("MAP") << "Arena validation: " << unmatched << "/"
-                    << observed.size()
-                    << " observed walls did not match expected geometry";
-        return false;
-    }
-    LOG("MAP") << "Arena validation OK: all " << observed.size()
-               << " observed walls match expected rectangle";
-    return true;
 }
 
 namespace calib {
 namespace {
 std::atomic<bool> g_bounds_ready{false};
 std::mutex        g_bounds_m;
-ArenaBounds       g_bounds;
+MapBounds         g_bounds;
 }  // namespace
 
-void compute_arena_bounds(const std::vector<LineSeg>& walls) {
+void compute_map_bounds(const std::vector<LineSeg>& walls) {
     if (walls.empty()) return;
-    ArenaBounds b;
+    MapBounds b;
     b.min_x =  std::numeric_limits<double>::max();
     b.max_x =  std::numeric_limits<double>::lowest();
     b.min_y =  std::numeric_limits<double>::max();
@@ -768,11 +705,11 @@ void compute_arena_bounds(const std::vector<LineSeg>& walls) {
         g_bounds = b;
     }
     g_bounds_ready.store(true, std::memory_order_release);
-    LOG("Calib") << "Arena bbox: (" << b.min_x << "," << b.min_y
+    LOG("Calib") << "Map bbox: (" << b.min_x << "," << b.min_y
                  << ") to (" << b.max_x << "," << b.max_y << ")";
 }
 
-bool get_arena_bounds(ArenaBounds& out) {
+bool get_map_bounds(MapBounds& out) {
     if (!g_bounds_ready.load(std::memory_order_acquire)) return false;
     std::lock_guard<std::mutex> lk(g_bounds_m);
     out = g_bounds;

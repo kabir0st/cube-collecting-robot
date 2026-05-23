@@ -3,78 +3,84 @@ camera:
   height: 480
   fps_target: 12
   focal_length_px: 650.0
-  grab_bottom_region_ratio: 0.35
-  grab_bottom_fill_ratio: 0.60
-  capture_distance_mm: 120.0
+  grab_bottom_region_ratio: 0.25
+  grab_bottom_fill_ratio: 0.65
+  grab_angle_tol_deg: 5.0
+  capture_distance_mm: 100.0
   capture_bearing_tol_rad: 0.12
   retention_distance_mm: 150.0
   show_debug_view: true
 
 robot:
-  # All extents measured from the LIDAR mount point (= the tracked pose
-  # center used by cox / KF / odometry). Used for wall-clearance and home
-  # placement math. Update if the robot is rebuilt.
+  speed: 4.5
   back_extent_mm:  150.0   # rear of chassis behind LIDAR
   left_extent_mm:   70.0
   right_extent_mm:  70.0
-  # Front extent (with arm extended + held box) = arm_length_mm + 30 mm.
 
 mission:
-  # Home is a 1 ft x 1 ft (~305 mm) drop zone against the back wall.
-  # Arena frame: back wall at x = 0, +x into the arena, midline y = 0.
-  #
-  # home_x/y_mm is where the *box* should land. The controller biases the
-  # robot's goal back by arm_length_mm, so robot_x = home_x_mm - 80.
-  #
-  # Geometry from robot:
-  #   robot back = 150 mm behind LIDAR  → need robot_x ≥ 170 (20 mm safety)
-  #   robot front (arm+box) = 110 mm    → need robot_x ≤ 195 to keep the
-  #                                       box leading edge inside the zone
-  # That pins home_x_mm to [250, 275]. home_margin_mm must be ≤ 25 so the
-  # worst-case approach (anywhere on the arrival circle) still satisfies
-  # both bounds. 275 / 25 picks the middle of the safe band:
-  #   robot stop range:  [170, 220]  rear clearance: [20, 70]  mm
-  #   box landing range: [250, 300]  inside home zone [0, 305]
-  home_x_mm: 275.0
-  home_y_mm: 0.0
-  home_theta_rad: 0.0
-  home_margin_mm: 25.0
-  # Distance from LIDAR center to the arm tip (= where the held box sits).
-  # If you change this, recompute the home_x_mm / home_margin_mm window
-  # above (robot_x = home_x_mm - arm_length_mm).
-  arm_length_mm: 80.0
+  # Home is centered on the robot's starting pose (the localization
+  # origin (0, 0, 0)). Only the zone size and arm geometry are tunable.
+  home_margin_mm: 50   # 0.5 ft — radius of the 1 ft home zone
+  arm_length_mm: 165.0     # LIDAR center -> arm tip (held box position)
+  # Lab-3 single-shot goto target: "x_mm,y_mm,theta_deg". Uncomment to
+  # override the default SEARCH mission and drive once to (x, y, theta).
+  # State machine latches DONE on arrival; the process keeps running
+  # until SIGINT so the data logger can finish writing.
+  # goto: "400,0,0"
 
-arena:
-  in_arena: false
-  arena_width_mm: 2400.0
-  arena_length_mm: 3600.0
-  # Wall match tolerance for the validator.
-  validation_tol_mm: 100.0
-  validation_tol_deg: 5.0
-
-  # RANSAC presets. The active one is picked at boot by `in_arena`.
-  # Tune these without touching code.
-  ransac_arena:
-    # Clean rectangular arena, ~4 long walls, robot inside.
-    # Tight gates, high inlier requirement, hard cap at 4 lines.
-    inlier_thresh_mm: 25.0
-    max_iters_per_line: 200
-    inlier_points_req: 20
-    min_inlier_fraction: 0.10
-    max_lines: 5
+map:
+  # The reference map is built from ~50 lidar frames at boot via RANSAC.
+  # No hardcoded geometry — walls are whatever the lidar finds.
+  #
+  # Tuned for a 2.4m × 3.6m rectangular arena with home on a 2.4m short
+  # wall and 1-2 other robots inside the arena.
+  #
+  # Boot geometry — robot at home = (0, 0, 0) facing into the arena (+x
+  # along the 3.6m axis, +y across the 2.4m axis):
+  #   - Home wall  (2.4m):  behind robot, x ≈ -200   (close, ~150 beams)
+  #   - Far wall   (2.4m):  ahead of robot, x ≈ +3400 (farthest, ~40 beams)
+  #   - Side walls (3.6m):  y ≈ ±1200                 (~80 beams each)
+  # ~360 lidar beams total. The far wall is the limiting case for both
+  # inlier_points_req and min_inlier_fraction; the home wall (close,
+  # high beam count) is what max_lines + endpoint_padding most need to
+  # not over-split.
+  #
+  # Other robots span ~5-15 beams (300-500 mm of chord). Body footprint
+  # ≤ ~400 mm. We want them rejected even if they happen to present a
+  # flat edge — min_segment_len does the heavy lifting here since the
+  # shortest real wall is 2400 mm.
+  ransac:
+    # Lab arena walls are flat MDF/wood; lidar noise ≈ 5-10 mm at these
+    # ranges. Tightened from a generic 50 mm so anything outside the
+    # gate is sensor flicker or a non-wall object, not a noisy wall.
+    inlier_thresh_mm: 30.0
+    # More trials per line so the partial-occlusion case (robot parked
+    # at the midspan of a side wall) still finds the dominant line.
+    # Boot-only work; CPU is free here.
+    max_iters_per_line: 500
+    # Was 30 (a "far wall ~40 beams with slack" floor). Empirically the
+    # close-behind wall (~263 mm) plus 2-3 other robots in the arena
+    # leaves the far walls with 18-25 useful beams after occlusion.
+    # 18 still beats any single robot's chassis arc (~5-15 beams) plus
+    # the min_segment_len_mm gate below catches anything shorter than a
+    # real wall.
+    inlier_points_req: 18
+    # Was 0.08 (8 %). With ~3500 aggregated points after angle binning,
+    # 8 % required ~280 inliers per line — fine for the first two walls
+    # but starves RANSAC of the remaining walls once those points are
+    # erased. 0.04 (~140 inliers) keeps it going long enough to find
+    # walls 3 and 4, then naturally stops when only sensor noise remains.
+    min_inlier_fraction: 0.04
+    # 4 walls expected, +2 slack so a side wall split into two visible
+    # pieces by a robot at midspan still both fit.
+    max_lines: 6
     endpoint_padding_mm: 50.0
-    min_segment_len_mm: 500.0
-  ransac_room:
-    # Real-room operation: walls partially occluded by chairs, desks,
-    # PCs. Loose gates, lower inlier requirement, extract more
-    # candidates and reject short segments so furniture edges don't
-    # masquerade as walls.
-    inlier_thresh_mm: 40.0
-    max_iters_per_line: 300
-    inlier_points_req: 10
-    min_inlier_fraction: 0.02
-    max_lines: 10
-    endpoint_padding_mm: 50.0
+    # Was 1200 mm. Shortest full wall is 2400 mm; with several arena
+    # robots occluding a single wall it can split into two ~700-900 mm
+    # pieces. 800 mm still beats a 400 mm robot chassis by 2x while
+    # preserving the heavily-occluded long walls. min_inlier_fraction
+    # + inlier_thresh_mm are the safety net against a flat chassis edge
+    # masquerading as a wall.
     min_segment_len_mm: 800.0
 
 logger:
@@ -91,4 +97,13 @@ logger:
   scan_subsample: 2
 
 battery:
-  enabled: false
+  enabled: true
+
+filter:
+  ready: true
+  has_wrap_around: false
+  dominant_color: "158.751,140.711,190.567"
+  lower1: "149,54,41"
+  upper1: "168,195,225"
+  lower2: "0,0,0"
+  upper2: "0,0,0"

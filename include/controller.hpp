@@ -27,6 +27,9 @@ public:
         // PurePursuit pipeline, then latch DONE. Orthogonal to the
         // SEARCH-based mission; entered via go_to(), not start().
         GOTO,
+        // Hardcoded test sequence: forward 400 mm -> +90° turn + 300 mm ->
+        // back home. Entered via start_test().
+        TEST,
     };
 
     // What loop_control should do with the motors this tick.
@@ -46,6 +49,9 @@ public:
 
     // Begin the mission: IDLE -> SEARCH. No-op from any other state.
     void start();
+    // Begin the hardcoded TEST sequence: IDLE/DONE/SAFE_STOP -> TEST.
+    // First leg is planned on the next step() tick.
+    void start_test();
     void abort();
 
     // Load mission geometry from config (overrides constructor defaults).
@@ -64,10 +70,19 @@ public:
     // the goto completed.
     bool goto_arrived() const;
 
-    Command step(const Pos2D& pose, Dashboard& dash);
+    Command step(const Pos2D& pose, const Pose2DCov& cov, Dashboard& dash);
 
     State state() const;
     static const char* state_name(State s);
+
+    // True when the gripper is closed around a box (CARRY_HOME, RELEASE,
+    // TURN_AROUND/REALIGN). The closed gripper + held box sits in the
+    // lidar's forward arc inside OBSTACLE_DIST_MM, so the global obstacle
+    // gate must be disabled during these states or the robot stalls
+    // rotating in place on its own payload. SEARCH and APPROACH keep the
+    // gate enabled — there the gripper is open and the arms swing wide
+    // enough to clear the lidar plane.
+    bool is_carrying_payload() const;
 
 private:
     // Orchestrated subsystems (refs; lifetimes owned by main).
@@ -79,13 +94,18 @@ private:
     std::atomic<State> _state{State::IDLE};
     mutable std::mutex _m;
     std::chrono::steady_clock::time_point _state_entered;
-    std::chrono::steady_clock::time_point _last_replan_at;
 
     // Mission target.
     double _home_x      = 0.0;
     double _home_y      = 0.0;
     double _home_theta  = 0.0;
-    double _home_margin = 100.0;
+    double _home_margin = 50.0;
+    // SEARCH "ignore boxes already at home" filter: any detected box whose
+    // world position is within this radius of (_home_x, _home_y) is treated
+    // as a previously-delivered drop and skipped. Decoupled from
+    // _home_margin (the arrival tolerance) because a released box can
+    // settle well off the chassis-stop center.
+    double _home_skip_radius_mm = 500.0;
 
     // Geometry of the gripper. Box position when captured =
     //   robot.xy + _arm_length_mm * (cos theta, sin theta).
@@ -124,33 +144,46 @@ private:
     double _last_failed_target_y     = 0.0;
     std::chrono::steady_clock::time_point _last_failed_at;
 
-    bool   _search_path_active = false;
-    size_t _search_last_wp_idx = static_cast<size_t>(-1);
-
-    // Adaptive-subdivision search plan. Regenerated on every entry to SEARCH
-    // from the arena bounding box published by the calibrations module.
-    struct SearchPlan {
-        std::vector<std::pair<double, double>> waypoints;  // world-frame (x, y) mm
-        size_t idx = 0;
-        bool   at_waypoint = false;          // false = travelling, true = rotating
-        double rotation_start_theta = 0.0;
-        double accumulated_rotation = 0.0;
-        bool   valid = false;
+    // Simple search behavior:
+    //   1) LOOK_LEFT: rotate +90° from the heading at sweep start.
+    //   2) LOOK_RIGHT: rotate continuously CW until -90° from sweep start
+    //      (a 180° sweep through center to the right side).
+    //   3) FORWARD: drive _search_forward_target_mm at the current heading
+    //      (which is 90° CW of where the cycle started).
+    // The forward heading naturally rotates -90° each cycle, walking the
+    // search pattern around the arena. No 360° in-place spin: cox sees
+    // bounded rotation and consistent wall geometry through the sweep.
+    // Obstacle avoidance lives inside FORWARD: while app::obstacle_ahead
+    // is true the robot rotates in place to sidestep before resuming.
+    struct SimpleSearch {
+        enum class Phase { LOOK_LEFT, LOOK_RIGHT, FORWARD };
+        Phase  phase = Phase::LOOK_LEFT;
+        double forward_traveled_mm  = 0.0;
+        double rotation_accumulated = 0.0;   // signed; rad
+        // Last pose sample used for delta accumulation. Latched on first
+        // tick after entry and refreshed every tick thereafter.
+        double last_x     = 0.0;
+        double last_y     = 0.0;
+        double last_theta = 0.0;
+        bool   initialized = false;
     };
-    SearchPlan _search_plan;
+    SimpleSearch _ssearch;
 
     // Gripper sequencing inside APPROACH. On grabbable we first defer one
     // tick with v=0 (so the motor has a control cycle to decelerate from
     // chase speed), then fire the smooth-close on the next tick and wait
-    // for `captured` to flip.
+    // for servo_done(0) (with a 3s watchdog) before handing off to
+    // CARRY_HOME — earlier transitions started driving while the gripper
+    // was still slewing and the box would slip.
     bool _grip_stop_sent = false;       // tick N: motor told to stop
     bool _grip_fired     = false;       // tick N+1+: smooth close fired
     std::chrono::steady_clock::time_point _grip_fired_at;
 
-    // 180° pivot bookkeeping for TURN_AROUND.
-    bool   _turn_start_set = false;
-    double _turn_start_theta = 0.0;
-    double _turn_accumulated = 0.0;
+    // REALIGN obstacle-fallback latch. If the planned spline arc would
+    // drive the robot into a wall (app::obstacle_ahead persistently true),
+    // we abort the spline and finish the rotation in place at a gentle
+    // omega cap. Reset on each TURN_AROUND entry in _transition().
+    bool _realign_inplace = false;
 
     // GOTO state: latched single target pose. Set by go_to(), consumed once
     // on entry to State::GOTO inside _transition() to build the spline.
@@ -162,13 +195,32 @@ private:
     double _goto_v_max_mm_s = 60.0 * ROBOT_SPEED;    // a bit faster than SEARCH; tunable
     double _goto_margin_mm  = 40.0;    // tighter than SEARCH for lab accuracy
 
+    // TEST state: walks the hardcoded leg list defined in controller.cpp.
+    // _test_replan_needed is set on entry and after each leg arrival; the
+    // next step() tick consumes it to build the spline for the next leg.
+    size_t _test_step           = 0;
+    bool   _test_replan_needed  = false;
+    double _test_v_max_mm_s     = 70.0 * ROBOT_SPEED;
+    double _test_margin_mm      = 40.0;
+
+    // Halt-and-localize bookkeeping. When PurePursuit reports arrived for a
+    // closed-loop leg (TEST/GOTO), we latch _halting=true, command zero
+    // velocity, and wait HALT_MIN_MS..HALT_MAX_MS for σ_xy to settle (Cox
+    // folds ~3-5 fresh fixes into the KF while the wheels stand still and
+    // add no odometry noise). The Mahalanobis gate then checks the leg
+    // target sits inside the post-halt covariance before we advance.
+    // _halt_target_{x,y} snapshots the leg target at halt entry so the
+    // gate uses the same goal the controller was driving toward.
+    bool _halting = false;
+    std::chrono::steady_clock::time_point _halt_started;
+    double _halt_target_x = 0.0;
+    double _halt_target_y = 0.0;
+
     // Tunables. Conservative defaults; safe to tweak from main if needed.
-    double _search_omega        = 0.35 * ROBOT_SPEED;  // rad/s, ~20°/s so camera gets enough frames
-    double _search_min_dwell_s  = 2.0;   // bounce guard between failed approaches
-    double _search_v_max_mm_s   = 40.0 * ROBOT_SPEED;  // travel speed between waypoints
-    double _waypoint_margin_mm  = 80.0;  // arrival radius + wall standoff
-    double _box_detection_range_mm = 700.0;  // drives subdivision math
-    double _grip_settle_s       = 1.0;   // wait for `captured` after closing servo (vision needs ~10 frames to debounce)
+    double _search_omega        = 0.5 * ROBOT_SPEED;   // rad/s, ~29°/s spin cruise (ramp stays gentle via ACCEL_W_BASE)
+    double _search_min_dwell_s  = 0.0;   // engage on sight; failed-target skip handles bounce protection
+    double _search_v_forward_mm_s   = 60.0 * ROBOT_SPEED;  // forward speed during the FORWARD leg
+    double _search_forward_target_mm = 1000.0;             // 100 cm leg before each look-around rotation
     double _approach_v          = 30.0 * ROBOT_SPEED;  // mm/s, visual-servo cruise
     double _approach_k_omega    = 1.8;   // rad/s per rad of bearing
     double _approach_omega_max  = 1.2 * ROBOT_SPEED;   // clamp on steering rate
@@ -177,17 +229,17 @@ private:
     // of that point and the target is still not visible, give up and
     // fall back to SEARCH (rotate).
     double _dead_reckon_arrival_mm = 100.0;
-    double _release_v           = -40.0; // mm/s, backward
-    double _release_seconds     = 1.25;  // ~50 mm back-up at 40 mm/s
+    double _release_v           = -50.0; // mm/s, backward
+    double _release_seconds     = 4.0;   // ~80 mm back-up at 40 mm/s — clears the box from a subsequent in-place rotation, and covers the 1.6s servo OPEN slew with margin
     double _release_hard_timeout_s = 5.0;// give up if box stays stuck on arms
     double _search_timeout_s    = 60.0;
     double _approach_timeout_s  = 20.0;
     double _carry_timeout_s     = 90.0;
-    double _carry_replan_s      = 5.0;   // re-plan spline this often during CARRY_HOME
-    // Hard timeout on TURN_AROUND so a jammed motor doesn't wedge the
-    // mission. If we cannot accumulate ~π of rotation within this many
-    // seconds, give up and fall back to SEARCH so the mission can still
-    // make progress (or hit its own timeout/budget guard).
+    // Hard timeout on TURN_AROUND (now REALIGN-to-home_theta) so a jammed
+    // motor doesn't wedge the mission. If we cannot reach the target
+    // heading within this many seconds, give up and fall back to SEARCH
+    // so the mission can still make progress (or hit its own
+    // timeout/budget guard).
     double _turn_around_timeout_s = 8.0;
     // Failed-target avoidance: how close (mm) and how recent (s) a
     // SEARCH detection must be to a previously-failed target before we
@@ -200,18 +252,31 @@ private:
     // incoming one. Resets _state_entered.
     void _transition(State new_state, const Pos2D& current);
 
-    // CARRY_HOME entry: build a 3-point B-cubic spline (current → midpoint
-    // → home) and load it into the controller. Returns false if the
-    // spline generator returned an empty path (caller should route the
-    // mission to SAFE_STOP rather than silently bouncing through CARRY_HOME).
-    bool _plan_path_home(const Pos2D& current);
+    // CARRY_HOME entry: build a 5-control tangent-aware B-cubic spline
+    //   (start, start+L·start_tangent, midpoint+apex, goal-L·goal_tangent, goal)
+    // from `current` pose to the box-biased home position with
+    // path-tangent arrival heading. The midpoint with lateral apex offset
+    // forces 2D curvature so PurePursuit's cross-track term can drive the
+    // typical post-grab U-turn (a pure 4-control spline collapses to a
+    // 1D path on the start-heading axis in that case). Returns false if
+    // the spline generator returned an empty path (caller should route
+    // the mission to SAFE_STOP rather than silently bouncing).
 
     bool _plan_path_to(const Pos2D& current,
                        double gx, double gy, double gtheta,
                        double margin_mm, double v_max_mm_s);
 
-    // Build the adaptive-subdivision waypoint list from the calibrations
-    // module's published ArenaBounds. Sets _search_plan.valid = false if the
-    // bounds are not yet ready.
-    void _build_search_plan(const Pos2D& pose);
+    // Tangent-aware 4-control-point B-cubic spline:
+    //   (start, start + L·start_tangent, goal - L·goal_tangent, goal)
+    // Forces the spline's start tangent to match `current.theta` and its
+    // end tangent to match `gtheta`. The robot can drive the resulting
+    // arc forward without an in-place PRE_ROLL spin-up (the lookahead is
+    // already in front of the robot's heading) and without a TERMINAL_ROTATE
+    // alignment at the end (heading converges to gtheta during PURSUIT).
+    // Caller is responsible for choosing a `gtheta` that doesn't make the
+    // spline colinear with current heading on a flat axis — REALIGN adds
+    // a small lateral offset for that reason.
+    bool _plan_tangent_spline(const Pos2D& current,
+                              double gx, double gy, double gtheta,
+                              double margin_mm, double v_max_mm_s);
 };

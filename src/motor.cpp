@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 #include <global.hpp>
 #include <loggers.hpp>
@@ -16,12 +17,15 @@ namespace {
     // 400,000 sits comfortably above that.
     // (Gearing: motor → Z24 → Z40 on wheel shaft, 5/3 reduction.)
     constexpr double MAX_TICKS_PER_SEC = 400000.0;
-    // Hard ceiling on commanded per-wheel pps sent to the Arduino.
-    // Calibrated to cap wheel-frame speed at ~400 mm/s under the
-    // current TICKS_PER_MM (71.48), leaving ~54 % headroom over the
-    // controller's worst-case wheel-frame speed (~260 mm/s).
-    //   pps cap = 400 mm/s × TICKS_PER_MM = 28,592 ticks/s = 286 pps100.
-    constexpr double MAX_CMD_PPS100    = 286.0;
+    // Hard ceiling on commanded per-wheel pps sent to the Arduino. At
+    // ~119 ticks/mm this caps wheel-frame speed at ~504 mm/s — roughly a
+    // small cat's walking pace — with chassis ω-cap headroom of
+    // 2.0 · 504 / 185 ≈ 5.45 rad/s. The motor nameplate is ~2660 mm/s at
+    // the shaft, so this is still well inside the physical envelope, but
+    // beyond ~500 mm/s the chassis starts exhibiting noticeable battery
+    // sag and wheel-slip on smooth surfaces. Don't push past ~720 without
+    // revisiting those.
+    constexpr double MAX_CMD_PPS100    = 600.0;
     // jitter margin
     constexpr double SAFETY_FACTOR     = 2.0;
     // Cap on the time window used for max_delta. Prevents the per-tick
@@ -29,37 +33,45 @@ namespace {
     // burst of bad SPI reads — otherwise bit-flipped values eventually
     // fit under the threshold and corrupt the encoder accumulator.
     constexpr double MAX_DT_S          = 0.200;
-    constexpr auto   LOOP_PERIOD       = std::chrono::milliseconds(20);
+    constexpr auto   LOOP_PERIOD       = std::chrono::milliseconds(10);
 
-    // Acceleration limits — robot ramps toward set_velocity() target at these rates.
-    // Baseline values scale with ROBOT_SPEED so the whole motion stack
-    // (velocity caps + accel ramps) speeds up or slows down together.
-    constexpr double ACCEL_V_MM_S2     = 150.0 * ROBOT_SPEED;  // forward accel
-    constexpr double ACCEL_W_RAD_S2    = 1.5   * ROBOT_SPEED;  // yaw accel
-    constexpr double DT_S              = std::chrono::duration<double>(LOOP_PERIOD).count();
-    constexpr double V_STEP_PER_TICK   = ACCEL_V_MM_S2  * DT_S;
-    constexpr double W_STEP_PER_TICK   = ACCEL_W_RAD_S2 * DT_S;
+    // Acceleration baselines (per second). The actual per-tick step is
+    // computed inside the motor IO loop using the runtime ROBOT_SPEED,
+    // because ROBOT_SPEED is set from config in main() and these constants
+    // would otherwise capture the static-init default before the config
+    // load runs.
+    constexpr double ACCEL_V_BASE_MM_S2  = 350.0;  // forward accel @ ROBOT_SPEED=1
+    constexpr double ACCEL_W_BASE_RAD_S2 =   1.5;  // yaw accel     @ ROBOT_SPEED=1
+    constexpr double DT_S = std::chrono::duration<double>(LOOP_PERIOD).count();
 }
 
-constexpr double Motor::TICKS_PER_MM;
+constexpr double Motor::LEFT_TICKS_PER_MM;
+constexpr double Motor::RIGHT_TICKS_PER_MM;
 constexpr double Motor::WHEELBASE_MM;
 
 namespace {
     // Arduino SPI speed unit is "100 pulses/sec".
-    //   pulses_per_sec = mm/s * TICKS_PER_MM
-    //   pps100         = pulses_per_sec / 100 = mm/s * TICKS_PER_MM / 100
-    constexpr double PPS100_PER_MM_S = Motor::TICKS_PER_MM / 100.0;
+    //   pulses_per_sec = mm/s * ticks_per_mm
+    //   pps100         = pulses_per_sec / 100
+    // Per-wheel so a 2% wheel asymmetry doesn't bias either the commanded
+    // velocity or the resulting heading.
+    constexpr double PPS100_PER_MM_S_LEFT  = Motor::LEFT_TICKS_PER_MM  / 100.0;
+    constexpr double PPS100_PER_MM_S_RIGHT = Motor::RIGHT_TICKS_PER_MM / 100.0;
 
-    // Chassis-level reach derived from the per-wheel pps ceiling.
-    // Used to clamp _v_target/_w_target and the integrator so a stuck-high
-    // command can't wind _v_cur up past what the wheels can physically do.
-    constexpr double MAX_V_MM_S  = MAX_CMD_PPS100 / PPS100_PER_MM_S;
+    // Chassis-level reach derived from the per-wheel pps ceiling. Use the
+    // slower wheel (larger ticks/mm) so neither wheel ever saturates: when
+    // commanded at MAX_V_MM_S, the slow wheel sits exactly at MAX_CMD_PPS100
+    // and the fast wheel has headroom.
+    constexpr double SLOWER_PPS100_PER_MM_S =
+        (PPS100_PER_MM_S_LEFT > PPS100_PER_MM_S_RIGHT)
+            ? PPS100_PER_MM_S_LEFT : PPS100_PER_MM_S_RIGHT;
+    constexpr double MAX_V_MM_S  = MAX_CMD_PPS100 / SLOWER_PPS100_PER_MM_S;
     constexpr double MAX_W_RAD_S = 2.0 * MAX_V_MM_S / Motor::WHEELBASE_MM;
 
-    inline int16_t mm_s_to_pps100(double mm_s) {
+    inline int16_t mm_s_to_pps100(double mm_s, double pps100_per_mm_s) {
         // Hard per-wheel pps ceiling — MAX_CMD_PPS100 (~680) is far below
         // int16 range, so this clamp also keeps the cast well-defined.
-        long rounded = std::lround(mm_s * PPS100_PER_MM_S);
+        long rounded = std::lround(mm_s * pps100_per_mm_s);
         const long cap = static_cast<long>(MAX_CMD_PPS100);
         if (rounded >  cap) rounded =  cap;
         if (rounded < -cap) rounded = -cap;
@@ -80,7 +92,56 @@ bool Motor::start() {
           LOGE("Motor") << "wiringPiSPISetup(1) failed";
           return false;
       }
-    MotorDataType md = {0, 0, 0, 0, 0, 0};
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    MotorDataType md;
+    // Two-stage zero flood. The SPI protocol has no reset/control byte, so
+    // the only way to clear any stale setpoint the Arduino is still acting
+    // on (from a prior Pi run or a bus-init glitch) is to overwrite it with
+    // zero commands. The first stage hammers zero frames back-to-back so
+    // the Arduino's command latch can't run on a stale value between
+    // frames; the second stage holds zero for long enough that any
+    // residual wheel motion has time to dissipate before the settle poll.
+    constexpr int   ZERO_FLOOD_FRAMES = 20;
+    for (int i = 0; i < ZERO_FLOOD_FRAMES; ++i) {
+        std::memset(&md, 0, sizeof(md));
+        Send_Read_Motor_Data(&md);
+    }
+    constexpr int   ZERO_FRAMES = 40;
+    constexpr auto  ZERO_GAP    = std::chrono::milliseconds(5);   // 40 × 5ms = 200ms
+    for (int i = 0; i < ZERO_FRAMES; ++i) {
+        std::memset(&md, 0, sizeof(md));
+        Send_Read_Motor_Data(&md);
+        std::this_thread::sleep_for(ZERO_GAP);
+    }
+
+    constexpr auto  POLL_GAP        = std::chrono::milliseconds(50);
+    constexpr auto  POLL_TIMEOUT    = std::chrono::seconds(3);
+    constexpr int32_t REST_TICK_TOL = 2;   // ~17 µm at 119 ticks/mm — sensor noise
+    const auto t_poll_start = std::chrono::steady_clock::now();
+    int32_t prev_l = 0, prev_r = 0;
+    bool first = true;
+    while (true) {
+        std::memset(&md, 0, sizeof(md));
+        Send_Read_Motor_Data(&md);
+        if (!first) {
+            const int32_t dl = std::abs(md.Encoder_M1 - prev_l);
+            const int32_t dr = std::abs(md.Encoder_M2 - prev_r);
+            if (dl <= REST_TICK_TOL && dr <= REST_TICK_TOL) break;
+        }
+        prev_l = md.Encoder_M1;
+        prev_r = md.Encoder_M2;
+        first = false;
+        if (std::chrono::steady_clock::now() - t_poll_start > POLL_TIMEOUT) {
+            LOGE("Motor") << "Wheels still moving after "
+                          << POLL_TIMEOUT.count()
+                          << "s of zero frames — proceeding anyway.";
+            break;
+        }
+        std::this_thread::sleep_for(POLL_GAP);
+    }
+
+    // Final read for the encoder seed in the settled state.
+    std::memset(&md, 0, sizeof(md));
     Send_Read_Motor_Data(&md);
     const int32_t seed_l = md.Encoder_M1;
     const int32_t seed_r = md.Encoder_M2;
@@ -97,7 +158,8 @@ bool Motor::start() {
     _io = std::thread(&Motor::_loop_motor_read_write, this);
     LOG("Motor") << "Started Motor with seed encoders: ("
                  << seed_l << ", " << seed_r
-                 << ") TICKS_PER_MM=" << TICKS_PER_MM
+                 << ") LEFT_TICKS_PER_MM=" << LEFT_TICKS_PER_MM
+                 << " RIGHT_TICKS_PER_MM=" << RIGHT_TICKS_PER_MM
                  << " WHEELBASE_MM=" << WHEELBASE_MM;
     return true;
 }
@@ -136,8 +198,8 @@ void Motor::get_encoders(double& left_mm, double& right_mm) const {
     std::lock_guard<std::mutex> lock(_mutex_motor);
     const int64_t l_ticks =   _enc_left_acc;
     const int64_t r_ticks = -_enc_right_acc;
-    left_mm  = static_cast<double>(l_ticks) / TICKS_PER_MM;
-    right_mm = static_cast<double>(r_ticks) / TICKS_PER_MM;
+    left_mm  = static_cast<double>(l_ticks) / LEFT_TICKS_PER_MM;
+    right_mm = static_cast<double>(r_ticks) / RIGHT_TICKS_PER_MM;
 }
 
 void Motor::_loop_motor_read_write() {
@@ -148,25 +210,39 @@ void Motor::_loop_motor_read_write() {
             Send_Read_Motor_Data(&md);
         }
     } zero_on_exit;
-    while (_motor_running.load() && !app::shutdown) {
+    // Loop life is governed by _motor_running alone. Do NOT also gate on
+    // app::shutdown: when SIGINT flips that flag, the IO loop must keep
+    // running so Motor::stop() (called via ~Motor from loop_control's
+    // teardown) can drive _v_target/_w_target to 0 and let the slew
+    // limiter ramp the wheels down. Exiting here on shutdown would freeze
+    // _v_cur at whatever it was and then ZeroFrameOnExit would slam the
+    // Arduino setpoint to 0 in one tick — the source of the stop twitch.
+    while (_motor_running.load()) {
         // for smoother v changes
         int32_t last_l, last_r;
         std::chrono::steady_clock::time_point last_ts;
         int16_t set_l, set_r;
+        // Per-tick accel step is recomputed from the runtime ROBOT_SPEED so a
+        // mid-run tweak (or the config-driven boot value) propagates without
+        // needing to recompile.
+        const double v_step = ACCEL_V_BASE_MM_S2  * ROBOT_SPEED * DT_S;
+        const double w_step = ACCEL_W_BASE_RAD_S2 * ROBOT_SPEED * DT_S;
         {
             std::lock_guard<std::mutex> lock(_mutex_motor);
 
             // Nudge current command toward target by at most one accel step per tick.
-            _v_cur += std::max(-V_STEP_PER_TICK, std::min(_v_target - _v_cur, V_STEP_PER_TICK));
-            _w_cur += std::max(-W_STEP_PER_TICK, std::min(_w_target - _w_cur, W_STEP_PER_TICK));
+            _v_cur += std::max(-v_step, std::min(_v_target - _v_cur, v_step));
+            _w_cur += std::max(-w_step, std::min(_w_target - _w_cur, w_step));
             // Anti-windup: keep the integrator within physical chassis reach.
             _v_cur = std::max(-MAX_V_MM_S,  std::min(_v_cur, MAX_V_MM_S));
             _w_cur = std::max(-MAX_W_RAD_S, std::min(_w_cur, MAX_W_RAD_S));
 
             // Diff-drive IK; right wheel is wired backwards, so invert its sign.
             const double half_b = 0.5 * WHEELBASE_MM;
-            set_l =  mm_s_to_pps100(_v_cur - _w_cur * half_b);
-            set_r = -mm_s_to_pps100(_v_cur + _w_cur * half_b);
+            set_l =  mm_s_to_pps100(_v_cur - _w_cur * half_b,
+                                    PPS100_PER_MM_S_LEFT);
+            set_r = -mm_s_to_pps100(_v_cur + _w_cur * half_b,
+                                    PPS100_PER_MM_S_RIGHT);
 
             last_l  = _last_acc_left;
             last_r  = _last_acc_right;
