@@ -12,7 +12,7 @@ camera:
   show_debug_view: true
 
 robot:
-  speed: 3.6
+  speed: 4.5
   back_extent_mm:  150.0   # rear of chassis behind LIDAR
   left_extent_mm:   70.0
   right_extent_mm:  70.0
