@@ -1,6 +1,7 @@
 #include <data_logger.hpp>
 
 #include <cmath>
+#include <cstring>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -13,7 +14,8 @@ namespace {
 
 std::string now_stamp() {
     std::time_t t = std::time(nullptr);
-    std::tm tm{};
+    std::tm tm;
+    std::memset(&tm, 0, sizeof(tm));
     localtime_r(&t, &tm);
     // strftime instead of std::put_time — the Pi's libstdc++ is old enough
     // that put_time is missing from <iomanip> despite -std=c++11.
@@ -24,7 +26,8 @@ std::string now_stamp() {
 
 bool ensure_dir(const std::string& path) {
     if (path.empty()) return true;
-    struct stat st{};
+    struct stat st;
+    std::memset(&st, 0, sizeof(st));
     if (stat(path.c_str(), &st) == 0) {
         return S_ISDIR(st.st_mode);
     }
