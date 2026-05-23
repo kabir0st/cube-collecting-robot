@@ -20,9 +20,9 @@
 
 namespace {
 
-    const float ENDPOINT_SLACK_MM = 50.0f;     // absolute slack along segment
-    const float MAX_GATE_MM = 150.0f;
-    const float MIN_GATE_MM  = 8.0f;
+    const float ENDPOINT_SLACK_MM = 100.0f;     // absolute slack along segment
+    const float MAX_GATE_MM = 100.0f;
+    const float MIN_GATE_MM  = 12.0f;
 
     // Shared with calibrations.cpp::find_walls via include/global.hpp so
     // the reference map and the per-tick scans use the same body-frame
@@ -68,16 +68,13 @@ namespace {
 CoxScanMatchAlgorithm::CoxScanMatchAlgorithm(const std::vector<LineSeg> &map,
                                             LidarData& lidar_data_)
         : walls(map),
-            // 50 iters with tol_d_xy=3 mm: covers cold-seed cases without
-            // wasting cycles on already-tight matches (typical hot-seed
-            // convergence is ~5-10 iters).
             max_itr(50),
             lidar_data(lidar_data_),
             sigma_r(std::max(5.0f, static_cast<float>(lidar_data_.sensor_noise.load()))),
             gate_k(4.0f),
             // Realistic tolerances: lidar noise is ~10-20 mm so demanding
             // < 1.5 mm step convergence just exhausts the iter budget.
-            tol_d_xy(3.0f),
+            tol_d_xy(5.0f),
             tol_d_a(2.0e-3f) {
         pts_lidar.resize(2, 4096);
         pts_world.resize(2, 4096);
@@ -132,7 +129,7 @@ PosEstimate CoxScanMatchAlgorithm::estimate(Pos2D init_pos) {
 
     for (int iter = 0; iter < max_itr; ++iter) {
         // Slower decay (0.75) so the gate stays wide for the first few
-        // iterations — gives a cold seed (50-100 mm off) room to find the
+        // iterations gives a cold seed (50-100 mm off) room to find the
         // right correspondences before tightening for accuracy.
         const float gate = std::max(final_gate,
                                     start_gate * std::pow(0.75f,
@@ -229,7 +226,7 @@ PosEstimate CoxScanMatchAlgorithm::estimate(Pos2D init_pos) {
         // Information-matrix condition number. A is symmetric PSD; the
         // SelfAdjointEigenSolver gives sorted real eigenvalues. A long
         // corridor (one wall visible) produces an A whose smallest
-        // eigenvalue is dominated by the ridge -- so the ratio explodes
+        // eigenvalue is dominated by the ridge so the ratio explodes
         // and cox_can_fuse() refuses to mix that estimate into the KF.
         Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> esolve(A);
         if (esolve.info() == Eigen::Success) {
@@ -259,13 +256,13 @@ namespace {
 //   cox_strong_fix(): strict gate, used only to accept a relocalize sweep
 //   winner. Because we're about to kf.reset() to it (blowing away prior
 //   state), we need high confidence — there `converged` IS required.
-constexpr int   MIN_INLIERS_FUSE     = 30;
+constexpr int   MIN_INLIERS_FUSE     = 60;
 // Reject rank-deficient information matrices. With the ridge term (1e-3)
 // floor on the smallest eigenvalue, a well-observed scan typically has
 // cond ~ 1e2-1e3; a long-corridor / single-wall scan blows past 1e6. Set
 // the gate well above the typical "good" upper bound to avoid false
 // rejects while still catching geometric degeneracy.
-constexpr float MAX_COND_FUSE        = 1.0e5f;
+constexpr float MAX_COND_FUSE        = 1.0e4f;
 
 constexpr int   MIN_INLIERS_FIX      = 30;
 constexpr float MAX_SIGMA_XY_FIX     = 30.0f;   // mm  (~3 cm 1sigma)
@@ -303,7 +300,7 @@ bool relocalize_local_sweep(CoxScanMatchAlgorithm& scan_cox,
     // Window large enough to absorb a meaningful shove but small enough
     // to finish in ~1-2 s. Grid step picked to fit inside cox's basin of
     // convergence on the arena map (~100 mm / ~15 deg).
-    constexpr double HALF_XY_MM    = 300.0;
+    constexpr double HALF_XY_MM    = 400.0;
     constexpr double GRID_MM       = 100.0;
     constexpr double HALF_THETA    = M_PI / 4.0;        // ±45°
     constexpr double GRID_RAD      = 15.0 * M_PI / 180.0;
@@ -366,7 +363,7 @@ void loop_scan_cox_estimation(
     // corrections push the KF's own confidence past safety. Stricter than
     // these and a brief cox dropout false-triggers a sweep; looser and
     // the robot drives blind for too long before recovering.
-    constexpr double KF_LOST_SIGMA_XY_MM = 200.0;
+    constexpr double KF_LOST_SIGMA_XY_MM = 300.0;
     constexpr double KF_LOST_SIGMA_TH    = 15.0 * M_PI / 180.0;
 
     CoxScanMatchAlgorithm scan_cox(ref_map, lidar_data);
@@ -385,8 +382,7 @@ void loop_scan_cox_estimation(
 
         // 1. ALWAYS-FUSE policy. If cox even minimally converged with a
         //    handful of inliers, hand it to the KF. A noisy cox produces a
-        //    large R, the KF gain shrinks, the correction is weak -- exactly
-        //    what we want. Hard binary trust gates were the old mistake.
+        //    large R, the KF gain shrinks, the correction is weak
         const bool fuse = cox_can_fuse(est);
         if (fuse) {
             Pos2D z;

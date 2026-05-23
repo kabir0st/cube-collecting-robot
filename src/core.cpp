@@ -80,7 +80,7 @@ void loop_localization(Dashboard& dash,
     // frames, comfortably above FRAME_COUNT=50, so find_walls sees a
     // fully-populated buffer for RANSAC wall extraction.
     LOG("Main") << "Collecting lidar frames for map build...";
-    std::this_thread::sleep_for(std::chrono::seconds(12));
+    std::this_thread::sleep_for(std::chrono::seconds(10));
 
     const double measured_noise = get_lidar_sensor_noise(lidar_data);
     lidar_data.sensor_noise.store(measured_noise);
@@ -148,7 +148,7 @@ void loop_control(Dashboard& dash,
     // here) until cox has produced a fix that the KF actually accepted.
     // Otherwise the SM kicks off on the seeded (0,0,0) pose and the robot
     // drives before localization is real. The 15 s timeout exists so a
-    // misconfigured map / bad scan doesn't hang forever — we fall through
+    // misconfigured map / bad scan doesn't hang forever we fall through
     // and drive on dead reckoning, matching the pre-gate behaviour.
     {
         constexpr auto WAIT_TIMEOUT = std::chrono::seconds(15);
@@ -228,17 +228,17 @@ void loop_control(Dashboard& dash,
                 break;
         }
         // Hold motors while cox is running a relocalize sweep -- driving on
-        // a stale pose is worse than standing still. Also hold on a forward-
-        // arc obstacle: loop_collect_frames sets app::obstacle_ahead when
-        // any beam inside ±OBSTACLE_ARC_HALF_DEG is closer than
-        // OBSTACLE_DIST_MM. Reverse motion (v < 0) is allowed so the robot
-        // can back out of a near-miss.
+        // a stale pose is worse than standing still. On a forward-arc
+        // obstacle (loop_collect_frames sets app::obstacle_ahead when any
+        // beam inside ±OBSTACLE_ARC_HALF_DEG is closer than OBSTACLE_DIST_MM)
+        // we zero forward velocity but KEEP w_cmd so the state machine can
+        // rotate away from the obstacle ("sidestep"). Reverse motion is
+        // also allowed so the robot can back out of a near-miss.
         if (app::relocalizing.load()) {
             v_cmd = 0.0;
             w_cmd = 0.0;
         } else if (app::obstacle_ahead.load() && v_cmd > 0.0) {
             v_cmd = 0.0;
-            w_cmd = 0.0;
         }
 
         motor.set_velocity(v_cmd, w_cmd);

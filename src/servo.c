@@ -13,7 +13,7 @@ enum {
 	// servo to actually see each intermediate command. A direct jump from
 	// 140° to 75° draws enough current during the slew to brown out the 5 V
 	// rail and hang the SoC -- step gradually instead.
-	STEP_DEG   = 10,
+	STEP_DEG   = 1,
 	STEP_MS    = 20
 };
 

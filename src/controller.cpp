@@ -241,15 +241,12 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
 
     if (new_state == State::SEARCH) {
         // Fresh SEARCH session: previous skip-streak log is no longer
-        // relevant; let the first at-home detection log again. Drop any
-        // latched APPROACH target so the next approach starts from a
-        // fresh vision lock. Invalidate the waypoint plan so it regenerates
-        // — this is what enables multi-box re-search from a new pose.
-        _search_skip_streak = false;
-        _last_target_valid  = false;
-        _search_path_active = false;
-        _search_last_wp_idx = static_cast<size_t>(-1);
-        _search_plan.valid  = false;
+        // relevant; drop any latched APPROACH target; reset the simple
+        // forward-then-rotate search state so the next entry starts a new
+        // forward leg.
+        _search_skip_streak    = false;
+        _last_target_valid     = false;
+        _ssearch.initialized   = false;
         servo_release();
     }
 
@@ -396,24 +393,6 @@ bool StateMachine::_plan_path_to(const Pos2D& current,
     return true;
 }
 
-void StateMachine::_build_search_plan(const Pos2D& /*pose*/) {
-    calib::MapBounds ab;
-    if (!calib::get_map_bounds(ab)) {
-        _search_plan.valid = false;
-        return;
-    }
-    _search_plan.waypoints.clear();
-    _search_plan.waypoints.emplace_back(0.5 * (ab.min_x + ab.max_x),
-                                        0.5 * (ab.min_y + ab.max_y));
-    _search_plan.idx                  = 0;
-    _search_plan.at_waypoint          = false;
-    _search_plan.accumulated_rotation = 0.0;
-    _search_plan.valid                = true;
-    LOG("Mission") << "Search plan: center-only at ("
-                   << _search_plan.waypoints[0].first << ", "
-                   << _search_plan.waypoints[0].second << ")";
-}
-
 StateMachine::Command StateMachine::step(const Pos2D& pose,
                                          const Pose2DCov& cov,
                                          Dashboard& dash) {
@@ -549,62 +528,64 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 _search_skip_streak = false;
             }
 
-            // Adaptive-subdivision waypoint walker. Plan is rebuilt on every
-            // SEARCH entry (see _transition). If the map bounds aren't
-            // published yet we just spin in place until they are.
-            if (!_search_plan.valid) {
-                _build_search_plan(pose);
-            }
-            if (!_search_plan.valid) {
-                out.mode = Command::Mode::DIRECT;
-                out.v_mm_s = 0.0;
-                out.omega_rad_s = _search_omega;
-                break;
-            }
-
-            if (_search_plan.idx >= _search_plan.waypoints.size()) {
-                // Visited every waypoint without seeing a box. Mission done.
-                _transition(State::DONE, pose);
-                out.mode = Command::Mode::STOP;
-                break;
+            // Very-simple search: forward _search_forward_target_mm, then
+            // rotate 2π in place, repeat. Sidestep on lidar obstacle.
+            if (!_ssearch.initialized) {
+                _ssearch.phase = SimpleSearch::Phase::FORWARD;
+                _ssearch.forward_traveled_mm  = 0.0;
+                _ssearch.rotation_accumulated = 0.0;
+                _ssearch.last_x     = pose.x;
+                _ssearch.last_y     = pose.y;
+                _ssearch.last_theta = pose.theta;
+                _ssearch.initialized = true;
             }
 
-            const double wx = _search_plan.waypoints[_search_plan.idx].first;
-            const double wy = _search_plan.waypoints[_search_plan.idx].second;
-
-            if (!_search_plan.at_waypoint) {
-                const double dist = std::hypot(wx - pose.x, wy - pose.y);
-                const bool arrived = (dist <= _waypoint_margin_mm) ||
-                                     (_search_path_active && _controller.has_arrived());
-                if (arrived) {
-                    _search_plan.at_waypoint = true;
-                    _search_plan.rotation_start_theta = pose.theta;
-                    _search_plan.accumulated_rotation = 0.0;
-                    _search_path_active = false;
-                    _controller.abort();
-                } else {
-                    if (!_search_path_active || _search_last_wp_idx != _search_plan.idx) {
-                        const double gtheta = std::atan2(wy - pose.y, wx - pose.x);
-                        if (_plan_path_to(pose, wx, wy, gtheta,
-                                          _waypoint_margin_mm,
-                                          _search_v_max_mm_s)) {
-                            _search_path_active = true;
-                            _search_last_wp_idx = _search_plan.idx;
-                        } else {
-                            _search_path_active = false;
-                        }
-                    }
-                    out.mode = _search_path_active ? Command::Mode::PATH_FOLLOW
-                                                   : Command::Mode::STOP;
+            if (_ssearch.phase == SimpleSearch::Phase::FORWARD) {
+                // Obstacle in the forward arc -> rotate in place to clear
+                // it. Accumulate nothing on the forward odometer; the leg
+                // resumes once the path is open.
+                if (app::obstacle_ahead.load()) {
+                    _ssearch.last_x     = pose.x;
+                    _ssearch.last_y     = pose.y;
+                    _ssearch.last_theta = pose.theta;
+                    out.mode = Command::Mode::DIRECT;
+                    out.v_mm_s = 0.0;
+                    out.omega_rad_s = _search_omega;
                     break;
                 }
+                const double dx = pose.x - _ssearch.last_x;
+                const double dy = pose.y - _ssearch.last_y;
+                _ssearch.forward_traveled_mm += std::hypot(dx, dy);
+                _ssearch.last_x     = pose.x;
+                _ssearch.last_y     = pose.y;
+                _ssearch.last_theta = pose.theta;
+
+                if (_ssearch.forward_traveled_mm >= _search_forward_target_mm) {
+                    _ssearch.phase = SimpleSearch::Phase::ROTATE;
+                    _ssearch.rotation_accumulated = 0.0;
+                    _ssearch.last_theta = pose.theta;
+                    out.mode = Command::Mode::DIRECT;
+                    out.v_mm_s = 0.0;
+                    out.omega_rad_s = _search_omega;
+                    break;
+                }
+                out.mode = Command::Mode::DIRECT;
+                out.v_mm_s = _search_v_forward_mm_s;
+                out.omega_rad_s = 0.0;
+                break;
             }
 
-            // at_waypoint == true: rotate in place forever. Center-only plan
-            // means there's nowhere to advance to; we keep spinning until the
-            // tracker latches a target or _search_timeout_s trips us to
-            // SAFE_STOP.
-            _search_plan.rotation_start_theta = pose.theta;
+            // Phase::ROTATE: spin in place until ~2π accumulated, then start
+            // a new forward leg.
+            const double dth = std::abs(wrap_pi(pose.theta - _ssearch.last_theta));
+            _ssearch.rotation_accumulated += dth;
+            _ssearch.last_theta = pose.theta;
+            if (_ssearch.rotation_accumulated >= 2.0 * M_PI) {
+                _ssearch.phase = SimpleSearch::Phase::FORWARD;
+                _ssearch.forward_traveled_mm = 0.0;
+                _ssearch.last_x = pose.x;
+                _ssearch.last_y = pose.y;
+            }
             out.mode = Command::Mode::DIRECT;
             out.v_mm_s = 0.0;
             out.omega_rad_s = _search_omega;
@@ -612,39 +593,34 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
         }
 
         case State::APPROACH: {
-            // 1. Vision tracker latched a hold (10-frame debounce on grip ROI).
-            //    Always carry home before releasing, even if we happen to be
-            //    inside the home zone right now — releasing here would drop
-            //    the box where we picked it up and looks like an instant
-            //    grab-then-release to the operator.
-            if (snap.captured) {
-                { std::lock_guard<std::mutex> lk(_m); _approach_attempts = 0; }
-                _transition(State::CARRY_HOME, pose);
-                out.mode = Command::Mode::PATH_FOLLOW;
-                break;
-            }
-
-            // 2. Servo already fired — sit still and wait for `captured` to
-            //    latch. If it never does within _grip_settle_s the close
-            //    didn't catch; re-open, burn an attempt, go back to SEARCH.
+            // 1. Servo grab already fired. Treat the grip as committed: once
+            //    the jaws are closing, the gripper arms occlude the box and
+            //    `snap.captured` becomes unreliable, so we don't wait on
+            //    vision. Hold v=0 for _grip_settle_s while the servo
+            //    physically slews, then transition straight to CARRY_HOME.
+            //    Worst case (grab missed) the robot drags nothing and opens
+            //    an empty gripper at home — far better than the previous
+            //    oscillation where vision flicker spammed grab/release.
             if (_grip_fired) {
-                if (seconds_since(_grip_fired_at) > _grip_settle_s) {
-                    servo_release();
-                    _grip_fired = false;
-                    { std::lock_guard<std::mutex> lk(_m); ++_approach_attempts; }
-                    if (_last_target_valid) {
-                        _last_failed_target_valid = true;
-                        _last_failed_target_x = _last_target_x;
-                        _last_failed_target_y = _last_target_y;
-                        _last_failed_at = std::chrono::steady_clock::now();
-                    }
-                    _transition(State::SEARCH, pose);
-                    out.mode = Command::Mode::STOP;
+                if (seconds_since(_grip_fired_at) >= _grip_settle_s) {
+                    { std::lock_guard<std::mutex> lk(_m); _approach_attempts = 0; }
+                    _transition(State::CARRY_HOME, pose);
+                    out.mode = Command::Mode::PATH_FOLLOW;
                     break;
                 }
                 out.mode = Command::Mode::DIRECT;
                 out.v_mm_s = 0.0;
                 out.omega_rad_s = 0.0;
+                break;
+            }
+
+            // 2. Pre-grip captured (rare: e.g. the box rolls into the
+            //    retention ROI before the grab gate triggers). Still go via
+            //    CARRY_HOME unconditionally so we never instant-release.
+            if (snap.captured) {
+                { std::lock_guard<std::mutex> lk(_m); _approach_attempts = 0; }
+                _transition(State::CARRY_HOME, pose);
+                out.mode = Command::Mode::PATH_FOLLOW;
                 break;
             }
 
@@ -742,17 +718,12 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
         }
 
         case State::CARRY_HOME: {
-            if (!snap.captured) {
-                // Box slipped out of the grip mid-drag (debounced by the
-                // tracker's retention-ROI hysteresis, so single-frame
-                // glitches don't trigger this).
-                _transition(State::SEARCH, pose);
-                out.mode = Command::Mode::DIRECT;
-                out.v_mm_s = 0.0;
-                out.omega_rad_s = _search_omega;
-                break;
-            }
-
+            // We do NOT bail to SEARCH on !snap.captured here. Once the
+            // gripper closes, the arms occlude the box and the tracker
+            // routinely loses the lock — the prior bail caused
+            // CARRY_HOME → SEARCH → servo_release() → re-grab → repeat
+            // oscillation that looked like grabs/releases during turns.
+            // The drive-home plan is committed; _carry_timeout_s caps it.
             if (_controller.has_arrived()) {
                 _transition(State::RELEASE, pose);
                 out.mode = Command::Mode::DIRECT;
@@ -1015,11 +986,16 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
              std::string(out.mode == Command::Mode::PATH_FOLLOW ? "path" :
                          out.mode == Command::Mode::DIRECT      ? "direct" :
                                                                   "stop"));
-    dash.set("Mission", "search_wp",
-             _search_plan.valid
-                 ? (std::to_string(_search_plan.idx) + "/" +
-                    std::to_string(_search_plan.waypoints.size()))
-                 : std::string("-"));
+    if (_ssearch.initialized) {
+        dash.set("Mission", "search",
+                 std::string(_ssearch.phase == SimpleSearch::Phase::FORWARD
+                                 ? "FWD" : "ROT"));
+        dash.set("Mission", "fwd_mm", _ssearch.forward_traveled_mm);
+        dash.set("Mission", "rot_deg",
+                 _ssearch.rotation_accumulated * 180.0 / M_PI);
+    } else {
+        dash.set("Mission", "search", std::string("-"));
+    }
 
     return out;
 }

@@ -130,20 +130,24 @@ private:
     double _last_failed_target_y     = 0.0;
     std::chrono::steady_clock::time_point _last_failed_at;
 
-    bool   _search_path_active = false;
-    size_t _search_last_wp_idx = static_cast<size_t>(-1);
-
-    // Adaptive-subdivision search plan. Regenerated on every entry to SEARCH
-    // from the map bounding box published by the calibrations module.
-    struct SearchPlan {
-        std::vector<std::pair<double, double>> waypoints;  // world-frame (x, y) mm
-        size_t idx = 0;
-        bool   at_waypoint = false;          // false = travelling, true = rotating
-        double rotation_start_theta = 0.0;
-        double accumulated_rotation = 0.0;
-        bool   valid = false;
+    // Very-simple search behavior: drive forward _search_forward_target_mm,
+    // then rotate 2π in place, repeat. No map waypoints, no spline planning.
+    // Obstacle avoidance lives inside FORWARD: while app::obstacle_ahead is
+    // true the robot rotates in place to sidestep before resuming forward
+    // travel.
+    struct SimpleSearch {
+        enum class Phase { FORWARD, ROTATE };
+        Phase  phase = Phase::FORWARD;
+        double forward_traveled_mm  = 0.0;
+        double rotation_accumulated = 0.0;
+        // Last pose sample used for delta accumulation. Latched on first
+        // tick after entry and refreshed every tick thereafter.
+        double last_x     = 0.0;
+        double last_y     = 0.0;
+        double last_theta = 0.0;
+        bool   initialized = false;
     };
-    SearchPlan _search_plan;
+    SimpleSearch _ssearch;
 
     // Gripper sequencing inside APPROACH. On grabbable we first defer one
     // tick with v=0 (so the motor has a control cycle to decelerate from
@@ -192,10 +196,9 @@ private:
     // Tunables. Conservative defaults; safe to tweak from main if needed.
     double _search_omega        = 0.35 * ROBOT_SPEED;  // rad/s, ~20°/s so camera gets enough frames
     double _search_min_dwell_s  = 0.0;   // engage on sight; failed-target skip handles bounce protection
-    double _search_v_max_mm_s   = 40.0 * ROBOT_SPEED;  // travel speed between waypoints
-    double _waypoint_margin_mm  = 80.0;  // arrival radius + wall standoff
-    double _box_detection_range_mm = 700.0;  // drives subdivision math
-    double _grip_settle_s       = 1.0;   // wait for `captured` after closing servo (vision needs ~10 frames to debounce)
+    double _search_v_forward_mm_s   = 40.0 * ROBOT_SPEED;  // forward speed during the FORWARD leg
+    double _search_forward_target_mm = 1000.0;             // 100 cm leg before each look-around rotation
+    double _grip_settle_s       = 0.5;   // mechanical close time for the servo slew (8 steps × 20 ms ≈ 160 ms + slack); we no longer wait on vision because the gripper occludes the box
     double _approach_v          = 30.0 * ROBOT_SPEED;  // mm/s, visual-servo cruise
     double _approach_k_omega    = 1.8;   // rad/s per rad of bearing
     double _approach_omega_max  = 1.2 * ROBOT_SPEED;   // clamp on steering rate
@@ -236,9 +239,4 @@ private:
     bool _plan_path_to(const Pos2D& current,
                        double gx, double gy, double gtheta,
                        double margin_mm, double v_max_mm_s);
-
-    // Build the adaptive-subdivision waypoint list from the calibrations
-    // module's published MapBounds. Sets _search_plan.valid = false if the
-    // bounds are not yet ready.
-    void _build_search_plan(const Pos2D& pose);
 };

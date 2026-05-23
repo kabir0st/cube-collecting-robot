@@ -92,23 +92,7 @@ bool Motor::start() {
           LOGE("Motor") << "wiringPiSPISetup(1) failed";
           return false;
       }
-
-    // Settle pause after SPI init. The bus lines need a few ms to come
-    // out of their pre-init state; sending commands immediately can
-    // clock garbage bytes into the Arduino that look like asymmetric
-    // speed commands and rotate the chassis a few degrees.
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    // Hammer zero frames to fully overwrite any stale Arduino state
-    // (e.g., previous run was SIGKILL'd while driving). One frame is
-    // not always enough — the controller may finish its current PWM
-    // cycle at the previous speed before applying the new command, so
-    // we send N frames at the motor IO loop period to cover several
-    // PWM cycles before doing anything else.
-    //
-    // memset (not aggregate init) so padding bytes in MotorDataType are
-    // guaranteed zero — otherwise an Arduino that parses by struct
-    // offset could see stack garbage in padding slots.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     MotorDataType md;
     constexpr int   ZERO_FRAMES = 8;
     constexpr auto  ZERO_GAP    = std::chrono::milliseconds(25);  // 8 × 25ms = 200ms
@@ -118,11 +102,6 @@ bool Motor::start() {
         std::this_thread::sleep_for(ZERO_GAP);
     }
 
-    // Poll encoders until the wheels are actually stationary. If a
-    // previous run left them spinning, the zero frames have now arrived
-    // but inertia can keep them coasting for a few hundred ms more.
-    // Two successive reads with negligible delta = at rest. Cap the
-    // wait so a stuck-spinning chassis doesn't deadlock startup.
     constexpr auto  POLL_GAP        = std::chrono::milliseconds(50);
     constexpr auto  POLL_TIMEOUT    = std::chrono::seconds(3);
     constexpr int32_t REST_TICK_TOL = 2;   // ~17 µm at 119 ticks/mm — sensor noise

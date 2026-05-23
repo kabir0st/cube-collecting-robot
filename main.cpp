@@ -140,6 +140,8 @@ int main() {
             } else {
                 LOG("Main") << "Failed to write filter calibration to " << config_path;
             }
+            std::cout << "Waiting 1 seconds before starting . ..\n";
+            std::this_thread::sleep_for(std::chrono::seconds(1));
         } else {
             LOG("Main") << "Calibration aborted; filter not saved.";
         }
@@ -149,9 +151,6 @@ int main() {
                         "Refusing to start.";
         return 1;
     }
-
-    std::cout << "Waiting 3 seconds before starting . ..\n";
-    std::this_thread::sleep_for(std::chrono::seconds(3));
 
     // start rest of the system
     INA219 power_interface = configure_voltage_interface();
@@ -177,13 +176,11 @@ int main() {
         std::ref(dash), std::ref(lidar_data), std::ref(kf),
         std::cref(map_ransac));
     // waiting for cox 1st seeds to be stable
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    std::this_thread::sleep_for(std::chrono::seconds(2));
 
     dash.add_row("Vision");
     threads.emplace_back(loop_vision_tracking,
         std::ref(dash), filter, cam_cfg, std::ref(target));
-    dash.render();
-    std::this_thread::sleep_for(std::chrono::seconds(3));
     dash.render();
     dash.add_row("Motor");
     dash.add_row("Odometry");

@@ -44,6 +44,157 @@ called out in [Hardware-dependent assumptions](#hardware-dependent-assumptions).
 - Angles are in radians everywhere except where suffixed `_deg` for I/O
 - `wrap_pi(a)` in [include/utils.hpp](../include/utils.hpp) wraps to `(-π, π]`
 
+See [Per-frame diagrams](#per-frame-diagrams) below for one ASCII figure per frame
+(body, lidar polar, odometry step, world / KF state).
+
+## Per-frame diagrams
+
+The codebase operates in four distinct frames. Same +x = forward, +y = left,
++θ = CCW convention is enforced at every boundary, but each frame has its own
+origin and its own "what does positive mean here" answer.
+
+### 1. Body frame (robot-attached)
+
+```
+                       +y  (LEFT of robot)
+                        ▲
+                        │
+                        │
+                        │
+            ────────────●──────────────►  +x  (FORWARD, nose direction)
+                     origin
+                    (base center,
+                     between wheels)
+```
+
+- **Origin:** robot base center, midway between the two drive wheels. Moves
+  and rotates *with* the robot — the body frame is glued to the chassis.
+- **+x = forward** (where the nose / camera looks).
+- **+y = robot's LEFT** (90° CCW from +x; standard math axes, NOT screen-y).
+- **No global θ.** The body frame is heading-less from its own point of view
+  — the robot's heading lives in the world frame.
+- **Units:** mm.
+- **Used by:** lidar→body transform, find_walls reference map, Cox per-scan
+  rotation, camera bearing.
+- Refs: [src/cox.cpp:107-113](../src/cox.cpp#L107-L113),
+  [include/utils.hpp:45-50](../include/utils.hpp#L45-L50),
+  [src/tracker.cpp:40-43](../src/tracker.cpp#L40-L43).
+
+### 2. Lidar polar frame (sensor-attached)
+
+```
+   raw_angle = 0°  (mount-dependent: currently points to robot's RIGHT,
+                    because LIDAR_MOUNT_OFFSET_RAD = -π/2)
+
+                            ┌─────┐
+              CCW math      │LIDAR│  raw 0° ─────►  (robot's −y)
+                  ▲         └──┬──┘
+                  │            │
+          raw 270°│            │  angle_deg INCREASES clockwise
+                  │            ▼  (CW, opposite to math convention)
+                  └──→ raw 90°
+
+   Each scan point is (angle_deg, dist_mm).
+   Body conversion:
+       a = -angle_deg · π/180 + LIDAR_MOUNT_OFFSET_RAD
+       x_body = dist · cos(a)
+       y_body = dist · sin(a)
+```
+
+- **Polar `(angle_deg, dist_mm)`** straight from the RPLidar driver.
+- **Scan direction is CLOCKWISE** — `angle_deg` grows CW, the OPPOSITE of the
+  math convention. The `-angle_deg` term in the transform flips CW → CCW.
+- **Raw 0° beam direction is the mount.** Currently `LIDAR_MOUNT_OFFSET_RAD
+  = -π/2` ⇒ raw 0° points to the robot's **right**. Adjustable via that one
+  constant, see [include/global.hpp:14](../include/global.hpp#L14).
+- **Conversion lives in exactly one place per consumer.** Don't redo the
+  trig at call sites; call `lidar_polar_to_body()`.
+- Refs: [include/utils.hpp:45-50](../include/utils.hpp#L45-L50),
+  [src/cox.cpp:108-113](../src/cox.cpp#L108-L113).
+
+### 3. Odometry step frame (per-tick delta, expressed in body frame)
+
+```
+                       +d_theta  (CCW pivot, LEFT turn)
+                          ╭───╮
+                          │   ▼
+                          ╰───╯
+                            ▲
+                            │ (heading change)
+                            │
+            ────────────────●──────────────►  +d_mm  (FORWARD)
+
+         Inputs:  dL_mm, dR_mm  (per-wheel travel since last tick)
+
+         d_mm     = (dL + dR) / 2          ◄── linear, body +x
+         d_theta  = (dR − dL) / WHEELBASE  ◄── angular, CCW positive
+```
+
+- **Not a fixed frame** — it's the per-tick `(d_mm, d_theta)` motion
+  expressed in the body frame *at the start of the tick*. The KF predict
+  consumes it; it never persists.
+- **+d_mm = forward** (body +x). `dL = dR > 0` ⇒ both wheels forward ⇒
+  d_mm > 0.
+- **+d_theta = CCW = LEFT turn.** Right wheel faster than left ⇒ pivot CCW.
+  Sanity: pure CCW pivot ⇒ `dL < 0, dR > 0` ⇒ `d_theta > 0`. ✓
+- **Units:** mm and rad.
+- Refs: [src/odometry.cpp:54-55](../src/odometry.cpp#L54-L55).
+
+### 4. World / KF state frame (arena-fixed)
+
+```
+                       +y_world  (arena LEFT, not robot's left)
+                          ▲
+                          │
+                          │            ┌──────┐
+                          │            │ robot│
+                          │            └──┬───┘
+                          │              ╱           +θ (CCW from world +x,
+                          │             ╱ θ            heading is measured
+                          │            ╱               from world +x to
+                          │           ╱                robot's body +x)
+                          │          ╱
+              ────────────●─────────────────────►  +x_world
+                       origin
+                    (arena origin,
+                     set at boot or
+                     KF reset point)
+
+         State:  Pos2D = ( x_mm, y_mm, theta_rad )
+                                          ▲
+                                          └── wrapped to (-π, π]
+```
+
+- **Origin:** arena-fixed reference (KF reset point — typically
+  `(0,0,0)` at boot, or wherever a relocalize sweep re-pins the filter).
+- **`+x_world`, `+y_world` do NOT rotate with the robot.** They are arena
+  axes. Robot's body axes only coincide with world axes when `θ = 0`.
+- **`θ` = robot heading CCW from `+x_world`,** wrapped to `(-π, π]` by the
+  EKF. `θ = π/2` means the robot's nose points along `+y_world` (arena
+  LEFT).
+- **Units:** mm and rad. State vector is `Pos2D`
+  ([include/types.hpp:84-92](../include/types.hpp#L84-L92)).
+- **Predict** advances pose along midpoint heading `θ + dθ/2`. **Correct**
+  fuses Cox pose estimates; innovation in θ is wrapped so a ±π neighbour
+  doesn't trigger a 358° correction.
+- Refs: [src/kalman.cpp:62-64](../src/kalman.cpp#L62-L64) (predict),
+  [src/kalman.cpp:95](../src/kalman.cpp#L95) (correct/wrap),
+  [include/types.hpp:84-92](../include/types.hpp#L84-L92) (`Pos2D`).
+
+### How the frames chain together
+
+```
+   lidar polar  ──(utils.hpp::lidar_polar_to_body)──►  body
+                                                        │
+                                                        │ (R(θ) + (x,y) from KF state)
+                                                        ▼
+                                                      world
+
+   encoders ──(odometry.cpp)──► odom step (d_mm, dθ) ──► KF predict ──► world state
+                                                                          ▲
+                                              Cox scan-match (world pose) ┘
+```
+
 ## Diff-drive sign conventions
 
 Diff-drive IK ([src/motor.cpp:168-169](../src/motor.cpp#L168-L169)):
