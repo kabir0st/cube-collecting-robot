@@ -188,7 +188,7 @@ private:
     // next step() tick consumes it to build the spline for the next leg.
     size_t _test_step           = 0;
     bool   _test_replan_needed  = false;
-    double _test_v_max_mm_s     = 50.0 * ROBOT_SPEED;
+    double _test_v_max_mm_s     = 70.0 * ROBOT_SPEED;
     double _test_margin_mm      = 40.0;
 
     // Halt-and-localize bookkeeping. When PurePursuit reports arrived for a

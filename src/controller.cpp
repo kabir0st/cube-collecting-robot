@@ -552,7 +552,7 @@ bool StateMachine::_plan_path_to(const Pos2D& current,
         30,
         v_max_mm_s,
         margin_mm,
-        100.0 * ROBOT_SPEED,
+        150.0 * ROBOT_SPEED,
         30.0);
     if (path.empty()) {
         LOGE("Mission") << "bcubic_spline returned empty search path "
