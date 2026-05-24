@@ -279,7 +279,17 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
     if (new_state == State::CARRY_HOME) {
         // Seed the drag-guard so a brief gripper-arm occlusion right
         // after capture doesn't fire the target-lost release.
-        _carry_last_target_seen_at = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        _carry_last_target_seen_at = now;
+        // Stuck-recovery sub-state. NORMAL = follow the spline that
+        // CARRY_HOME's plan-block above just installed. Anchor the
+        // stuck-detection window at the current pose; it advances each
+        // tick we move more than _carry_stuck_dist_threshold_mm.
+        _carry_phase             = CarryPhase::NORMAL;
+        _carry_phase_entered     = now;
+        _carry_recovery_attempts = 0;
+        _stuck_anchor_pose       = current;
+        _stuck_anchor_at         = now;
     }
 
     if (new_state == State::RELEASE) {
@@ -380,6 +390,14 @@ void StateMachine::_enter_search(const Pos2D& current) {
 bool StateMachine::_plan_path_to(const Pos2D& current,
                                  double gx, double gy, double gtheta,
                                  double margin_mm, double v_max_mm_s) {
+    return _plan_path_via_offset(current, gx, gy, gtheta,
+                                 margin_mm, v_max_mm_s, 0.0);
+}
+
+bool StateMachine::_plan_path_via_offset(const Pos2D& current,
+                                         double gx, double gy, double gtheta,
+                                         double margin_mm, double v_max_mm_s,
+                                         double lateral_offset_mm) {
     PathPoint p_start;
     p_start.x = current.x;
     p_start.y = current.y;
@@ -388,6 +406,16 @@ bool StateMachine::_plan_path_to(const Pos2D& current,
     PathPoint p_mid;
     p_mid.x = 0.5 * (current.x + gx);
     p_mid.y = 0.5 * (current.y + gy);
+    if (lateral_offset_mm != 0.0) {
+        const double dx = gx - current.x;
+        const double dy = gy - current.y;
+        const double n  = std::hypot(dx, dy);
+        if (n > 1e-6) {
+            // Unit-left vector (rotate start->goal by +90°: (dx,dy) -> (-dy,dx)).
+            p_mid.x += lateral_offset_mm * (-dy / n);
+            p_mid.y += lateral_offset_mm * ( dx / n);
+        }
+    }
 
     PathPoint p_goal;
     p_goal.x = gx;
@@ -586,15 +614,17 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
 
                 if (!at_home_skip) {
                     // Box is engageable — reset the skip streak before we
-                    // hand off to APPROACH (or burn the budget).
+                    // hand off to APPROACH.
                     _search_skip_streak = false;
 
+                    // Budget-exhausted SAFE_STOP removed by request:
+                    // SEARCH runs indefinitely until the user sends
+                    // SIGINT (Ctrl+C). `attempts` keeps incrementing for
+                    // diagnostics but is no longer fatal.
                     if (attempts >= max_attempts) {
                         LOG("Mission") << "Approach budget exhausted ("
-                                       << attempts << "/" << max_attempts << ")";
-                        _transition(State::SAFE_STOP, pose);
-                        out.mode = Command::Mode::STOP;
-                        break;
+                                       << attempts << "/" << max_attempts
+                                       << "); continuing anyway.";
                     }
                     // NOTE: do NOT increment _approach_attempts here. The
                     // attempt counter only ticks on a *real* failed try (i.e.
@@ -615,11 +645,9 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 }
             }
 
-            if (t_in > _search_timeout_s) {
-                _transition(State::SAFE_STOP, pose);
-                out.mode = Command::Mode::STOP;
-                break;
-            }
+            // SEARCH timeout SAFE_STOP removed by request: SEARCH runs
+            // indefinitely until the user sends SIGINT (Ctrl+C).
+            // _search_timeout_s is retained for future diagnostics.
 
             if (!target_visible) {
                 _search_skip_streak = false;
@@ -778,6 +806,33 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 _ssearch.last_x     = pose.x;
                 _ssearch.last_y     = pose.y;
                 _ssearch.last_theta = pose.theta;
+            }
+            // X-far turn-back: if pose.x crosses _search_x_far_turn_mm
+            // while the heading reference still points into the arena
+            // (cos(ref) > 0), flip the reference 180° and restart the
+            // sweep cycle from LOOK_LEFT. The cos() guard makes this a
+            // one-shot per SEARCH entry — once facing home, we don't
+            // re-flip on the way back.
+            if (pose.x >= _search_x_far_turn_mm
+                && std::cos(_ssearch.forward_heading_ref) > 0.0) {
+                LOG("Mission")
+                    << "SEARCH: x=" << pose.x
+                    << " mm >= turn-back " << _search_x_far_turn_mm
+                    << " mm; flipping heading ref toward home.";
+                _ssearch.forward_heading_ref =
+                    wrap_pi(_ssearch.forward_heading_ref + M_PI);
+                _ssearch.phase                  = SimpleSearch::Phase::LOOK_LEFT;
+                _ssearch.forward_traveled_mm    = 0.0;
+                _ssearch.look_right_rotated_rad = 0.0;
+                _ssearch.obstacle_rotated_rad   = 0.0;
+                _ssearch.obstacle_dir_sign      = 0.0;
+                _ssearch.in_realign             = true;
+                _ssearch.realign_stable_count   = 0;
+                _ssearch.last_theta             = pose.theta;
+                out.mode = Command::Mode::DIRECT;
+                out.v_mm_s = 0.0;
+                out.omega_rad_s = 0.0;
+                break;
             }
             if (_ssearch.forward_traveled_mm >= _search_forward_target_mm) {
                 _ssearch.phase = SimpleSearch::Phase::LOOK_LEFT;
@@ -1029,7 +1084,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             // hand off to SAFE_STOP with the box still gripped so an
             // operator can intervene rather than littering the arena.
             const double dist_to_home =
-                std::hypot(pose.x - _home_x, pose.y - _home_y);
+                std::hypot(pose.x - hx, pose.y - hy);
             const bool at_home = dist_to_home <= _home_margin;
             if (vision_healthy
                 && t_since_seen > _carry_target_lost_timeout_s) {
@@ -1072,6 +1127,104 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             if (t_in > _carry_timeout_s) {
                 _transition(State::SAFE_STOP, pose);
                 out.mode = Command::Mode::STOP;
+                break;
+            }
+
+            // Stuck-recovery sub-state machine. Either drives the carry
+            // spline (NORMAL / CURLING) and watches for lack of progress,
+            // or executes a straight reverse leg (REVERSING). The phase
+            // entered on CARRY_HOME entry is NORMAL; CURLING is entered
+            // after a successful reverse with a freshly planned offset
+            // spline.
+            const auto now = std::chrono::steady_clock::now();
+            if (_carry_phase == CarryPhase::REVERSING) {
+                const double reversed =
+                    std::hypot(pose.x - _reverse_start_pose.x,
+                               pose.y - _reverse_start_pose.y);
+                const double t_in_phase =
+                    seconds_since(_carry_phase_entered);
+                const bool done = reversed >= _carry_recovery_reverse_mm;
+                const bool timed_out =
+                    t_in_phase > _carry_recovery_reverse_timeout_s;
+                if (done || timed_out) {
+                    // Pick a side. attempts is 0 before the first curl,
+                    // so the first curl goes left, the second right.
+                    const bool curl_left = (_carry_recovery_attempts == 0);
+                    const double sign = curl_left ? +1.0 : -1.0;
+                    const double tan_to_goal =
+                        std::atan2(hy - pose.y,
+                                   hx - pose.x);
+                    if (!_plan_path_via_offset(
+                            pose, hx, hy, tan_to_goal,
+                            _home_margin, _planned_v_max_mm_s,
+                            sign * _carry_recovery_curl_offset_mm)) {
+                        LOGE("Mission")
+                            << "CARRY_HOME: recovery replan failed; "
+                               "SAFE_STOP";
+                        _transition(State::SAFE_STOP, pose);
+                        out.mode = Command::Mode::STOP;
+                        break;
+                    }
+                    LOG("Mission")
+                        << "CARRY_HOME: recovery — reversed " << reversed
+                        << " mm" << (timed_out ? " (timed out)" : "")
+                        << "; curling "
+                        << (curl_left ? "LEFT" : "RIGHT")
+                        << " (attempt "
+                        << (_carry_recovery_attempts + 1) << "/"
+                        << _carry_recovery_max_attempts << ")";
+                    _carry_phase             = CarryPhase::CURLING;
+                    _carry_phase_entered     = now;
+                    _stuck_anchor_pose       = pose;
+                    _stuck_anchor_at         = now;
+                    _carry_recovery_attempts++;
+                    out.mode = Command::Mode::PATH_FOLLOW;
+                    break;
+                }
+                // Still reversing — direct backward command.
+                out.mode = Command::Mode::DIRECT;
+                out.v_mm_s = -_carry_recovery_reverse_v;
+                out.omega_rad_s = 0.0;
+                break;
+            }
+
+            // NORMAL or CURLING: drive the spline and watch for stuck.
+            const double moved =
+                std::hypot(pose.x - _stuck_anchor_pose.x,
+                           pose.y - _stuck_anchor_pose.y);
+            if (moved > _carry_stuck_dist_threshold_mm) {
+                // Sliding window: motion exceeded threshold, advance the
+                // anchor. As long as the robot keeps inching forward,
+                // anchor_at stays fresh and stuck never fires.
+                _stuck_anchor_pose = pose;
+                _stuck_anchor_at   = now;
+            } else if (seconds_since(_stuck_anchor_at)
+                       > _carry_stuck_window_s) {
+                if (_carry_recovery_attempts
+                    >= _carry_recovery_max_attempts) {
+                    LOGE("Mission")
+                        << "CARRY_HOME: stuck again after "
+                        << _carry_recovery_attempts
+                        << " recovery attempts; SAFE_STOP "
+                           "(box still gripped at "
+                        << dist_to_home << " mm from home).";
+                    _transition(State::SAFE_STOP, pose);
+                    out.mode = Command::Mode::STOP;
+                    break;
+                }
+                LOG("Mission")
+                    << "CARRY_HOME: stuck — "
+                    << moved << " mm in last "
+                    << seconds_since(_stuck_anchor_at)
+                    << " s; reversing "
+                    << _carry_recovery_reverse_mm << " mm.";
+                _controller.abort();
+                _carry_phase         = CarryPhase::REVERSING;
+                _carry_phase_entered = now;
+                _reverse_start_pose  = pose;
+                out.mode = Command::Mode::DIRECT;
+                out.v_mm_s = -_carry_recovery_reverse_v;
+                out.omega_rad_s = 0.0;
                 break;
             }
             out.mode = Command::Mode::PATH_FOLLOW;
