@@ -1017,15 +1017,32 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             // not present but other detections exist). Pure occlusion
             // (camera sees nothing at all — gripper geometry blocks
             // it) gets infinite grace.
-            if (snap.captured) {
+            if (snap.has_target) {
                 _carry_last_target_seen_at = std::chrono::steady_clock::now();
             }
             const bool vision_healthy =
                 snap.has_target || !snap.obstacles.empty();
             const double t_since_seen =
                 seconds_since(_carry_last_target_seen_at);
+            // Position guard: refuse to open the gripper anywhere other
+            // than the home zone. If a release would fire from out here,
+            // hand off to SAFE_STOP with the box still gripped so an
+            // operator can intervene rather than littering the arena.
+            const double dist_to_home =
+                std::hypot(pose.x - _home_x, pose.y - _home_y);
+            const bool at_home = dist_to_home <= _home_margin;
             if (vision_healthy
                 && t_since_seen > _carry_target_lost_timeout_s) {
+                if (!at_home) {
+                    LOGE("Mission")
+                        << "CARRY_HOME: target lost for " << t_since_seen
+                        << " s with healthy vision, but " << dist_to_home
+                        << " mm from home (> " << _home_margin
+                        << " mm); SAFE_STOP instead of release.";
+                    _transition(State::SAFE_STOP, pose);
+                    out.mode = Command::Mode::STOP;
+                    break;
+                }
                 LOG("Mission")
                     << "CARRY_HOME: target lost for " << t_since_seen
                     << " s with healthy vision; releasing "
@@ -1037,6 +1054,15 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 break;
             }
             if (_controller.has_arrived()) {
+                if (!at_home) {
+                    LOGE("Mission")
+                        << "CARRY_HOME: pure-pursuit arrived but Kalman is "
+                        << dist_to_home << " mm from home (> " << _home_margin
+                        << " mm); SAFE_STOP instead of release.";
+                    _transition(State::SAFE_STOP, pose);
+                    out.mode = Command::Mode::STOP;
+                    break;
+                }
                 _transition(State::RELEASE, pose);
                 out.mode = Command::Mode::DIRECT;
                 out.v_mm_s = _release_v;
