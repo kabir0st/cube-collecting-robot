@@ -407,6 +407,45 @@ void loop_scan_cox_estimation(
         // loop sleep above is already 100 ms.
         logger.log_cox(logger.now_s(), est);
 
+        // Push detection. When loop_control commanded a halt (v ≈ 0,
+        // ω ≈ 0) yet a strong Cox fix sits materially far from the KF
+        // mean, the chassis was likely moved by hand or slid on the
+        // floor — the wheel-encoder prior is tight but wrong. Inflate
+        // the KF position covariance once so the kf.correct() call
+        // below has room to pull the prior to the new Cox estimate
+        // instead of being dragged ~10 % per tick by the over-tight
+        // prior. Gated on cox_strong_fix (not just can_fuse) so a
+        // noisy single-wall fit can't yank the pose on its own; gated
+        // on current_sigma_xy below the inflation level so we don't
+        // re-inflate forever once it's already opened up.
+        constexpr double PUSH_CMD_V_IDLE_MM_S   = 5.0;
+        constexpr double PUSH_CMD_W_IDLE_RAD_S  = 0.05;
+        constexpr double PUSH_DETECT_DIST_MM    = 60.0;
+        constexpr double PUSH_INFLATE_SIGMA_MM  = 150.0;
+        constexpr double PUSH_INFLATE_SIGMA_TH  = 8.0 * M_PI / 180.0;
+        const double v_recent = std::fabs(app::v_cmd_last_mm_s.load());
+        const double w_recent = std::fabs(app::w_cmd_last_rad_s.load());
+        const bool commanded_idle =
+            v_recent < PUSH_CMD_V_IDLE_MM_S
+         && w_recent < PUSH_CMD_W_IDLE_RAD_S;
+        if (commanded_idle && cox_strong_fix(est)) {
+            const double dx_co = est.pos.x - kf_pose.x;
+            const double dy_co = est.pos.y - kf_pose.y;
+            const double dist_co = std::hypot(dx_co, dy_co);
+            Pose2DCov cov_now = kf.covariance();
+            const double sig_xy_now =
+                std::sqrt(std::max(cov_now.xx, cov_now.yy));
+            if (dist_co > PUSH_DETECT_DIST_MM
+                && sig_xy_now < PUSH_INFLATE_SIGMA_MM) {
+                LOG("Cox") << "Push suspected: commanded idle but Cox at ("
+                           << est.pos.x << ", " << est.pos.y << ") is "
+                           << dist_co << " mm from KF (" << kf_pose.x
+                           << ", " << kf_pose.y << "); inflating prior.";
+                kf.inflate(PUSH_INFLATE_SIGMA_MM * PUSH_INFLATE_SIGMA_MM,
+                           PUSH_INFLATE_SIGMA_TH * PUSH_INFLATE_SIGMA_TH);
+            }
+        }
+
         // 1. ALWAYS-FUSE policy. If cox even minimally converged with a
         //    handful of inliers, hand it to the KF. A noisy cox produces a
         //    large R, the KF gain shrinks, the correction is weak

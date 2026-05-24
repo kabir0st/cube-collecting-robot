@@ -221,10 +221,14 @@ StateMachine::State StateMachine::state() const {
 
 bool StateMachine::obstacle_gate_suppressed() const {
     const State s = _state.load();
+    // CARRY_HOME deliberately NOT suppressed — the lidar mount sits
+    // above the boxes, so the held payload doesn't pin the gate; walls
+    // do, and we want forward motion to stop instead of pushing through.
+    // The CARRY_HOME stuck-recovery branch handles the resulting v=0
+    // by reversing + re-planning around the wall.
     return s == State::APPROACH       // visual-servo handles avoidance
-        || s == State::CARRY_HOME
-        || s == State::RELEASE
-        || s == State::TURN_AROUND;
+        || s == State::RELEASE        // backing up; gate is no-op anyway
+        || s == State::TURN_AROUND;   // in-place rotation; gate is no-op
 }
 
 void StateMachine::_transition(State new_state, const Pos2D& current) {

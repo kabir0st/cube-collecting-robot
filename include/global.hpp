@@ -65,4 +65,11 @@ namespace app {
     // displace the body AFTER the map is built, leaving the cox seed at
     // (0,0,0) outside its first-fix basin of convergence.
     extern std::atomic<bool> motors_ready;
+    // Last (v, ω) commanded by loop_control after gating. Published by
+    // core.cpp every tick (~25 Hz); read by loop_scan_cox_estimation to
+    // detect "I commanded a halt but Cox sees the chassis somewhere
+    // else" — the signature of a manual push. Mean values only; the
+    // KF/Cox modules don't need a history.
+    extern std::atomic<double> v_cmd_last_mm_s;
+    extern std::atomic<double> w_cmd_last_rad_s;
 }

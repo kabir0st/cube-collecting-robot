@@ -80,11 +80,15 @@ public:
     //   - APPROACH: the visual servo with reactive omega over snap.obstacles
     //     IS the avoidance strategy; the lidar gate would zero v whenever
     //     the target itself entered the obstacle arc, stalling the grab.
-    //   - CARRY_HOME / RELEASE / TURN_AROUND: the closed gripper + held
-    //     box sits inside OBSTACLE_DIST_MM and would pin the gate true
-    //     on its own payload.
-    // SEARCH keeps the gate enabled — there the gripper is open and the
-    // forward arc is the right safety net against unseen walls.
+    //   - RELEASE / TURN_AROUND: motion is reverse / in-place rotation only;
+    //     the forward-velocity gate is a no-op there but suppressing keeps
+    //     intent explicit.
+    // CARRY_HOME used to be suppressed too on the theory that the held
+    // box would pin the gate, but the lidar is mounted high enough to
+    // miss the box entirely — walls (which it does see) were driving the
+    // chassis into them. CARRY_HOME now uses the gate; when forward
+    // motion is zeroed by a wall ahead, the existing stuck-recovery
+    // sub-state machine reverses and re-plans around the obstruction.
     bool obstacle_gate_suppressed() const;
 
 private:

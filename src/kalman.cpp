@@ -114,6 +114,13 @@ void KalmanFilter::correct(const Pos2D& z, const Pose2DCov& R_in) {
     _cov = from_eigen(P_new);
 }
 
+void KalmanFilter::inflate(double add_xy_var, double add_th_var) {
+    std::lock_guard<std::mutex> lk(_m);
+    _cov.xx += add_xy_var;
+    _cov.yy += add_xy_var;
+    _cov.tt += add_th_var;
+}
+
 Pos2D KalmanFilter::pose() const {
     std::lock_guard<std::mutex> lk(_m);
     return _pose;

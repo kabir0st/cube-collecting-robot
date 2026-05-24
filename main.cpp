@@ -30,6 +30,8 @@ std::atomic<double> app::obstacle_right_mm{std::numeric_limits<double>::infinity
 std::atomic<bool> app::relocalizing{false};
 std::atomic<bool> app::cox_first_fix{false};
 std::atomic<bool> app::motors_ready{false};
+std::atomic<double> app::v_cmd_last_mm_s{0.0};
+std::atomic<double> app::w_cmd_last_rad_s{0.0};
 std::vector<std::thread> threads;
 
 // Definition for the extern declared in global.hpp. Boot default is the

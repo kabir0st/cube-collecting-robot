@@ -21,6 +21,13 @@ public:
     // EKF correction;
     void correct(const Pos2D& z, const Pose2DCov& R);
 
+    // Add variance to the diagonals of the state covariance. Used to
+    // re-open the prior when an external event (manual push, slip on
+    // wheel-stationary tick) makes the wheel-encoder-tracked prior
+    // less trustworthy than it looks. add_xy_var is added to xx and yy;
+    // add_th_var is added to tt. No effect on cross-terms.
+    void inflate(double add_xy_var, double add_th_var);
+
     Pos2D pose() const;
     Pose2DCov covariance() const;
     // Snapshot of both (pose, covariance) under a single lock acquisition.

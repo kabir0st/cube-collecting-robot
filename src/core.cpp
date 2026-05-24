@@ -287,10 +287,11 @@ void loop_control(Dashboard& dash,
         // also allowed so the robot can back out of a near-miss.
         //
         // The obstacle gate is suppressed during APPROACH (visual-servo +
-        // colour-based reactive omega handles avoidance) and while
-        // carrying a payload (CARRY_HOME, RELEASE, TURN_AROUND — the
-        // gripper / held box sits inside the gate's forward arc). SEARCH
-        // keeps the gate as its safety net against unseen walls.
+        // colour-based reactive omega handles avoidance) and during
+        // RELEASE / TURN_AROUND (reverse / in-place rotation, gate is
+        // a no-op there anyway). CARRY_HOME and SEARCH use the gate as
+        // their safety net against walls — the lidar sits above the
+        // boxes so the held payload doesn't pin the gate.
         if (app::relocalizing.load()) {
             v_cmd = 0.0;
             w_cmd = 0.0;
@@ -300,6 +301,10 @@ void loop_control(Dashboard& dash,
         }
 
         motor.set_velocity(v_cmd, w_cmd);
+        // Publish the post-gate command so the Cox loop can correlate
+        // "should be stationary" with "Cox sees movement" (push detect).
+        app::v_cmd_last_mm_s.store(v_cmd);
+        app::w_cmd_last_rad_s.store(w_cmd);
 
         uint64_t rejects = 0;
         motor.get_spi_stats(rejects);
