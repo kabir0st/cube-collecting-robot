@@ -248,8 +248,6 @@ int main() {
     threads.emplace_back(loop_localization,
         std::ref(dash), std::ref(lidar_data), std::ref(kf),
         std::cref(map_ransac), std::ref(data_logger));
-    // waiting for cox 1st seeds to be stable
-    std::this_thread::sleep_for(std::chrono::seconds(2));
 
     dash.add_row("Vision");
     threads.emplace_back(loop_vision_tracking,

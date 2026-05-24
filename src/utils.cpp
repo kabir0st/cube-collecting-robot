@@ -37,18 +37,20 @@ bool start_lidar(hh::Lidar& lidar) {
         LOGE("LIDAR") << "Failed to connect to lidar on " << LIDAR_SERIAL_DEVICE;
         return false;
     }
-    // Reset state in case a previous run was killed mid-scan and left the motor spinning.
+    // Reset state in case a previous run was killed mid-scan. The
+    // connect/stop/setPwm path already commands idle; a brief settle
+    // is enough — the prior full second was over-conservative.
     lidar.stop();
     lidar.setMotorPwm(LIDAR_IDLE_MOTOR_PWM);
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
     lidar.setMotorPwm(LIDAR_DEFAULT_MOTOR_PWM);
     if (lidar.scan() != LIDAR_SUCCESS) {
         LOGE("LIDAR") << "Failed to start scan";
         lidar.setMotorPwm(LIDAR_IDLE_MOTOR_PWM);
         return false;
     }
-    // waiting for lidar to spin up properly
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    // Lidar motor spin-up: 1.5 s gets it well within rated RPM.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
     app::lidar_ready.store(true);
     app::lidar_stop.store(false);
     return true;

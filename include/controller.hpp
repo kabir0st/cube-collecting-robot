@@ -172,6 +172,12 @@ private:
         // than spin forever.
         double obstacle_rotated_rad = 0.0;
         double obstacle_dir_sign    = 0.0;   // 0 = not currently dodging
+        // Signed rotation accumulated since LOOK_RIGHT entry. Goes
+        // negative as we rotate CW; phase exits at -π. LOOK_RIGHT spans
+        // ≈ π through the back of the robot, so an absolute-target check
+        // (wrap_pi((ref - π/2) - pose)) is +π on entry (antipodal) and
+        // would spuriously satisfy err ≥ 0 on tick 0.
+        double look_right_rotated_rad = 0.0;
         // Fixed SEARCH-axis heading. Snapshotted on first-tick init
         // (_ssearch.initialized rising edge); held constant across all
         // subsequent LOOK_LEFT/LOOK_RIGHT/FORWARD cycles so the search
@@ -217,13 +223,6 @@ private:
     // _approach_vision_lost_timeout_s watchdog. Only touched from the
     // loop_control thread.
     std::chrono::steady_clock::time_point _approach_last_seen_at;
-
-    // CARRY_HOME drag guard. Latched on CARRY_HOME entry and refreshed
-    // each tick where snap.captured is true. If the target tracker stays
-    // lost for _carry_target_lost_timeout_s we release whatever is in the
-    // gripper — guards against carrying the wrong colored box home if a
-    // swap occurred mid-drag.
-    std::chrono::steady_clock::time_point _carry_last_target_seen_at;
 
     // World-frame memory of obstacle-color boxes detected by vision.
     // Each Entry is a single-color blob's projected world position, with
@@ -299,7 +298,14 @@ private:
     // far wall; below it we face theta = 0 (open arena ahead).
     double _search_far_threshold_mm = 3400.0;
     double _search_stage_x_min_mm   = 300.0;
-    double _search_stage_x_max_mm   = 3300.0;
+    // Staging clamp matches _search_x_far_turn_mm so _enter_search
+    // never plants the robot past the in-sweep turn-back boundary.
+    double _search_stage_x_max_mm   = 2000.0;
+    // In-sweep turn-back. Once pose.x crosses this while driving the
+    // FORWARD leg with the heading pointing into the arena (+x), flip
+    // forward_heading_ref by π and restart the sweep so the next legs
+    // walk back toward home. No effect when already facing home.
+    double _search_x_far_turn_mm    = 2000.0;
     double _search_stage_theta_tol  = 0.10;             // rad, ~6°
     // Hard cap on cumulative |delta theta| during a single obstacle-clear
     // rotation. Hitting this means the obstacle isn't clearing in this
@@ -344,7 +350,7 @@ private:
     // indefinitely toward a stale latched target. Independent of the
     // outer _approach_timeout_s (which fires even with vision still up).
     double _approach_vision_lost_timeout_s = 3.0;
-    double _carry_timeout_s     = 90.0;
+    double _carry_timeout_s     = 120.0;
     // Hard timeout on TURN_AROUND (now REALIGN-to-home_theta) so a jammed
     // motor doesn't wedge the mission. If we cannot reach the target
     // heading within this many seconds, give up and fall back to SEARCH
@@ -367,12 +373,32 @@ private:
     double _obstacle_merge_radius_mm     = 200.0;
     double _obstacle_forget_s            = 30.0;
     double _obstacle_block_radius_mm     = 250.0;
-    // CARRY_HOME drag guard. If snap.captured stays false for this many
-    // seconds AND vision is otherwise healthy (target or any obstacle
-    // colour visible) we release whatever is in the gripper. Pure
-    // occlusion (camera sees nothing at all) gets infinite grace — the
-    // gripper arms genuinely block the camera in some configurations.
-    double _carry_target_lost_timeout_s  = 10.0;
+    // CARRY_HOME stuck recovery. The robot can push a previously-delivered
+    // box into the home wall and stall — no progress, gripper still
+    // closed, drag-guard happy. Detection: while in the NORMAL or CURLING
+    // sub-phase, if pose displacement stays below
+    // _carry_stuck_dist_threshold_mm for _carry_stuck_window_s, declare
+    // stuck. Recovery: reverse _carry_recovery_reverse_mm in a straight
+    // line (REVERSING phase), then re-plan the spline with the midpoint
+    // shifted laterally by _carry_recovery_curl_offset_mm (CURLING
+    // phase) so the carried box approaches home off-axis and shoves the
+    // old box sideways rather than into the wall. Alternates left then
+    // right; after _carry_recovery_max_attempts unsuccessful curls, fall
+    // through to SAFE_STOP with the box still gripped.
+    enum class CarryPhase { NORMAL, REVERSING, CURLING };
+    CarryPhase _carry_phase = CarryPhase::NORMAL;
+    std::chrono::steady_clock::time_point _carry_phase_entered;
+    Pos2D  _stuck_anchor_pose{};
+    std::chrono::steady_clock::time_point _stuck_anchor_at;
+    Pos2D  _reverse_start_pose{};
+    int    _carry_recovery_attempts        = 0;
+    double _carry_stuck_dist_threshold_mm  = 30.0;
+    double _carry_stuck_window_s           = 3.0;
+    double _carry_recovery_reverse_mm      = 200.0;
+    double _carry_recovery_reverse_v       = 50.0;   // mm/s, magnitude
+    double _carry_recovery_reverse_timeout_s = 6.0;  // safety cap
+    double _carry_recovery_curl_offset_mm  = 250.0;
+    int    _carry_recovery_max_attempts    = 2;
 
     // State change: runs exit side-effects (clear path, abort controller)
     // on the outgoing state and entry side-effects (plan spline) on the
@@ -392,4 +418,14 @@ private:
     bool _plan_path_to(const Pos2D& current,
                        double gx, double gy, double gtheta,
                        double margin_mm, double v_max_mm_s);
+
+    // Same as _plan_path_to but shifts the midpoint control point
+    // perpendicular to the start->goal line by `lateral_offset_mm`.
+    // Positive = left of the approach direction (i.e. +Y in the local
+    // body frame of the start->goal vector). Used by CARRY_HOME stuck
+    // recovery to curl into home off-axis instead of pushing straight in.
+    bool _plan_path_via_offset(const Pos2D& current,
+                               double gx, double gy, double gtheta,
+                               double margin_mm, double v_max_mm_s,
+                               double lateral_offset_mm);
 };
