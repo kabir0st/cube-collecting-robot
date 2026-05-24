@@ -271,6 +271,7 @@ void loop_control(Dashboard& dash,
                 break;
             case StateMachine::Command::Mode::PATH_FOLLOW:
                 pp.compute(p, v_cmd, w_cmd);
+                w_cmd += cmd.omega_bias_rad_s;
                 break;
             case StateMachine::Command::Mode::STOP:
             default:

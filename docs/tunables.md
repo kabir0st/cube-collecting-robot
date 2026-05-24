@@ -244,20 +244,48 @@ triggers slightly short.
 - Bump `push_v` for faster cycles, but slow keeps the target from
   squirting out under contact.
 
-### CARRY_HOME drag guard
+### CARRY_HOME reactive avoidance
 
-#### `_carry_target_lost_timeout_s = 10.0`
-If `snap.captured` stays false for this many continuous seconds during
-CARRY_HOME **and** vision is otherwise healthy (target colour absent
-but at least one obstacle blob seen), the gripper releases whatever
-it has — guards against carrying the wrong colored box if a swap
-occurred mid-drag. Pure occlusion (camera sees no blobs at all) gets
-infinite grace, since the gripper arms genuinely block the camera in
-some configurations.
-- Increase: more tolerance for partial occlusion (heavy arm shadows,
-  slow target re-acquisition).
-- Decrease: catches swaps faster, risk of false-release if the
-  tracker takes a while to re-acquire after gripper close.
+Pure-pursuit alone has no obstacle awareness — the spline cuts straight to
+the home anchor regardless of what sits in between. These three constants
+overlay an APPROACH-style omega bias on top of pure-pursuit's steering so
+the robot curves around off-axis obstacle boxes instead of dragging them
+home. The bias is summed in `_carry_repulsion_bias()` and added to
+`w_cmd` after `pp.compute()` in the `PATH_FOLLOW` branch of
+[src/core.cpp](../src/core.cpp). Lidar gate + stuck-recovery FSM still
+run as the late-stage safety net.
+
+#### `_carry_repulsion_gain = 60` (rad/s × mm)
+Same shape as `_approach_repulsion_gain`. For each obstacle observation
+inside `_carry_avoid_window_mm` and within the forward half-plane, omega
+gets a bias `gain / max(distance_mm, 100)` signed away from the obstacle.
+At 250 mm that's 0.24 rad/s of avoidance bias added to pure-pursuit's
+steering output.
+- Increase: stronger curve away from boxes; risk of spinning off the
+  spline and stalling in the stuck-recovery FSM.
+- Decrease: gentler avoidance, risk of brushing past or dragging boxes.
+- Set to 0 to disable carry-time reactive avoidance entirely
+  (pure-pursuit + lidar gate + stuck-recovery only).
+
+#### `_carry_avoid_window_mm = 800` (mm)
+Ignore obstacles farther than this from the camera. Replaces APPROACH's
+`obs.distance_mm < snap.distance_mm` check (no target during carry, so
+nothing to compare against).
+- Increase: react earlier to distant boxes; risk of premature swerving
+  that the spline can't recover from.
+- Decrease: react only to close-range threats; risk of last-second
+  swerves the bias clamp can't satisfy.
+
+#### `_carry_repulsion_omega_max = 0.6` (rad/s)
+Hard clamp on the carry-time bias magnitude. Keeps the bias from
+overpowering pure-pursuit when multiple obstacles stack into the sum,
+or when one obstacle is very close.
+- Increase: bias can dominate pure-pursuit; useful if obstacles cluster
+  along the home line and the default clamp leaves the robot still
+  brushing them.
+- Decrease: pure-pursuit retains more authority; the bias is then a
+  nudge rather than a steer. Lower this before lowering the gain if
+  the robot oscillates left-right around a single box.
 
 ### RELEASE / TURN_AROUND
 

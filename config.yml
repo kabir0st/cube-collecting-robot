@@ -109,25 +109,25 @@ filter:
     lower2: "0,0,0"
     upper2: "0,0,0"
   obstacles:
-    count: 0
-    # 0:
-    #   has_wrap_around: false
-    #   dominant_color: "164.086,185.679,128.855"
-    #   lower1: "155,130,62"
-    #   upper1: "171,207,177"
-    #   lower2: "0,0,0"
-    #   upper2: "0,0,0"
-    # 1:
-    #   has_wrap_around: false
-    #   dominant_color: "23.214,180.989,127.003"
-    #   lower1: "16,131,61"
-    #   upper1: "32,211,176"
-    #   lower2: "0,0,0"
-    #   upper2: "0,0,0"
-    # 2:
-    #   has_wrap_around: false
-    #   dominant_color: "128.884,110.705,69.2139"
-    #   lower1: "119,58,9"
-    #   upper1: "140,138,122"
-    #   lower2: "0,0,0"
-    #   upper2: "0,0,0"
+    count: 3
+    0:
+      has_wrap_around: false
+      dominant_color: "164.086,185.679,128.855"
+      lower1: "155,130,62"
+      upper1: "171,207,177"
+      lower2: "0,0,0"
+      upper2: "0,0,0"
+    1:
+      has_wrap_around: false
+      dominant_color: "23.214,180.989,127.003"
+      lower1: "16,131,61"
+      upper1: "32,211,176"
+      lower2: "0,0,0"
+      upper2: "0,0,0"
+    2:
+      has_wrap_around: false
+      dominant_color: "128.884,110.705,69.2139"
+      lower1: "119,58,9"
+      upper1: "140,138,122"
+      lower2: "0,0,0"
+      upper2: "0,0,0"

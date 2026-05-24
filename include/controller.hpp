@@ -42,6 +42,11 @@ public:
         Mode   mode         = Mode::STOP;
         double v_mm_s       = 0.0;
         double omega_rad_s  = 0.0;
+        // Additive omega bias applied AFTER pure-pursuit's compute() in
+        // PATH_FOLLOW mode. CARRY_HOME uses this to overlay vision-based
+        // obstacle repulsion on top of the pursuit steering. Zero in
+        // DIRECT / STOP — those publish omega_rad_s directly.
+        double omega_bias_rad_s = 0.0;
     };
 
     StateMachine(TrackerResult& vision,
@@ -414,6 +419,17 @@ private:
     double _carry_recovery_reverse_timeout_s = 6.0;  // safety cap
     double _carry_recovery_curl_offset_mm  = 250.0;
     int    _carry_recovery_max_attempts    = 2;
+    // Reactive obstacle avoidance during CARRY_HOME (overlay on top of
+    // pure-pursuit's steering). Same shape as _approach_repulsion_gain
+    // but a separate constant because pure-pursuit already pulls toward
+    // home — too much bias and the robot spins off the spline.
+    double _carry_repulsion_gain        = 60.0;
+    // Ignore obstacles farther than this. Replaces APPROACH's
+    // obs.distance_mm < snap.distance_mm gate (no target during carry).
+    double _carry_avoid_window_mm       = 800.0;
+    // Hard clamp on the carry-time omega bias so it can't overpower
+    // pure-pursuit entirely.
+    double _carry_repulsion_omega_max   = 0.6;
 
     // State change: runs exit side-effects (clear path, abort controller)
     // on the outgoing state and entry side-effects (plan spline) on the
@@ -443,4 +459,11 @@ private:
                                double gx, double gy, double gtheta,
                                double margin_mm, double v_max_mm_s,
                                double lateral_offset_mm);
+
+    // Sum the vision-repulsion bias from this-frame obstacle observations
+    // for the CARRY_HOME overlay. Same shape as APPROACH's omega_avoid
+    // loop (controller.cpp:1067-1083) but gated on _carry_avoid_window_mm
+    // (no target distance to compare against) and clamped to
+    // _carry_repulsion_omega_max so it can't overpower pure-pursuit.
+    double _carry_repulsion_bias(const TrackerResult::Snapshot& snap) const;
 };

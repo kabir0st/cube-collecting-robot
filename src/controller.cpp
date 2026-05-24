@@ -403,6 +403,22 @@ void StateMachine::_enter_search(const Pos2D& current) {
     _transition(State::GOTO, current);
 }
 
+double StateMachine::_carry_repulsion_bias(
+        const TrackerResult::Snapshot& snap) const {
+    double omega_avoid = 0.0;
+    for (const auto& obs : snap.obstacles) {
+        if (obs.distance_mm > _carry_avoid_window_mm) continue;
+        if (std::fabs(obs.bearing_rad) > M_PI / 2.0) continue;
+        const double mag =
+            _carry_repulsion_gain
+            / std::max(obs.distance_mm, 100.0);
+        omega_avoid += -std::copysign(mag, obs.bearing_rad);
+    }
+    return clamp_d(omega_avoid,
+                   -_carry_repulsion_omega_max,
+                   +_carry_repulsion_omega_max);
+}
+
 bool StateMachine::_plan_path_to(const Pos2D& current,
                                  double gx, double gy, double gtheta,
                                  double margin_mm, double v_max_mm_s) {
@@ -1198,6 +1214,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                     _stuck_anchor_pose       = pose;
                     _stuck_anchor_at         = now;
                     _carry_recovery_attempts++;
+                    out.omega_bias_rad_s = _carry_repulsion_bias(snap);
                     out.mode = Command::Mode::PATH_FOLLOW;
                     break;
                 }
@@ -1249,6 +1266,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 out.omega_rad_s = 0.0;
                 break;
             }
+            out.omega_bias_rad_s = _carry_repulsion_bias(snap);
             out.mode = Command::Mode::PATH_FOLLOW;
             break;
         }
