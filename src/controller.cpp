@@ -621,7 +621,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 break;
             }
 
-            if (!target_visible || !allow_engage) {
+            if (!target_visible) {
                 _search_skip_streak = false;
             }
 
