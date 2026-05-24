@@ -204,6 +204,44 @@ world target. Give up and fall back to SEARCH inside this radius.
 - Increase: more tolerance for transient vision drops.
 - Decrease: faster bail on lost targets.
 
+#### `_approach_repulsion_gain = 50` (rad/s × mm)
+Reactive obstacle avoidance inside the visual servo. For every
+non-target colored box detected in front of the target on the visual
+axis, omega gets a bias `gain / max(distance_mm, 100)` signed away
+from the obstacle. At 250 mm this is 0.2 rad/s of avoidance bias on
+top of the bearing P-term.
+- Increase: stronger swerve around obstacles; risk of overshooting
+  the target's bearing.
+- Decrease: gentler avoidance, risk of brushing past blockers.
+- Set to 0 to disable reactive avoidance (target will be chased
+  straight; chain-push case will only be caught at the SEARCH
+  obstacle-block filter).
+
+#### `_approach_push_v = 20 mm/s`, `_approach_push_distance_mm = 30`, `_approach_push_timeout_s = 2.0`
+Push-then-grip phase. On the first `grabbable` tick, instead of
+immediately decelerating + closing the jaws, drive forward slowly
+for `push_distance_mm` (or until `push_timeout_s`) so the target is
+fully seated in the gripper before the close-servo fires. Avoids
+the "jaws close on the front face" half-grip when the visual gate
+triggers slightly short.
+- Increase distance: deeper seating; risk of pushing the target out
+  of the gripper if too long.
+- Decrease distance: less push; risk of half-grip failures.
+- Bump `push_v` for faster cycles, but slow keeps the target from
+  squirting out under contact.
+
+### CARRY_HOME drag guard
+
+#### `_carry_target_lost_timeout_s = 5.0`
+If `snap.captured` stays false for this many continuous seconds
+during CARRY_HOME, the gripper is releasing whatever it has —
+guards against carrying the wrong colored box home if a bump caused
+a swap. Generous to ride out arm occlusion during normal carry.
+- Increase: more tolerance for occlusion (rear-camera setup, heavy
+  arm shadows on box, slow target re-acquisition).
+- Decrease: catches swaps faster, risk of false-release if the
+  tracker takes a while to re-acquire after gripper close.
+
 ### RELEASE / TURN_AROUND
 
 #### `_release_v = -40 mm/s` (backward)
@@ -283,6 +321,39 @@ Used by GOTO / TEST to settle the KF before declaring arrival.
   false-positive rate from the gripper cone.
 - Widen `GRIPPER_MASK_*`: hides the held box more reliably from the
   obstacle gate. If too wide, real obstacles in that arc are ignored.
+
+### Colour-based obstacle memory ([include/controller.hpp](../include/controller.hpp))
+
+The vision tracker reports per-frame observations of any non-target
+colour configured under `filter.obstacles.*`. The state machine
+projects each observation to world coordinates and keeps a decaying
+memory used by SEARCH (skip targets adjacent to a known obstacle)
+and APPROACH (reactive omega bias).
+
+- `_obstacle_merge_radius_mm = 200` — observations within this
+  distance of an existing entry of the same colour are merged via EMA
+  blend (α=0.35) instead of appended. Tighter = more sensitive to
+  jitter; looser = entries drift faster as the obstacle moves.
+- `_obstacle_forget_s = 30` — entries older than this are dropped on
+  every tick. Decrease for genuinely dynamic obstacles; increase if
+  the operator wants long-lived memory of static obstacles.
+- `_obstacle_block_radius_mm = 250` — SEARCH skips any detected
+  target inside this radius of a remembered obstacle (logged as
+  `reason=obs_block`). Tune to the typical chain-push distance.
+
+### Calibration ([src/calibrations.cpp](../src/calibrations.cpp), [main.cpp](../main.cpp))
+
+App startup checks `filter.ready` in `config.yml`. If false / missing,
+the calibration routine runs once for the target colour, then loops
+asking the operator (`y/n` on stdin) whether to calibrate another
+obstacle colour. Each `y` opens the same trackbar UI and writes the
+result under `filter.obstacles.<N>`. On finish, sets
+`filter.ready=true`, writes the config, and exits — restart to run
+the mission.
+
+To recalibrate later, edit `config.yml` and set `filter.ready: false`
+(optionally also clear the existing `filter.target` / `filter.obstacles`
+keys), then restart.
 
 ---
 

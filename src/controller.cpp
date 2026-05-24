@@ -182,6 +182,7 @@ void StateMachine::go_to(double x, double y, double theta) {
         _goto_y = y;
         _goto_theta = theta;
         _goto_pending = true;
+        _post_goto_state = State::DONE;   // external GOTO never chains
         _state.store(State::GOTO);
         _state_entered = std::chrono::steady_clock::now();
     }
@@ -268,9 +269,16 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
         // Each approach starts from a fresh grip cycle.
         _grip_stop_sent = false;
         _grip_fired     = false;
+        _push_active    = false;
         // Seed the vision-lost watchdog so we don't immediately fire on a
         // single frame of perception noise during state entry.
         _approach_last_seen_at = std::chrono::steady_clock::now();
+    }
+
+    if (new_state == State::CARRY_HOME) {
+        // Seed the drag-guard so a brief gripper-arm occlusion right
+        // after capture doesn't fire the target-lost release.
+        _carry_last_target_seen_at = std::chrono::steady_clock::now();
     }
 
     if (new_state == State::RELEASE) {
@@ -322,6 +330,50 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
         _state_entered  = now;
     }
     LOG("Mission") << state_name(old_state) << " -> " << state_name(new_state);
+}
+
+void StateMachine::_enter_search(const Pos2D& current) {
+    double hx_local, hy_local;
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        hx_local = _home_x;
+        hy_local = _home_y;
+    }
+
+    const double dist_from_home =
+        std::hypot(current.x - hx_local, current.y - hy_local);
+    const bool far_from_home = dist_from_home > _search_far_threshold_mm;
+    const double stage_theta = far_from_home ? M_PI : 0.0;
+    const double stage_x = clamp_d(current.x,
+                                   _search_stage_x_min_mm,
+                                   _search_stage_x_max_mm);
+    const double stage_y = hy_local;
+
+    const bool x_ok     = std::fabs(current.x - stage_x) <= _planned_margin_mm;
+    const bool y_ok     = std::fabs(current.y - stage_y) <= _planned_margin_mm;
+    const bool theta_ok = std::fabs(wrap_pi(current.theta - stage_theta))
+                            <= _search_stage_theta_tol;
+
+    if (x_ok && y_ok && theta_ok) {
+        // Already on the home y-line with a valid heading — skip staging.
+        _transition(State::SEARCH, current);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _goto_x = stage_x;
+        _goto_y = stage_y;
+        _goto_theta = stage_theta;
+        _goto_pending = true;
+        _post_goto_state = State::SEARCH;
+    }
+    LOG("Mission") << "_enter_search: staging to (" << stage_x
+                   << ", " << stage_y << ", " << stage_theta
+                   << ") far=" << far_from_home
+                   << " from (" << current.x << ", " << current.y
+                   << ", " << current.theta << ")";
+    _transition(State::GOTO, current);
 }
 
 bool StateMachine::_plan_path_to(const Pos2D& current,
@@ -389,6 +441,50 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
     const double t_in    = seconds_since(entered_at);
     const State s = _state.load();
 
+    // ---- Obstacle world-frame memory ----
+    // Project each this-frame obstacle observation to world; merge into
+    // the nearest existing entry of the same color within
+    // _obstacle_merge_radius_mm (EMA blend) or append a fresh entry.
+    // Then drop entries that haven't been refreshed for
+    // _obstacle_forget_s.
+    {
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& obs : snap.obstacles) {
+            if (obs.distance_mm <= 0.0) continue;
+            double ox, oy;
+            polar_to_world(pose, obs.bearing_rad, obs.distance_mm, ox, oy);
+            int    best = -1;
+            double best_d = _obstacle_merge_radius_mm;
+            for (size_t i = 0; i < _obstacles.entries.size(); ++i) {
+                const auto& e = _obstacles.entries[i];
+                if (e.color_id != obs.color_id) continue;
+                const double d = std::hypot(ox - e.x_mm, oy - e.y_mm);
+                if (d < best_d) { best_d = d; best = static_cast<int>(i); }
+            }
+            if (best >= 0) {
+                // EMA blend so spurious jitter doesn't snap the position.
+                auto& e = _obstacles.entries[best];
+                constexpr double ALPHA = 0.35;
+                e.x_mm = (1.0 - ALPHA) * e.x_mm + ALPHA * ox;
+                e.y_mm = (1.0 - ALPHA) * e.y_mm + ALPHA * oy;
+                e.last_seen = now;
+            } else {
+                ObstacleMemory::Entry e;
+                e.x_mm = ox; e.y_mm = oy;
+                e.color_id = obs.color_id;
+                e.last_seen = now;
+                _obstacles.entries.push_back(e);
+            }
+        }
+        // Decay
+        _obstacles.entries.erase(
+            std::remove_if(_obstacles.entries.begin(), _obstacles.entries.end(),
+                [&](const ObstacleMemory::Entry& e) {
+                    return seconds_since(e.last_seen) > _obstacle_forget_s;
+                }),
+            _obstacles.entries.end());
+    }
+
     // Box position derived from robot pose + arm length along heading.
     double box_x, box_y;
     polar_to_world(pose, 0.0, arm, box_x, box_y);
@@ -439,13 +535,31 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                         (det_x - hx) * std::cos(ht) +
                         (det_y - hy) * std::sin(ht);
                     const bool behind_home = along_home < 0.0;
-                    if (det_to_home < hskip || behind_home) {
+                    // Obstacle-block: skip target if it sits inside the
+                    // exclusion radius of any remembered obstacle world
+                    // position. Catches the chain-push case (blocker
+                    // adjacent to target) before APPROACH even fires.
+                    bool blocked_by_obs = false;
+                    for (const auto& e : _obstacles.entries) {
+                        const double d = std::hypot(det_x - e.x_mm,
+                                                    det_y - e.y_mm);
+                        if (d < _obstacle_block_radius_mm) {
+                            blocked_by_obs = true;
+                            break;
+                        }
+                    }
+                    if (det_to_home < hskip || behind_home || blocked_by_obs) {
                         if (!_search_skip_streak) {
+                            const char* reason =
+                                blocked_by_obs ? "obs_block"
+                                : behind_home  ? "behind_home"
+                                               : "at_home";
                             LOG("Mission")
-                                << "Skipping at-home box at world ("
+                                << "Skipping box at world ("
                                 << det_x << ", " << det_y << "), "
                                 << det_to_home << " mm from home, "
-                                << "along_home=" << along_home << " mm";
+                                << "along_home=" << along_home
+                                << " mm, reason=" << reason;
                             _search_skip_streak = true;
                         }
                         at_home_skip = true;
@@ -518,6 +632,9 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 _ssearch.phase = SimpleSearch::Phase::LOOK_LEFT;
                 _ssearch.forward_traveled_mm  = 0.0;
                 _ssearch.rotation_accumulated = 0.0;
+                _ssearch.obstacle_rotated_rad = 0.0;
+                _ssearch.obstacle_dir_sign    = 0.0;
+                _ssearch.forward_heading_ref  = pose.theta;
                 _ssearch.last_x     = pose.x;
                 _ssearch.last_y     = pose.y;
                 _ssearch.last_theta = pose.theta;
@@ -548,7 +665,11 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 _ssearch.last_theta = pose.theta;
                 if (_ssearch.rotation_accumulated <= -M_PI) {
                     _ssearch.phase = SimpleSearch::Phase::FORWARD;
-                    _ssearch.forward_traveled_mm = 0.0;
+                    _ssearch.forward_traveled_mm    = 0.0;
+                    _ssearch.rotation_accumulated   = 0.0;
+                    _ssearch.obstacle_rotated_rad   = 0.0;
+                    _ssearch.obstacle_dir_sign      = 0.0;
+                    _ssearch.forward_heading_ref    = pose.theta;
                     _ssearch.last_x = pose.x;
                     _ssearch.last_y = pose.y;
                 }
@@ -560,21 +681,64 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
 
             // Phase::FORWARD
             if (app::obstacle_ahead.load()) {
-                // Obstacle in the forward arc -> rotate in place to clear
-                // it. Accumulate nothing on the forward odometer; the leg
-                // resumes once the path is open.
-                _ssearch.last_x     = pose.x;
-                _ssearch.last_y     = pose.y;
+                // Pick a rotation direction once per obstacle from lidar
+                // side clearance — turn toward the freer half-arc.
+                if (_ssearch.obstacle_dir_sign == 0.0) {
+                    const double L = app::obstacle_left_mm.load();
+                    const double R = app::obstacle_right_mm.load();
+                    _ssearch.obstacle_dir_sign = (L >= R) ? +1.0 : -1.0;
+                }
+                _ssearch.obstacle_rotated_rad += dth_signed;
                 _ssearch.last_theta = pose.theta;
+                if (std::fabs(_ssearch.obstacle_rotated_rad)
+                        >= _search_obstacle_max_rotation_rad) {
+                    // Couldn't clear obstacle in a half-turn. Abandon the
+                    // leg and restart the sweep from the new heading; if
+                    // the situation is truly stuck the mission-wide
+                    // _search_timeout_s will kill SEARCH.
+                    _ssearch.phase = SimpleSearch::Phase::LOOK_LEFT;
+                    _ssearch.rotation_accumulated = 0.0;
+                    _ssearch.obstacle_rotated_rad = 0.0;
+                    _ssearch.obstacle_dir_sign    = 0.0;
+                    out.mode = Command::Mode::DIRECT;
+                    out.v_mm_s = 0.0;
+                    out.omega_rad_s = 0.0;
+                    break;
+                }
                 out.mode = Command::Mode::DIRECT;
                 out.v_mm_s = 0.0;
-                out.omega_rad_s = _search_omega;
+                out.omega_rad_s = _ssearch.obstacle_dir_sign * _search_omega;
                 break;
             }
+
+            // Obstacle just cleared (or we never had one this leg). If we
+            // rotated to dodge, realign to forward_heading_ref before
+            // resuming v_forward so the cycle still walks -90° per cycle
+            // around the arena instead of drifting wherever the dodge
+            // ended.
+            if (std::fabs(_ssearch.obstacle_rotated_rad) > 1e-3) {
+                const double heading_err =
+                    wrap_pi(_ssearch.forward_heading_ref - pose.theta);
+                if (std::fabs(heading_err) > _search_stage_theta_tol) {
+                    _ssearch.last_theta = pose.theta;
+                    out.mode = Command::Mode::DIRECT;
+                    out.v_mm_s = 0.0;
+                    out.omega_rad_s = (heading_err > 0.0 ? +1.0 : -1.0)
+                                      * _search_omega;
+                    break;
+                }
+                _ssearch.obstacle_rotated_rad = 0.0;
+                _ssearch.obstacle_dir_sign    = 0.0;
+            }
             {
+                // Signed forward odometer: project the body-frame step
+                // onto the heading so backward push and lateral jitter do
+                // not inflate progress.
                 const double dx = pose.x - _ssearch.last_x;
                 const double dy = pose.y - _ssearch.last_y;
-                _ssearch.forward_traveled_mm += std::hypot(dx, dy);
+                const double step = dx * std::cos(pose.theta)
+                                  + dy * std::sin(pose.theta);
+                if (step > 0.0) _ssearch.forward_traveled_mm += step;
                 _ssearch.last_x     = pose.x;
                 _ssearch.last_y     = pose.y;
                 _ssearch.last_theta = pose.theta;
@@ -585,7 +749,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 _ssearch.last_theta = pose.theta;
                 out.mode = Command::Mode::DIRECT;
                 out.v_mm_s = 0.0;
-                out.omega_rad_s = _search_omega;
+                out.omega_rad_s = 0.0;
                 break;
             }
             out.mode = Command::Mode::DIRECT;
@@ -600,9 +764,12 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             // fired yet). A brief vision flicker into snap.captured or
             // snap.grabbable would otherwise leave _grip_stop_sent=true and
             // skip the deceleration tick on the next genuine grip trigger
-            // — closing the jaws at full chase speed.
+            // — closing the jaws at full chase speed. Push-phase latch
+            // resets on the same gate so a single-frame grabbable blink
+            // doesn't leave the pushed-distance accumulator stale.
             if (!_grip_fired && !snap.captured && !snap.grabbable) {
                 _grip_stop_sent = false;
+                _push_active    = false;
             }
 
             // 1. Servo grab already fired. Treat the grip as committed: once
@@ -657,18 +824,37 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 break;
             }
 
-            // 3. Box is in the grab zone. Two-tick sequence so the motor
-            //    has a control cycle to decelerate before the gripper
-            //    target is latched:
-            //      tick N   — command v=0, latch _grip_stop_sent
-            //      tick N+1 — call servo_grab() (non-blocking: latches the
-            //                 target angle; servo_tick() in loop_control
-            //                 walks the PWM in STEP_DEG / STEP_MS chunks to
-            //                 cap inrush current). _grip_fired is set
-            //                 immediately, and v=0 stays commanded by the
-            //                 hold-after-grab logic below while the slew
-            //                 completes.
+            // 3. Box is in the grab zone. Sequence is:
+            //    - first grabbable tick: latch push phase; drive slowly
+            //      forward to seat the target between the gripper arms.
+            //    - push complete (distance or timeout): latch
+            //      _grip_stop_sent + command v=0 for one tick to let the
+            //      motor decelerate before the servo latches.
+            //    - next tick: call servo_grab() (non-blocking: latches the
+            //      target angle; servo_tick() in loop_control walks the
+            //      PWM in STEP_DEG / STEP_MS chunks). _grip_fired stays
+            //      true and v=0 is held by branch (1) above while the
+            //      slew completes.
             if (snap.grabbable) {
+                if (!_push_active) {
+                    _push_active = true;
+                    _push_started_at = std::chrono::steady_clock::now();
+                    _push_start_x = pose.x;
+                    _push_start_y = pose.y;
+                    LOG("Mission") << "APPROACH: push-then-grip start";
+                }
+                const double dx = pose.x - _push_start_x;
+                const double dy = pose.y - _push_start_y;
+                const double pushed = std::hypot(dx, dy);
+                const double t_pushing = seconds_since(_push_started_at);
+                const bool push_done = (pushed >= _approach_push_distance_mm)
+                                    || (t_pushing >= _approach_push_timeout_s);
+                if (!push_done) {
+                    out.mode = Command::Mode::DIRECT;
+                    out.v_mm_s = _approach_push_v;
+                    out.omega_rad_s = 0.0;
+                    break;
+                }
                 if (!_grip_stop_sent) {
                     _grip_stop_sent = true;
                     out.mode = Command::Mode::DIRECT;
@@ -707,7 +893,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 if (t_lost > _approach_vision_lost_timeout_s) {
                     LOG("Mission") << "APPROACH: vision lost for "
                                    << t_lost << " s; -> SEARCH";
-                    _transition(State::SEARCH, pose);
+                    _enter_search(pose);
                     out.mode = Command::Mode::STOP;
                     break;
                 }
@@ -733,7 +919,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                         break;
                     }
                 }
-                _transition(State::SEARCH, pose);
+                _enter_search(pose);
                 out.mode = Command::Mode::STOP;
                 break;
             }
@@ -750,23 +936,59 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                     _last_failed_target_y = _last_target_y;
                     _last_failed_at = std::chrono::steady_clock::now();
                 }
-                _transition(State::SEARCH, pose);
+                _enter_search(pose);
                 out.mode = Command::Mode::STOP;
                 break;
             }
 
-            // Visual servo: forward at constant speed, steer with bearing.
-            // Bearing is +left (tracker convention); motor omega is
-            // CCW-positive, which matches: +bearing -> +omega.
+            // Visual servo: forward at constant speed, steer with bearing
+            // (P controller). Bearing is +left (tracker convention);
+            // motor omega is CCW-positive, which matches: +bearing -> +omega.
+            // Add a reactive repulsion bias from each obstacle that sits
+            // in front of the target on the visual axis — steers around
+            // the blocker while still chasing the target.
+            double omega_target = _approach_k_omega * snap.bearing_rad;
+            double omega_avoid  = 0.0;
+            for (const auto& obs : snap.obstacles) {
+                if (obs.distance_mm >= snap.distance_mm) continue;
+                if (std::fabs(obs.bearing_rad) > M_PI / 2.0) continue;
+                const double mag =
+                    _approach_repulsion_gain
+                    / std::max(obs.distance_mm, 100.0);
+                // Steer opposite the obstacle bearing: +bearing (left) =>
+                // negative omega bias (steer right).
+                omega_avoid += -std::copysign(mag, obs.bearing_rad);
+            }
             out.mode = Command::Mode::DIRECT;
             out.v_mm_s = _approach_v;
-            out.omega_rad_s = clamp_d(_approach_k_omega * snap.bearing_rad,
+            out.omega_rad_s = clamp_d(omega_target + omega_avoid,
                                       -_approach_omega_max,
                                       _approach_omega_max);
             break;
         }
 
         case State::CARRY_HOME: {
+            // Drag guard: only carry home when we can still see the
+            // target colour. The gripper arms occlude the box during
+            // normal carry so a brief lost-track is expected — the
+            // _carry_target_lost_timeout_s wait covers that. Persistent
+            // loss is treated as "wrong / swapped box" and we release.
+            if (snap.captured) {
+                _carry_last_target_seen_at = std::chrono::steady_clock::now();
+            }
+            const double t_since_seen =
+                seconds_since(_carry_last_target_seen_at);
+            if (t_since_seen > _carry_target_lost_timeout_s) {
+                LOG("Mission")
+                    << "CARRY_HOME: target tracking lost for "
+                    << t_since_seen
+                    << " s; releasing (suspected wrong box in gripper).";
+                _transition(State::RELEASE, pose);
+                out.mode = Command::Mode::DIRECT;
+                out.v_mm_s = _release_v;
+                out.omega_rad_s = 0.0;
+                break;
+            }
             if (_controller.has_arrived()) {
                 _transition(State::RELEASE, pose);
                 out.mode = Command::Mode::DIRECT;
@@ -816,14 +1038,14 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             const double delta = wrap_pi(home_theta_local - pose.theta);
 
             if (std::fabs(delta) < 0.05) {  // ~3°
-                _transition(State::SEARCH, pose);
+                _enter_search(pose);
                 out.mode = Command::Mode::STOP;
                 break;
             }
             if (t_in > _turn_around_timeout_s) {
                 LOG("Mission") << "REALIGN timed out after " << t_in
                                << " s; bailing to SEARCH.";
-                _transition(State::SEARCH, pose);
+                _enter_search(pose);
                 out.mode = Command::Mode::STOP;
                 break;
             }
@@ -886,7 +1108,17 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                                    << (gate_pass ? " (pass)"
                                                  : " (FAIL — accepting)");
                     _halting = false;
-                    _transition(State::DONE, pose);
+                    State next;
+                    {
+                        std::lock_guard<std::mutex> lk(_m);
+                        next = _post_goto_state;
+                        _post_goto_state = State::DONE;
+                    }
+                    // Chain target consumed: transition directly. Re-running
+                    // _enter_search here would re-evaluate stage_theta from
+                    // the post-halt pose and could oscillate when the
+                    // staged x sits near _search_far_threshold_mm.
+                    _transition(next, pose);
                 }
                 out.mode = Command::Mode::STOP;
                 break;
@@ -989,6 +1221,8 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
     dash.set("Mission", "t_state_s",  t_in);
     dash.set("Mission", "box_to_home_mm", box_to_home);
     dash.set("Mission", "attempts",   static_cast<int64_t>(attempts_now));
+    dash.set("Mission", "obstacles",
+             static_cast<int64_t>(_obstacles.entries.size()));
     dash.set("Mission", "skipping",
              std::string(skip_streak_now ? "yes" : "no"));
     dash.set("Mission", "cmd_mode",

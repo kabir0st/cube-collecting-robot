@@ -1,7 +1,9 @@
-#include <iostream>
-#include <thread>
+#include <algorithm>
 #include <chrono>
+#include <iostream>
+#include <limits>
 #include <map>
+#include <thread>
 #include <vector>
 
 #include <global.hpp>
@@ -71,7 +73,14 @@ void loop_collect_frames(hh::Lidar& lidar, LidarData& lidar_data) {
     }
     if (app::shutdown) return;
     LOG("LIDAR") << "Starting frame collection";
-    bool frame_blocked = false;
+    constexpr double INF = std::numeric_limits<double>::infinity();
+    bool   frame_blocked = false;
+    // Per-frame minimum distance in each half of the forward arc. Lidar 0°
+    // is forward and angle increases CCW, so 0–60° lives on the body-frame
+    // +Y side (left) and 300–360° on the -Y side (right). Republished at
+    // each frame boundary, then reset for the next sweep.
+    double left_min_mm  = INF;
+    double right_min_mm = INF;
     while (!app::shutdown && !app::lidar_stop)
     {
         if (lidar.readNormalScanDataPacket(&pkt) != LIDAR_SUCCESS) continue;
@@ -86,15 +95,22 @@ void loop_collect_frames(hh::Lidar& lidar, LidarData& lidar_data) {
             lidar_data.update_buffer_id();
             bid = lidar_data.buffer_id.load();
             app::obstacle_ahead.store(frame_blocked);
+            app::obstacle_left_mm.store(left_min_mm);
+            app::obstacle_right_mm.store(right_min_mm);
             frame_blocked = false;
+            left_min_mm  = INF;
+            right_min_mm = INF;
         }
         // only add quality reading and remove outlier dist
         if (quality > 0 && dist > 0){
             lidar_data.frames[bid].ang.push_back(angle);
             lidar_data.frames[bid].dist.push_back(dist);
-            const bool in_forward_arc =
-                (angle <= OBSTACLE_ARC_HALF_DEG) ||
+            const bool in_left_arc =
+                (angle > 0.0 && angle <= OBSTACLE_ARC_HALF_DEG);
+            const bool in_right_arc =
                 (angle >= 360.0 - OBSTACLE_ARC_HALF_DEG);
+            const bool in_forward_arc = in_left_arc || in_right_arc ||
+                                        angle == 0.0;
             const bool in_gripper_mask =
                 (angle <= GRIPPER_MASK_HALF_DEG) ||
                 (angle >= 360.0 - GRIPPER_MASK_HALF_DEG);
@@ -106,8 +122,10 @@ void loop_collect_frames(hh::Lidar& lidar, LidarData& lidar_data) {
             // measurement that wasn't useful.
             const bool gripper_artifact =
                 in_gripper_mask && dist < GRIPPER_MASK_DIST_MM;
-            if (in_forward_arc && dist < OBSTACLE_DIST_MM && !gripper_artifact) {
-                frame_blocked = true;
+            if (in_forward_arc && !gripper_artifact) {
+                if (dist < OBSTACLE_DIST_MM) frame_blocked = true;
+                if (in_left_arc)  left_min_mm  = std::min(left_min_mm,  dist);
+                if (in_right_arc) right_min_mm = std::min(right_min_mm, dist);
             }
         }
     }

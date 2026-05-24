@@ -1,8 +1,13 @@
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <csignal>
+#include <iostream>
+#include <limits>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include <global.hpp>
 #include <types.hpp>
@@ -20,6 +25,8 @@ std::atomic<bool> app::shutdown{false};
 std::atomic<bool> app::lidar_ready{false};
 std::atomic<bool> app::lidar_stop{false};
 std::atomic<bool> app::obstacle_ahead{false};
+std::atomic<double> app::obstacle_left_mm{std::numeric_limits<double>::infinity()};
+std::atomic<double> app::obstacle_right_mm{std::numeric_limits<double>::infinity()};
 std::atomic<bool> app::relocalizing{false};
 std::atomic<bool> app::cox_first_fix{false};
 std::atomic<bool> app::motors_ready{false};
@@ -162,30 +169,61 @@ int main() {
         cfg.get_bool("logger.files_enabled", false),
         cfg.get_str ("logger.out_dir",       "logs"));
 
-    FilterResult filter;
-    if (load_filter_result(cfg, filter)) {
-        LOG("Main") << "Loaded filter calibration from " << config_path;
-    } else {
-        LOG("Main") << "No filter calibration in config — running calibration.";
-        CalibrateCamera calibrator(cam_cfg);
-        filter = calibrator.start_filter_calibration();
-        if (filter.ready) {
-            if (save_filter_result(config_path, filter)) {
-                LOG("Main") << "Saved filter calibration to " << config_path;
-            } else {
-                LOG("Main") << "Failed to write filter calibration to " << config_path;
-            }
-            std::cout << "Waiting 1 seconds before starting . ..\n";
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        } else {
-            LOG("Main") << "Calibration aborted; filter not saved.";
+    FilterResult target_filter;
+    std::vector<FilterResult> obstacle_filters;
+    const bool filter_ready  = cfg.get_bool("filter.ready", false);
+    const bool target_loaded = filter_ready && load_filter_result(cfg, target_filter);
+
+    if (!filter_ready || !target_loaded) {
+        if (filter_ready && !target_loaded) {
+            LOGE("Main") << "filter.ready=true but filter.target is missing/"
+                            "malformed. Set filter.ready=false in config.yml "
+                            "and re-run to recalibrate.";
+            return 1;
         }
+        LOG("Main") << "No filter calibration — running calibration.";
+        CalibrateCamera calibrator(cam_cfg);
+        target_filter = calibrator.start_filter_calibration();
+        if (!target_filter.ready) {
+            LOGE("Main") << "Target calibration aborted; nothing saved.";
+            return 1;
+        }
+        // Loop for obstacle colours. Terminal-driven so we can run on a
+        // headless Pi without a window manager wrapper.
+        for (size_t i = 0; ; ++i) {
+            std::cout << "Calibrate obstacle colour " << i
+                      << "? (y/n): " << std::flush;
+            std::string answer;
+            if (!std::getline(std::cin, answer)) break;
+            if (answer.empty()) continue;
+            const char c = static_cast<char>(std::tolower(
+                static_cast<unsigned char>(answer[0])));
+            if (c != 'y') break;
+            CalibrateCamera obs_cal(cam_cfg);
+            FilterResult of = obs_cal.start_filter_calibration();
+            if (!of.ready) {
+                LOG("Main") << "Obstacle " << i
+                            << " calibration aborted; skipping.";
+                continue;
+            }
+            obstacle_filters.push_back(of);
+        }
+        if (!save_filter_section(config_path, target_filter, obstacle_filters,
+                                 /*ready=*/true)) {
+            LOGE("Main") << "Failed to write filter calibration to "
+                         << config_path;
+            return 1;
+        }
+        LOG("Main") << "Saved calibration: target + "
+                    << obstacle_filters.size()
+                    << " obstacle colour(s). Restart the app to run the mission.";
+        return 0;
     }
-    if (!filter.ready) {
-        LOGE("Main") << "Color filter is not ready -- vision cannot run. "
-                        "Refusing to start.";
-        return 1;
-    }
+
+    obstacle_filters = load_obstacle_filters(cfg);
+    LOG("Main") << "Loaded filter calibration from " << config_path
+                << " (target + " << obstacle_filters.size()
+                << " obstacle colour(s))";
 
     // start rest of the system
     INA219 power_interface = configure_voltage_interface();
@@ -215,7 +253,8 @@ int main() {
 
     dash.add_row("Vision");
     threads.emplace_back(loop_vision_tracking,
-        std::ref(dash), filter, cam_cfg, std::ref(target));
+        std::ref(dash), target_filter, obstacle_filters,
+        cam_cfg, std::ref(target));
     dash.render();
     dash.add_row("Motor");
     dash.add_row("Odometry");

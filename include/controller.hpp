@@ -144,22 +144,34 @@ private:
     double _last_failed_target_y     = 0.0;
     std::chrono::steady_clock::time_point _last_failed_at;
 
-    // Simple search behavior:
+    // Simple search behavior. Pre-condition (enforced by _enter_search):
+    // the robot has been staged to (clamped x, y=0, theta in {0, pi}) so
+    // every cycle starts from the home y-line with a known heading.
     //   1) LOOK_LEFT: rotate +90° from the heading at sweep start.
     //   2) LOOK_RIGHT: rotate continuously CW until -90° from sweep start
     //      (a 180° sweep through center to the right side).
-    //   3) FORWARD: drive _search_forward_target_mm at the current heading
-    //      (which is 90° CW of where the cycle started).
-    // The forward heading naturally rotates -90° each cycle, walking the
-    // search pattern around the arena. No 360° in-place spin: cox sees
-    // bounded rotation and consistent wall geometry through the sweep.
-    // Obstacle avoidance lives inside FORWARD: while app::obstacle_ahead
-    // is true the robot rotates in place to sidestep before resuming.
+    //   3) FORWARD: drive _search_forward_target_mm along the sweep-start
+    //      heading. If app::obstacle_ahead fires, rotate toward whichever
+    //      half-arc has more clearance (app::obstacle_{left,right}_mm),
+    //      bounded by _search_obstacle_max_rotation_rad; once the obstacle
+    //      clears, realign to forward_heading_ref before resuming so the
+    //      "-90° per cycle around the arena" invariant is preserved.
     struct SimpleSearch {
         enum class Phase { LOOK_LEFT, LOOK_RIGHT, FORWARD };
         Phase  phase = Phase::LOOK_LEFT;
         double forward_traveled_mm  = 0.0;
         double rotation_accumulated = 0.0;   // signed; rad
+        // Bounded obstacle-rotate bookkeeping (FORWARD phase only). The
+        // sign is latched on first obstacle tick from side-clearance and
+        // stays put until the obstacle clears; the magnitude accumulates
+        // |delta theta| so we can abandon the leg after a half-turn rather
+        // than spin forever.
+        double obstacle_rotated_rad = 0.0;
+        double obstacle_dir_sign    = 0.0;   // 0 = not currently dodging
+        // Heading we want to be facing for the forward leg, snapshotted
+        // at LOOK_RIGHT -> FORWARD transition. After an obstacle dodge we
+        // rotate back to this before resuming v_forward.
+        double forward_heading_ref  = 0.0;
         // Last pose sample used for delta accumulation. Latched on first
         // tick after entry and refreshed every tick thereafter.
         double last_x     = 0.0;
@@ -179,11 +191,46 @@ private:
     bool _grip_fired     = false;       // tick N+1+: smooth close fired
     std::chrono::steady_clock::time_point _grip_fired_at;
 
+    // Push-then-grip phase. Latched on the first `grabbable` tick. We
+    // drive forward slowly for _approach_push_distance_mm (or until
+    // _approach_push_timeout_s) so the target is fully seated between
+    // the gripper arms before the close-servo sequence fires. Avoids
+    // half-grip captures when the visual gate fires slightly short.
+    bool   _push_active = false;
+    std::chrono::steady_clock::time_point _push_started_at;
+    double _push_start_x = 0.0;
+    double _push_start_y = 0.0;
+
     // Last time vision had a valid target during APPROACH. Reset on entry;
     // refreshed every tick the tracker reports the box. Drives the
     // _approach_vision_lost_timeout_s watchdog. Only touched from the
     // loop_control thread.
     std::chrono::steady_clock::time_point _approach_last_seen_at;
+
+    // CARRY_HOME drag guard. Latched on CARRY_HOME entry and refreshed
+    // each tick where snap.captured is true. If the target tracker stays
+    // lost for _carry_target_lost_timeout_s we release whatever is in the
+    // gripper — guards against carrying the wrong colored box home if a
+    // swap occurred mid-drag.
+    std::chrono::steady_clock::time_point _carry_last_target_seen_at;
+
+    // World-frame memory of obstacle-color boxes detected by vision.
+    // Each Entry is a single-color blob's projected world position, with
+    // a last_seen timestamp. step() merges this-frame observations
+    // (snap.obstacles) into matching entries within
+    // _obstacle_merge_radius_mm of the same color_id, and forgets
+    // entries older than _obstacle_forget_s. Single-thread owned by
+    // step(); no locking.
+    struct ObstacleMemory {
+        struct Entry {
+            double x_mm = 0.0;
+            double y_mm = 0.0;
+            int    color_id = -1;
+            std::chrono::steady_clock::time_point last_seen;
+        };
+        std::vector<Entry> entries;
+    };
+    ObstacleMemory _obstacles;
 
     // GOTO state: latched single target pose. Set by go_to(), consumed once
     // on entry to State::GOTO inside _transition() to build the spline.
@@ -192,6 +239,11 @@ private:
     double _goto_y = 0.0;
     double _goto_theta = 0.0;
     bool   _goto_pending = false;
+    // One-shot chain target: when GOTO arrives, transition to this state
+    // instead of DONE. Set by _enter_search() to stage before SEARCH;
+    // reset to DONE on consumption and on every external go_to() call so
+    // the chain can't leak between calls. Protected by _m.
+    State  _post_goto_state = State::DONE;
     // Shared spline-leg tunables for any planner that calls `_plan_path_to`
     // (CARRY_HOME, GOTO, TEST). `_planned_v_max_mm_s` is the cruise cap
     // handed to bcubic_spline; `_planned_margin_mm` is the PurePursuit
@@ -220,12 +272,44 @@ private:
     double _halt_target_y = 0.0;
 
     // Tunables. Conservative defaults; safe to tweak from main if needed.
-    double _search_omega        = 0.5 * ROBOT_SPEED;   // rad/s, ~29°/s spin cruise (ramp stays gentle via ACCEL_W_BASE)
+    // _search_omega is NOT scaled with ROBOT_SPEED, same reason as
+    // PurePursuit::_omega_max (pure_pursuit.hpp:63): cox runs at ~10 Hz,
+    // so faster yaw smears the scan and KF drift accumulates. 0.6 rad/s ≈
+    // 34°/s gives cox ~3-4 ticks per 90° sweep half, well inside the
+    // motion-compensation envelope.
+    double _search_omega        = 0.6;                  // rad/s, fixed
     double _search_v_forward_mm_s   = 50.0 * ROBOT_SPEED;  // forward speed during the FORWARD leg
-    double _search_forward_target_mm = 700.0;             // 100 cm leg before each look-around rotation
+    double _search_forward_target_mm = 1000.0;            // 100 cm leg before each look-around rotation
+    // Pre-search staging (see _enter_search). When SEARCH is requested
+    // anywhere other than the home line, route through GOTO first to
+    // realign to (clamp(x), y=home_y, theta in {0, pi}) so the sweep
+    // starts from a consistent geometry. _search_far_threshold_mm picks
+    // theta = pi (face back toward home) when we are likely against the
+    // far wall; below it we face theta = 0 (open arena ahead).
+    double _search_far_threshold_mm = 3400.0;
+    double _search_stage_x_min_mm   = 300.0;
+    double _search_stage_x_max_mm   = 3300.0;
+    double _search_stage_theta_tol  = 0.10;             // rad, ~6°
+    // Hard cap on cumulative |delta theta| during a single obstacle-clear
+    // rotation. Hitting this means the obstacle isn't clearing in this
+    // direction — abandon the leg and restart the sweep instead of
+    // spinning forever.
+    double _search_obstacle_max_rotation_rad = M_PI;
     double _approach_v          = 30.0 * ROBOT_SPEED;  // mm/s, visual-servo cruise
     double _approach_k_omega    = 1.8;   // rad/s per rad of bearing
     double _approach_omega_max  = 1.2 * ROBOT_SPEED;   // clamp on steering rate
+    // Reactive obstacle avoidance during APPROACH (visual servo only —
+    // no path planning). omega_avoid = gain / max(obs.dist, 100) per
+    // detected obstacle in front of the target, signed away from the
+    // obstacle. Units: rad/s × mm (50 → 0.2 rad/s bias at 250 mm).
+    double _approach_repulsion_gain     = 50.0;
+    // Push-then-grip parameters. On the first `grabbable` tick we drive
+    // forward at _approach_push_v for _approach_push_distance_mm (or
+    // until _approach_push_timeout_s) so the target is fully seated in
+    // the gripper arms before the close-servo fires.
+    double _approach_push_v             = 20.0;    // mm/s, slow
+    double _approach_push_distance_mm   = 30.0;
+    double _approach_push_timeout_s     = 2.0;
     // While vision is dropped during APPROACH we drive toward the last
     // latched target world position. Once the robot is inside this radius
     // of that point and the target is still not visible, give up and
@@ -253,11 +337,34 @@ private:
     // skip it.
     double _failed_target_skip_radius_mm = 200.0;
     double _failed_target_skip_s         = 30.0;
+    // Obstacle (non-target color) world-frame tracking.
+    //  - merge_radius: this-frame observation is merged with an existing
+    //    entry of the same color_id within this distance (instead of
+    //    appending a duplicate).
+    //  - forget_s: entries older than this are dropped on each tick.
+    //  - block_radius_mm: SEARCH skips a detected target that sits
+    //    within this radius of any remembered obstacle (treats it as
+    //    "blocked by obstacle", same skip pattern as at-home boxes).
+    double _obstacle_merge_radius_mm     = 200.0;
+    double _obstacle_forget_s            = 30.0;
+    double _obstacle_block_radius_mm     = 250.0;
+    // CARRY_HOME drag guard. If snap.captured stays false for this many
+    // seconds the gripper is releasing whatever it has — generous to
+    // tolerate ordinary arm occlusion, tight enough to catch a true
+    // box swap well before reaching home.
+    double _carry_target_lost_timeout_s  = 5.0;
 
     // State change: runs exit side-effects (clear path, abort controller)
     // on the outgoing state and entry side-effects (plan spline) on the
     // incoming one. Resets _state_entered.
     void _transition(State new_state, const Pos2D& current);
+
+    // Pre-search staging. If the pose is already on the home y-line with
+    // theta in {0, pi}, transition directly to SEARCH. Otherwise latch a
+    // GOTO target (clamp(x), home_y, stage_theta) with _post_goto_state =
+    // SEARCH so the sweep starts from a known geometry. Replaces direct
+    // _transition(State::SEARCH, ...) at every external SEARCH entry.
+    void _enter_search(const Pos2D& current);
 
     // Simple 3-control B-cubic spline (start, midpoint, goal) used by
     // CARRY_HOME, GOTO, and TEST. Returns false on an empty path so the

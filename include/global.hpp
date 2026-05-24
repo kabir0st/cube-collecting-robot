@@ -42,6 +42,13 @@ namespace app {
     extern std::atomic<bool> lidar_ready;
     extern std::atomic<bool> lidar_stop;
     extern std::atomic<bool> obstacle_ahead;
+    // Per-side forward-arc minimum distance (mm), measured inside the same
+    // OBSTACLE_ARC_HALF_DEG cone as obstacle_ahead. SEARCH uses these to
+    // pick which way to rotate when clearing an obstacle (turn toward the
+    // freer side). +inf when no beam in that half-arc passed the gripper
+    // mask this frame. Left = body-frame +Y, right = body-frame -Y.
+    extern std::atomic<double> obstacle_left_mm;
+    extern std::atomic<double> obstacle_right_mm;
     // Set true while loop_scan_cox_estimation is running a relocalize
     // grid sweep (cox returned an untrusted estimate). loop_control reads
     // this and halts the motors for the duration of the sweep so we don't
