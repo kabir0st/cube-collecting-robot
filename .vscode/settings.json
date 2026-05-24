@@ -1,0 +1,13 @@
+{
+    // Disable format-on-save globally
+    "editor.formatOnSave": false,
+    "editor.formatOnType": false,
+    "editor.formatOnPaste": false,
+
+    // C/C++ extension — disable clang-format
+    "C_Cpp.formatting": "disabled",
+    "C_Cpp.clang_format_style": "none",
+
+    // CMake extension — disable cmake-format
+    "cmake.formatOnSave": false
+}
