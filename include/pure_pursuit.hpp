@@ -68,6 +68,12 @@ private:
     // scan matching still tracks.
     double _omega_max = 2.0;    // rad/s, absolute clamp
     double _heading_done_rad = 0.05;   // ~3 deg, TERMINAL_ROTATE exit
+    // Hysteresis on TERMINAL_ROTATE un-latch. Once we're rotating in place
+    // at the goal, only fall back to PURSUIT if the pose drifts past
+    // `margin + _terminal_unlatch_extra_mm`. Without this, tick-to-tick
+    // KF/Cox jitter on the margin boundary toggles the mode at 5 Hz and
+    // produces visible stop-and-go at arrival.
+    double _terminal_unlatch_extra_mm = 30.0;   // mm
     double _pre_roll_thresh = 0.52;   // ~30 deg, PRE_ROLL entry
     double _k_pre_roll = 2.0;    // P gain for PRE_ROLL omega target
     double _k_terminal = 2.0;    // P gain for terminal rotate omega

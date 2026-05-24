@@ -176,15 +176,21 @@ void PurePursuitController::compute(const Pos2D& pose,
         // instead of rotating in place far from where it should be.
         if (_mode != Mode::DONE) {
             const bool at_last_waypoint = (_closest_idx + 1 >= _path.size());
-            const bool within_margin    = (rho_last < last.margin);
-            if (at_last_waypoint && within_margin) {
+            if (_mode == Mode::TERMINAL_ROTATE) {
+                // Hysteresis: stay latched unless we drift well past the
+                // goal. Without this, KF/Cox jitter on the margin boundary
+                // flips us back to PURSUIT for 200 ms, producing visible
+                // stop-and-go at arrival. Don't fall back to PRE_ROLL —
+                // robot is already moving and roughly aligned; PURSUIT's
+                // curvature pulls it back to the path.
+                const double unlatch_radius =
+                    last.margin + _terminal_unlatch_extra_mm;
+                if (!at_last_waypoint || rho_last > unlatch_radius) {
+                    _mode = Mode::PURSUIT;
+                }
+            } else if (at_last_waypoint && rho_last < last.margin) {
                 _mode = Mode::TERMINAL_ROTATE;
                 _active_target = last;
-            } else if (_mode == Mode::TERMINAL_ROTATE) {
-                // Drifted out — re-engage pursuit. Don't go back to PRE_ROLL
-                // because the robot is already moving and roughly aligned;
-                // PURSUIT's curvature will pull it back to the path.
-                _mode = Mode::PURSUIT;
             }
         }
 
