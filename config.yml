@@ -20,7 +20,7 @@ robot:
 mission:
   # Home is centered on the robot's starting pose (the localization
   # origin (0, 0, 0)). Only the zone size and arm geometry are tunable.
-  home_margin_mm: 50   # 0.5 ft — radius of the 1 ft home zone
+  home_margin_mm: 100   # 0.5 ft — radius of the 1 ft home zone
   arm_length_mm: 225.0     # LIDAR center -> arm tip (held box position)
   # Lab-3 single-shot goto target: "x_mm,y_mm,theta_deg". Uncomment to
   # override the default SEARCH mission and drive once to (x, y, theta).
