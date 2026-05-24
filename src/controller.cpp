@@ -58,19 +58,31 @@ constexpr int    HALT_MIN_MS             = 300;
 constexpr int    HALT_MAX_MS             = 700;
 constexpr double HALT_SIGMA_XY_TARGET_MM = 30.0;
 constexpr double MAHAL_GATE_CHI2         = 5.99;
+// Additive (x, y) noise floor on the Mahalanobis gate. Cox in a
+// well-constrained arena (e.g. 4-wall) reports sub-mm sigma — that
+// reflects lidar fit quality, not the robot's true post-arrival pose
+// uncertainty, which is dominated by PurePursuit's `_planned_margin_mm`
+// (40 mm) arrival tolerance and wheel-slip terminal error. Without this
+// floor every TEST leg trips the χ² gate on a few-cm residual.
+constexpr double HALT_GATE_POS_NOISE_VAR_MM2 = 40.0 * 40.0;
 
 // Squared Mahalanobis distance from `pose` (x, y) to (tx, ty) under the
-// xy-block of `cov`. Returns +inf when the block is degenerate so the
-// gate treats it as "wildly uncertain" rather than dividing by zero.
+// xy-block of `cov`, with HALT_GATE_POS_NOISE_VAR_MM2 added to the
+// diagonal so the gate measures residual vs. expected arrival accuracy
+// rather than vs. lidar fit quality. Returns +inf when the block is
+// degenerate so the gate treats it as "wildly uncertain" rather than
+// dividing by zero.
 inline double mahalanobis2_xy(const Pos2D& pose, const Pose2DCov& cov,
                               double tx, double ty) {
     const double dx  = tx - pose.x;
     const double dy  = ty - pose.y;
-    const double det = cov.xx * cov.yy - cov.xy * cov.xy;
+    const double xx  = cov.xx + HALT_GATE_POS_NOISE_VAR_MM2;
+    const double yy  = cov.yy + HALT_GATE_POS_NOISE_VAR_MM2;
+    const double det = xx * yy - cov.xy * cov.xy;
     if (det <= 0.0) return std::numeric_limits<double>::infinity();
-    return (cov.yy * dx * dx
+    return (yy * dx * dx
             - 2.0 * cov.xy * dx * dy
-            + cov.xx * dy * dy) / det;
+            + xx * dy * dy) / det;
 }
 
 }  // namespace
