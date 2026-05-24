@@ -103,10 +103,17 @@ filter:
   ready: true
   target:
     has_wrap_around: false
-    dominant_color: "158.751,140.711,190.567"
-    lower1: "149,54,41"
-    upper1: "168,195,225"
+    dominant_color: "107.55,132.957,65.2032"
+    lower1: "99,51,3"
+    upper1: "116,180,125"
     lower2: "0,0,0"
     upper2: "0,0,0"
   obstacles:
-    count: 0
+    count: 1
+    0:
+      has_wrap_around: false
+      dominant_color: "164.624,185.367,111.432"
+      lower1: "155,112,45"
+      upper1: "173,208,164"
+      lower2: "0,0,0"
+      upper2: "0,0,0"
