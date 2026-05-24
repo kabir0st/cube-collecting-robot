@@ -147,16 +147,21 @@ cd ~/group-6
 ./start.sh    # = sudo WIRINGPI_CODES=1 ./app
 ```
 
-Boot sequence (~5 s):
+Boot sequence (~7–9 s total):
 
 1. Load `config.yml`; resolve `ROBOT_SPEED` (default 1.875).
 2. Load filter calibration (target + N obstacles).
-3. Start LIDAR; wait 2 s for motor spin-up.
-4. Collect ~50 lidar frames; RANSAC-fit the arena walls.
-5. Start cox localization; wait 2 s for the first valid fix.
-6. Start vision tracker thread (15 fps target).
-7. Start control loop (10 Hz).
-8. Mission goes IDLE → **SEARCH**.
+3. Spawn `loop_localization` — lidar motor spins up (~1.5 s) **in parallel**
+   with `loop_control`'s motor SPI handshake + 300 ms chassis settle.
+4. Once `motors_ready` is set, lidar frame collector starts;
+   `loop_localization` waits 4 s to accumulate ~20 frames.
+5. RANSAC wall extraction (~1–2 s); cox seeds, KF accepts first fix.
+6. Vision tracker thread spins up in parallel from `main`.
+7. Mission gate opens → `sm.start()` → IDLE → **SEARCH**.
+
+Wall-time is roughly `max(lidar spin, motor settle) + frame collect +
+RANSAC + cox first fix` ≈ 1.5 + 4 + 1.5 + 0.5 ≈ **~7.5 s** under typical
+conditions, down from the previous ~20 s.
 
 The robot starts the look-left / look-right / forward sweep, attempts to
 pick up any target-colour box it sees (subject to the at-home, behind-home,

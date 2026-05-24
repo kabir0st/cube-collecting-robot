@@ -70,31 +70,39 @@ void loop_localization(Dashboard& dash,
                        LidarData& lidar_data, KalmanFilter& kf,
                        const RansacParams& ransac,
                        DataLogger& logger) {
-    // Block until the motor thread has finished its SPI handshake and the
-    // chassis has settled. The map built below is implicitly anchored to
-    // whatever pose the robot is in during frame collection -- letting any
-    // motor-startup wheel pulse happen first means the twitch is folded
-    // into the map instead of becoming a hidden offset that pushes the
-    // cox first-fix seed outside its basin of convergence.
-    LOG("Main") << "Waiting for motors_ready before starting lidar...";
-    while (!app::motors_ready.load(std::memory_order_acquire)
-        && !app::shutdown.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    if (app::shutdown.load()) return;
-
+    // Start the lidar motor *now*, in parallel with loop_control's motor
+    // startup + SPI handshake. The 1.5 s lidar spin-up and the 300 ms
+    // chassis settle overlap instead of summing, saving ~1.5 s of boot
+    // time. Frame collection itself is still gated on motors_ready below
+    // so the map only captures the post-handshake pose (any wheel pulse
+    // is excluded).
     hh::Lidar lidar;
     if (!start_lidar(lidar)) {
         return;
     }
+
+    // Wait for the motor thread to finish its SPI handshake and the
+    // chassis to settle. The map built below is implicitly anchored to
+    // whatever pose the robot is in during frame collection — letting any
+    // motor-startup wheel pulse happen first means the twitch is folded
+    // into the map instead of becoming a hidden offset that pushes the
+    // cox first-fix seed outside its basin of convergence.
+    LOG("Main") << "Waiting for motors_ready before collecting frames...";
+    while (!app::motors_ready.load(std::memory_order_acquire)
+        && !app::shutdown.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (app::shutdown.load()) { stop_lidar(lidar); return; }
+
     std::thread thread_loop_collect_frames(loop_collect_frames,
                 std::ref(lidar), std::ref(lidar_data));
 
-    // Wait for the circular buffer to fill. ~5 Hz frame rate × 12 s ≈ 60
-    // frames, comfortably above FRAME_COUNT=50, so find_walls sees a
-    // fully-populated buffer for RANSAC wall extraction.
+    // Collect enough lidar frames for the RANSAC wall fit. At ~5 Hz this
+    // gives ~20 frames — well over what find_walls needs to lock the 4
+    // arena walls (a single frame has ~360 points; 20 frames angle-binned
+    // gives several thousand). The old 10 s wait was over-conservative.
     LOG("Main") << "Collecting lidar frames for map build...";
-    std::this_thread::sleep_for(std::chrono::seconds(10));
+    std::this_thread::sleep_for(std::chrono::seconds(4));
 
     const double measured_noise = get_lidar_sensor_noise(lidar_data);
     lidar_data.sensor_noise.store(measured_noise);
@@ -159,7 +167,8 @@ void loop_control(Dashboard& dash,
     // signaling loop_localization. Any one-shot wheel pulse at controller
     // init lands inside this window so the encoder seed (and the lidar
     // frames collected immediately after) reflect the rest position.
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    // 300 ms is plenty for the SPI handshake and any pulse to land.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
     {
         // resetting
         double l0_mm, r0_mm;
