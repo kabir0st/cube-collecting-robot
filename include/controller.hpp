@@ -75,14 +75,17 @@ public:
     State state() const;
     static const char* state_name(State s);
 
-    // True when the gripper is closed around a box (CARRY_HOME, RELEASE,
-    // TURN_AROUND/REALIGN). The closed gripper + held box sits in the
-    // lidar's forward arc inside OBSTACLE_DIST_MM, so the global obstacle
-    // gate must be disabled during these states or the robot stalls
-    // rotating in place on its own payload. SEARCH and APPROACH keep the
-    // gate enabled — there the gripper is open and the arms swing wide
-    // enough to clear the lidar plane.
-    bool is_carrying_payload() const;
+    // True when loop_control should ignore the lidar `obstacle_ahead`
+    // gate for this tick. Fires during:
+    //   - APPROACH: the visual servo with reactive omega over snap.obstacles
+    //     IS the avoidance strategy; the lidar gate would zero v whenever
+    //     the target itself entered the obstacle arc, stalling the grab.
+    //   - CARRY_HOME / RELEASE / TURN_AROUND: the closed gripper + held
+    //     box sits inside OBSTACLE_DIST_MM and would pin the gate true
+    //     on its own payload.
+    // SEARCH keeps the gate enabled — there the gripper is open and the
+    // forward arc is the right safety net against unseen walls.
+    bool obstacle_gate_suppressed() const;
 
 private:
     // Orchestrated subsystems (refs; lifetimes owned by main).
@@ -147,20 +150,21 @@ private:
     // Simple search behavior. Pre-condition (enforced by _enter_search):
     // the robot has been staged to (clamped x, y=0, theta in {0, pi}) so
     // every cycle starts from the home y-line with a known heading.
-    //   1) LOOK_LEFT: rotate +90° from the heading at sweep start.
-    //   2) LOOK_RIGHT: rotate continuously CW until -90° from sweep start
-    //      (a 180° sweep through center to the right side).
-    //   3) FORWARD: drive _search_forward_target_mm along the sweep-start
-    //      heading. If app::obstacle_ahead fires, rotate toward whichever
-    //      half-arc has more clearance (app::obstacle_{left,right}_mm),
-    //      bounded by _search_obstacle_max_rotation_rad; once the obstacle
-    //      clears, realign to forward_heading_ref before resuming so the
-    //      "-90° per cycle around the arena" invariant is preserved.
+    // The SEARCH-axis heading is snapshotted ONCE on first-tick init into
+    // forward_heading_ref and held for the duration of this SEARCH entry.
+    //   1) LOOK_LEFT: rotate CCW until pose.theta reaches ref + π/2.
+    //   2) LOOK_RIGHT: rotate CW until pose.theta reaches ref - π/2.
+    //   3) FORWARD: realign to ref (hysteresis-guarded), then drive
+    //      _search_forward_target_mm along the ref heading. If
+    //      app::obstacle_ahead fires, rotate toward whichever half-arc
+    //      has more clearance (app::obstacle_{left,right}_mm), bounded
+    //      by _search_obstacle_max_rotation_rad; once the obstacle
+    //      clears, realign-to-ref kicks in again before resuming.
+    // The sweep pattern stays locked to one axis — no per-cycle drift.
     struct SimpleSearch {
         enum class Phase { LOOK_LEFT, LOOK_RIGHT, FORWARD };
         Phase  phase = Phase::LOOK_LEFT;
         double forward_traveled_mm  = 0.0;
-        double rotation_accumulated = 0.0;   // signed; rad
         // Bounded obstacle-rotate bookkeeping (FORWARD phase only). The
         // sign is latched on first obstacle tick from side-clearance and
         // stays put until the obstacle clears; the magnitude accumulates
@@ -168,12 +172,19 @@ private:
         // than spin forever.
         double obstacle_rotated_rad = 0.0;
         double obstacle_dir_sign    = 0.0;   // 0 = not currently dodging
-        // Heading we want to be facing for the forward leg, snapshotted
-        // at LOOK_RIGHT -> FORWARD transition. After an obstacle dodge we
-        // rotate back to this before resuming v_forward.
+        // Fixed SEARCH-axis heading. Snapshotted on first-tick init
+        // (_ssearch.initialized rising edge); held constant across all
+        // subsequent LOOK_LEFT/LOOK_RIGHT/FORWARD cycles so the search
+        // pattern doesn't walk around the arena.
         double forward_heading_ref  = 0.0;
-        // Last pose sample used for delta accumulation. Latched on first
-        // tick after entry and refreshed every tick thereafter.
+        // Sticky realign state with hysteresis. Set true after LOOK_RIGHT
+        // and after each obstacle dodge clears; cleared only when the
+        // heading error sits inside _search_realign_exit_rad for
+        // _search_realign_stable_ticks consecutive ticks. Eliminates the
+        // R/L/FWD flapping caused by raw cox jitter near the deadband.
+        bool   in_realign           = false;
+        int    realign_stable_count = 0;
+        // Last pose sample used for forward-odometer projection.
         double last_x     = 0.0;
         double last_y     = 0.0;
         double last_theta = 0.0;
@@ -279,7 +290,7 @@ private:
     // motion-compensation envelope.
     double _search_omega        = 0.6;                  // rad/s, fixed
     double _search_v_forward_mm_s   = 50.0 * ROBOT_SPEED;  // forward speed during the FORWARD leg
-    double _search_forward_target_mm = 1000.0;            // 100 cm leg before each look-around rotation
+    double _search_forward_target_mm = 800.0;             // 80 cm leg before each look-around rotation
     // Pre-search staging (see _enter_search). When SEARCH is requested
     // anywhere other than the home line, route through GOTO first to
     // realign to (clamp(x), y=home_y, theta in {0, pi}) so the sweep
@@ -295,6 +306,14 @@ private:
     // direction — abandon the leg and restart the sweep instead of
     // spinning forever.
     double _search_obstacle_max_rotation_rad = M_PI;
+    // Realign-to-ref hysteresis. Enter the realign sub-state when the
+    // heading error from forward_heading_ref exceeds `enter_rad`; exit
+    // only after error stays below `exit_rad` for `stable_ticks`
+    // consecutive ticks. The gap (enter > exit) plus stable_ticks kills
+    // the R/L/FWD flap caused by cox heading jitter near the deadband.
+    double _search_realign_enter_rad     = 0.15;   // ~9°
+    double _search_realign_exit_rad      = 0.05;   // ~3°
+    int    _search_realign_stable_ticks  = 3;
     double _approach_v          = 30.0 * ROBOT_SPEED;  // mm/s, visual-servo cruise
     double _approach_k_omega    = 1.8;   // rad/s per rad of bearing
     double _approach_omega_max  = 1.2 * ROBOT_SPEED;   // clamp on steering rate
@@ -349,10 +368,11 @@ private:
     double _obstacle_forget_s            = 30.0;
     double _obstacle_block_radius_mm     = 250.0;
     // CARRY_HOME drag guard. If snap.captured stays false for this many
-    // seconds the gripper is releasing whatever it has — generous to
-    // tolerate ordinary arm occlusion, tight enough to catch a true
-    // box swap well before reaching home.
-    double _carry_target_lost_timeout_s  = 5.0;
+    // seconds AND vision is otherwise healthy (target or any obstacle
+    // colour visible) we release whatever is in the gripper. Pure
+    // occlusion (camera sees nothing at all) gets infinite grace — the
+    // gripper arms genuinely block the camera in some configurations.
+    double _carry_target_lost_timeout_s  = 10.0;
 
     // State change: runs exit side-effects (clear path, abort controller)
     // on the outgoing state and entry side-effects (plan spline) on the

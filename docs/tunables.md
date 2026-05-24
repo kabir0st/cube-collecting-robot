@@ -169,10 +169,24 @@ Cruise speed during the FORWARD leg.
 - Increase: cover the arena faster.
 - Decrease: better odom/cox fusion in a long traversal.
 
-#### `_search_forward_target_mm = 1000`
-Distance per FORWARD leg before the next 360° look-around.
-- Increase: less time spent rotating, more arena coverage per cycle.
+#### `_search_forward_target_mm = 800`
+Distance per FORWARD leg between sweeps. The sweep itself locks to a
+fixed axis (`forward_heading_ref`, snapshotted on SEARCH entry) — every
+cycle's LOOK_LEFT / LOOK_RIGHT targets are absolute (ref ± π/2) and
+FORWARD realigns to ref before driving. No per-cycle drift.
+- Increase: fewer sweeps per unit area, more coverage per cycle.
 - Decrease: more frequent visibility sweeps for targets behind/beside.
+
+#### `_search_realign_enter_rad = 0.15`, `_search_realign_exit_rad = 0.05`, `_search_realign_stable_ticks = 3`
+Hysteresis on the FORWARD-leg realign-to-ref sub-state. Realign engages
+when heading error exceeds `enter_rad`; disengages only after error
+sits inside `exit_rad` for `stable_ticks` consecutive ticks. The gap
+between enter/exit + the stable counter kills the R/L/FWD flap that
+raw cox heading jitter caused near a single threshold.
+- Widen `enter` / tighten `exit`: more dead zone, less chatter at the
+  cost of slightly drifted forward heading.
+- Increase `stable_ticks`: tolerates more cox noise mid-realign, costs
+  slightly more time before resuming forward.
 
 #### `_search_min_dwell_s = 0.0`
 Minimum time in SEARCH before APPROACH can engage. Currently 0 (engage
@@ -232,13 +246,16 @@ triggers slightly short.
 
 ### CARRY_HOME drag guard
 
-#### `_carry_target_lost_timeout_s = 5.0`
-If `snap.captured` stays false for this many continuous seconds
-during CARRY_HOME, the gripper is releasing whatever it has —
-guards against carrying the wrong colored box home if a bump caused
-a swap. Generous to ride out arm occlusion during normal carry.
-- Increase: more tolerance for occlusion (rear-camera setup, heavy
-  arm shadows on box, slow target re-acquisition).
+#### `_carry_target_lost_timeout_s = 10.0`
+If `snap.captured` stays false for this many continuous seconds during
+CARRY_HOME **and** vision is otherwise healthy (target colour absent
+but at least one obstacle blob seen), the gripper releases whatever
+it has — guards against carrying the wrong colored box if a swap
+occurred mid-drag. Pure occlusion (camera sees no blobs at all) gets
+infinite grace, since the gripper arms genuinely block the camera in
+some configurations.
+- Increase: more tolerance for partial occlusion (heavy arm shadows,
+  slow target re-acquisition).
 - Decrease: catches swaps faster, risk of false-release if the
   tracker takes a while to re-acquire after gripper close.
 
@@ -305,15 +322,19 @@ Used by GOTO / TEST to settle the KF before declaring arrival.
 
 - `OBSTACLE_DIST_MM = 230` — any lidar return inside ±60° forward arc
   at less than this triggers `obstacle_ahead` (zeroes `v_cmd`, keeps
-  `w_cmd`). The gate is **suppressed entirely** while carrying a
-  payload (CARRY_HOME, RELEASE, TURN_AROUND) — see
-  [src/core.cpp](../src/core.cpp) — so the robot can drive up to the
-  home wall and release.
+  `w_cmd`). The gate is **suppressed** during APPROACH (visual servo
+  + colour-based reactive omega handles avoidance; the lidar gate
+  would zero `v` whenever the target itself entered the arc, stalling
+  the grab) and during CARRY_HOME / RELEASE / TURN_AROUND (the closed
+  gripper / held box sits inside the gate's forward arc). SEARCH keeps
+  the gate as its safety net against unseen walls — see
+  `StateMachine::obstacle_gate_suppressed()` in
+  [src/controller.cpp](../src/controller.cpp).
 - `OBSTACLE_ARC_HALF_DEG = 60` — width of the trigger cone.
 - `GRIPPER_MASK_HALF_DEG = 20`, `GRIPPER_MASK_DIST_MM = 200` —
   narrower cone the closed gripper / held box occupies. Filtered out
-  at the lidar layer (belt-and-suspenders alongside the payload-state
-  gate above).
+  at the lidar layer (belt-and-suspenders alongside the state-based
+  gate above; matters mostly for SEARCH where the gate is active).
 - Increase `OBSTACLE_DIST_MM`: earlier stop, safer in cluttered arenas
   but stalls more often on near-miss walls.
 - Decrease: more confident driving up to walls, risk of bumper-tap.

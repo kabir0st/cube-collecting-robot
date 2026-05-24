@@ -219,9 +219,10 @@ StateMachine::State StateMachine::state() const {
     return _state.load();
 }
 
-bool StateMachine::is_carrying_payload() const {
+bool StateMachine::obstacle_gate_suppressed() const {
     const State s = _state.load();
-    return s == State::CARRY_HOME
+    return s == State::APPROACH       // visual-servo handles avoidance
+        || s == State::CARRY_HOME
         || s == State::RELEASE
         || s == State::TURN_AROUND;
 }
@@ -624,35 +625,36 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 _search_skip_streak = false;
             }
 
-            // Bounded look-left/look-right scan, then forward.
-            // Start a cycle with the sweep accumulator zeroed; advance
-            // phase when the accumulator crosses the threshold for that
-            // direction.
+            // Fixed-axis look-left / look-right / forward.
+            // forward_heading_ref is snapshotted once on first-tick init
+            // and held constant for this whole SEARCH entry. Every cycle's
+            // sweep targets are absolute (ref ± π/2) and the forward leg
+            // realigns to ref before driving. No per-cycle drift.
             if (!_ssearch.initialized) {
                 _ssearch.phase = SimpleSearch::Phase::LOOK_LEFT;
-                _ssearch.forward_traveled_mm  = 0.0;
-                _ssearch.rotation_accumulated = 0.0;
-                _ssearch.obstacle_rotated_rad = 0.0;
-                _ssearch.obstacle_dir_sign    = 0.0;
-                _ssearch.forward_heading_ref  = pose.theta;
+                _ssearch.forward_traveled_mm   = 0.0;
+                _ssearch.obstacle_rotated_rad  = 0.0;
+                _ssearch.obstacle_dir_sign     = 0.0;
+                _ssearch.forward_heading_ref   = pose.theta;
+                _ssearch.in_realign            = false;
+                _ssearch.realign_stable_count  = 0;
                 _ssearch.last_x     = pose.x;
                 _ssearch.last_y     = pose.y;
                 _ssearch.last_theta = pose.theta;
                 _ssearch.initialized = true;
             }
 
-            // Signed instantaneous heading delta — used by both sweep
-            // phases. wrap_pi handles ±π wrap so spin direction is
-            // preserved across the discontinuity.
-            const double dth_signed =
-                wrap_pi(pose.theta - _ssearch.last_theta);
+            const double ref = _ssearch.forward_heading_ref;
 
             if (_ssearch.phase == SimpleSearch::Phase::LOOK_LEFT) {
-                _ssearch.rotation_accumulated += dth_signed;
+                // Target: pose.theta == ref + π/2. While CCW-rotating
+                // toward that target, wrap_pi(target - pose) is positive
+                // and decreases to 0 (or just-negative on overshoot).
+                const double err =
+                    wrap_pi((ref + M_PI / 2.0) - pose.theta);
                 _ssearch.last_theta = pose.theta;
-                if (_ssearch.rotation_accumulated >= M_PI / 2.0) {
+                if (err <= 0.0) {
                     _ssearch.phase = SimpleSearch::Phase::LOOK_RIGHT;
-                    _ssearch.rotation_accumulated = 0.0;
                 }
                 out.mode = Command::Mode::DIRECT;
                 out.v_mm_s = 0.0;
@@ -661,15 +663,20 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             }
 
             if (_ssearch.phase == SimpleSearch::Phase::LOOK_RIGHT) {
-                _ssearch.rotation_accumulated += dth_signed;
+                // Target: pose.theta == ref - π/2. CW-rotating, err is
+                // negative and rises toward 0.
+                const double err =
+                    wrap_pi((ref - M_PI / 2.0) - pose.theta);
                 _ssearch.last_theta = pose.theta;
-                if (_ssearch.rotation_accumulated <= -M_PI) {
+                if (err >= 0.0) {
                     _ssearch.phase = SimpleSearch::Phase::FORWARD;
-                    _ssearch.forward_traveled_mm    = 0.0;
-                    _ssearch.rotation_accumulated   = 0.0;
-                    _ssearch.obstacle_rotated_rad   = 0.0;
-                    _ssearch.obstacle_dir_sign      = 0.0;
-                    _ssearch.forward_heading_ref    = pose.theta;
+                    _ssearch.forward_traveled_mm   = 0.0;
+                    _ssearch.obstacle_rotated_rad  = 0.0;
+                    _ssearch.obstacle_dir_sign     = 0.0;
+                    // Need to realign from -π/2 back to ref before
+                    // driving forward.
+                    _ssearch.in_realign            = true;
+                    _ssearch.realign_stable_count  = 0;
                     _ssearch.last_x = pose.x;
                     _ssearch.last_y = pose.y;
                 }
@@ -680,6 +687,9 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             }
 
             // Phase::FORWARD
+            const double dth_signed =
+                wrap_pi(pose.theta - _ssearch.last_theta);
+
             if (app::obstacle_ahead.load()) {
                 // Pick a rotation direction once per obstacle from lidar
                 // side clearance — turn toward the freer half-arc.
@@ -697,9 +707,10 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                     // the situation is truly stuck the mission-wide
                     // _search_timeout_s will kill SEARCH.
                     _ssearch.phase = SimpleSearch::Phase::LOOK_LEFT;
-                    _ssearch.rotation_accumulated = 0.0;
                     _ssearch.obstacle_rotated_rad = 0.0;
                     _ssearch.obstacle_dir_sign    = 0.0;
+                    _ssearch.in_realign           = false;
+                    _ssearch.realign_stable_count = 0;
                     out.mode = Command::Mode::DIRECT;
                     out.v_mm_s = 0.0;
                     out.omega_rad_s = 0.0;
@@ -708,27 +719,47 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 out.mode = Command::Mode::DIRECT;
                 out.v_mm_s = 0.0;
                 out.omega_rad_s = _ssearch.obstacle_dir_sign * _search_omega;
+                // Obstacle dodge implies we'll need to realign-to-ref
+                // when it clears.
+                _ssearch.in_realign           = true;
+                _ssearch.realign_stable_count = 0;
                 break;
             }
 
-            // Obstacle just cleared (or we never had one this leg). If we
-            // rotated to dodge, realign to forward_heading_ref before
-            // resuming v_forward so the cycle still walks -90° per cycle
-            // around the arena instead of drifting wherever the dodge
-            // ended.
-            if (std::fabs(_ssearch.obstacle_rotated_rad) > 1e-3) {
-                const double heading_err =
-                    wrap_pi(_ssearch.forward_heading_ref - pose.theta);
-                if (std::fabs(heading_err) > _search_stage_theta_tol) {
-                    _ssearch.last_theta = pose.theta;
-                    out.mode = Command::Mode::DIRECT;
-                    out.v_mm_s = 0.0;
-                    out.omega_rad_s = (heading_err > 0.0 ? +1.0 : -1.0)
-                                      * _search_omega;
-                    break;
+            // Hysteresis realign to forward_heading_ref. Enter when
+            // |err| > enter_rad (or in_realign already latched); exit
+            // only after |err| < exit_rad for stable_ticks consecutive
+            // ticks. Kills the cox-jitter flap near the deadband.
+            const double heading_err = wrap_pi(ref - pose.theta);
+            if (!_ssearch.in_realign
+                && std::fabs(heading_err) > _search_realign_enter_rad) {
+                _ssearch.in_realign = true;
+                _ssearch.realign_stable_count = 0;
+            }
+            if (_ssearch.in_realign) {
+                _ssearch.last_theta = pose.theta;
+                if (std::fabs(heading_err) < _search_realign_exit_rad) {
+                    if (++_ssearch.realign_stable_count
+                            >= _search_realign_stable_ticks) {
+                        _ssearch.in_realign           = false;
+                        _ssearch.realign_stable_count = 0;
+                        _ssearch.obstacle_rotated_rad = 0.0;
+                        _ssearch.obstacle_dir_sign    = 0.0;
+                        // Stable; fall through to forward drive on the
+                        // next tick.
+                        out.mode = Command::Mode::DIRECT;
+                        out.v_mm_s = 0.0;
+                        out.omega_rad_s = 0.0;
+                        break;
+                    }
+                } else {
+                    _ssearch.realign_stable_count = 0;
                 }
-                _ssearch.obstacle_rotated_rad = 0.0;
-                _ssearch.obstacle_dir_sign    = 0.0;
+                out.mode = Command::Mode::DIRECT;
+                out.v_mm_s = 0.0;
+                out.omega_rad_s = (heading_err >= 0.0 ? +1.0 : -1.0)
+                                  * _search_omega;
+                break;
             }
             {
                 // Signed forward odometer: project the body-frame step
@@ -745,7 +776,6 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             }
             if (_ssearch.forward_traveled_mm >= _search_forward_target_mm) {
                 _ssearch.phase = SimpleSearch::Phase::LOOK_LEFT;
-                _ssearch.rotation_accumulated = 0.0;
                 _ssearch.last_theta = pose.theta;
                 out.mode = Command::Mode::DIRECT;
                 out.v_mm_s = 0.0;
@@ -893,7 +923,12 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 if (t_lost > _approach_vision_lost_timeout_s) {
                     LOG("Mission") << "APPROACH: vision lost for "
                                    << t_lost << " s; -> SEARCH";
-                    _enter_search(pose);
+                    // Direct SEARCH (no staging): vision-lost loops can
+                    // burn through _approach_attempts; the GOTO halt on
+                    // every cycle wastes ~1-2 s with no benefit since
+                    // we're not actually mid-arena far from the search
+                    // axis here.
+                    _transition(State::SEARCH, pose);
                     out.mode = Command::Mode::STOP;
                     break;
                 }
@@ -919,7 +954,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                         break;
                     }
                 }
-                _enter_search(pose);
+                _transition(State::SEARCH, pose);
                 out.mode = Command::Mode::STOP;
                 break;
             }
@@ -936,7 +971,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                     _last_failed_target_y = _last_target_y;
                     _last_failed_at = std::chrono::steady_clock::now();
                 }
-                _enter_search(pose);
+                _transition(State::SEARCH, pose);
                 out.mode = Command::Mode::STOP;
                 break;
             }
@@ -972,17 +1007,24 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             // target colour. The gripper arms occlude the box during
             // normal carry so a brief lost-track is expected — the
             // _carry_target_lost_timeout_s wait covers that. Persistent
-            // loss is treated as "wrong / swapped box" and we release.
+            // loss is treated as "wrong / swapped box" and we release,
+            // but ONLY when vision is otherwise healthy (target colour
+            // not present but other detections exist). Pure occlusion
+            // (camera sees nothing at all — gripper geometry blocks
+            // it) gets infinite grace.
             if (snap.captured) {
                 _carry_last_target_seen_at = std::chrono::steady_clock::now();
             }
+            const bool vision_healthy =
+                snap.has_target || !snap.obstacles.empty();
             const double t_since_seen =
                 seconds_since(_carry_last_target_seen_at);
-            if (t_since_seen > _carry_target_lost_timeout_s) {
+            if (vision_healthy
+                && t_since_seen > _carry_target_lost_timeout_s) {
                 LOG("Mission")
-                    << "CARRY_HOME: target tracking lost for "
-                    << t_since_seen
-                    << " s; releasing (suspected wrong box in gripper).";
+                    << "CARRY_HOME: target lost for " << t_since_seen
+                    << " s with healthy vision; releasing "
+                       "(suspected wrong box in gripper).";
                 _transition(State::RELEASE, pose);
                 out.mode = Command::Mode::DIRECT;
                 out.v_mm_s = _release_v;
@@ -1236,10 +1278,15 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             case SimpleSearch::Phase::LOOK_RIGHT: ph = "R";   break;
             case SimpleSearch::Phase::FORWARD:    ph = "FWD"; break;
         }
-        dash.set("Mission", "search", std::string(ph));
+        // Append a R when the realign sub-state is active so the operator
+        // can see the hysteresis at work (e.g. "FWD/R" during dodge
+        // recovery vs plain "FWD" while driving).
+        std::string ph_str(ph);
+        if (_ssearch.in_realign) ph_str += "/R";
+        dash.set("Mission", "search", ph_str);
         dash.set("Mission", "fwd_mm", _ssearch.forward_traveled_mm);
-        dash.set("Mission", "rot_deg",
-                 _ssearch.rotation_accumulated * 180.0 / M_PI);
+        dash.set("Mission", "obs_rot_deg",
+                 _ssearch.obstacle_rotated_rad * 180.0 / M_PI);
     } else {
         dash.set("Mission", "search", std::string("-"));
     }
