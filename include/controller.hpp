@@ -179,12 +179,6 @@ private:
     bool _grip_fired     = false;       // tick N+1+: smooth close fired
     std::chrono::steady_clock::time_point _grip_fired_at;
 
-    // REALIGN obstacle-fallback latch. If the planned spline arc would
-    // drive the robot into a wall (app::obstacle_ahead persistently true),
-    // we abort the spline and finish the rotation in place at a gentle
-    // omega cap. Reset on each TURN_AROUND entry in _transition().
-    bool _realign_inplace = false;
-
     // GOTO state: latched single target pose. Set by go_to(), consumed once
     // on entry to State::GOTO inside _transition() to build the spline.
     // Protected by _m.
@@ -252,31 +246,10 @@ private:
     // incoming one. Resets _state_entered.
     void _transition(State new_state, const Pos2D& current);
 
-    // CARRY_HOME entry: build a 5-control tangent-aware B-cubic spline
-    //   (start, start+L·start_tangent, midpoint+apex, goal-L·goal_tangent, goal)
-    // from `current` pose to the box-biased home position with
-    // path-tangent arrival heading. The midpoint with lateral apex offset
-    // forces 2D curvature so PurePursuit's cross-track term can drive the
-    // typical post-grab U-turn (a pure 4-control spline collapses to a
-    // 1D path on the start-heading axis in that case). Returns false if
-    // the spline generator returned an empty path (caller should route
-    // the mission to SAFE_STOP rather than silently bouncing).
-
+    // Simple 3-control B-cubic spline (start, midpoint, goal) used by
+    // CARRY_HOME, GOTO, and TEST. Returns false on an empty path so the
+    // caller can route the mission to SAFE_STOP.
     bool _plan_path_to(const Pos2D& current,
                        double gx, double gy, double gtheta,
                        double margin_mm, double v_max_mm_s);
-
-    // Tangent-aware 4-control-point B-cubic spline:
-    //   (start, start + L·start_tangent, goal - L·goal_tangent, goal)
-    // Forces the spline's start tangent to match `current.theta` and its
-    // end tangent to match `gtheta`. The robot can drive the resulting
-    // arc forward without an in-place PRE_ROLL spin-up (the lookahead is
-    // already in front of the robot's heading) and without a TERMINAL_ROTATE
-    // alignment at the end (heading converges to gtheta during PURSUIT).
-    // Caller is responsible for choosing a `gtheta` that doesn't make the
-    // spline colinear with current heading on a flat axis — REALIGN adds
-    // a small lateral offset for that reason.
-    bool _plan_tangent_spline(const Pos2D& current,
-                              double gx, double gy, double gtheta,
-                              double margin_mm, double v_max_mm_s);
 };

@@ -275,52 +275,16 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
     }
 
     if (new_state == State::TURN_AROUND) {
-        // REALIGN: plan a tangent-aware forward arc from `current` pose to
-        // a point ahead along _home_theta, with arrival heading = _home_theta.
-        // PurePursuit drives the curve smoothly without an in-place rotation
-        // (which would inject wheel-slip drift into the KF heading estimate
-        // right before SEARCH starts).
-        //
-        // Apex direction: perpendicular to the CURRENT (start) heading on
-        // the natural turning side (left for CCW delta, right for CW). This
-        // matches the geometric apex of the smooth arc — using perpendicular
-        // to home_theta (the goal heading) is wrong because the apex sits
-        // on the start side of the turn, not the goal side.
-        _realign_inplace = false;          // reset obstacle-fallback flag
+        // Simple in-place rotation to _home_theta. SEARCH's bounded
+        // look-left/look-right sweep handles re-orientation, so this just
+        // needs to point the chassis roughly back at home_theta before
+        // handing off.
         double home_theta_local;
         { std::lock_guard<std::mutex> lk(_m); home_theta_local = _home_theta; }
         const double delta = wrap_pi(home_theta_local - current.theta);
         constexpr double DELTA_DEADBAND_RAD = 0.05;          // ~3°
         if (std::fabs(delta) < DELTA_DEADBAND_RAD) {
             new_state = State::SEARCH;
-        } else {
-            // Forward distance scales with rotation magnitude: 250mm at
-            // delta=0 up to 500mm at delta=π. Gives the spline enough arc
-            // length to turn without exceeding chassis turning radius.
-            const double D = 250.0 + 250.0 * std::fabs(delta) / M_PI;
-            // Lateral offset perpendicular to *start heading* (apex side).
-            constexpr double LAT_MAX_MM = 150.0;
-            const double lat_mag  = LAT_MAX_MM * std::sin(std::fabs(delta) / 2.0);
-            const double lat_sign = (delta >= 0.0) ? 1.0 : -1.0;
-            const double perp_x   = -std::sin(current.theta);
-            const double perp_y   =  std::cos(current.theta);
-            const double goal_x = current.x
-                                + D       * std::cos(home_theta_local)
-                                + lat_sign * lat_mag * perp_x;
-            const double goal_y = current.y
-                                + D       * std::sin(home_theta_local)
-                                + lat_sign * lat_mag * perp_y;
-            if (!_plan_tangent_spline(current, goal_x, goal_y, home_theta_local,
-                                      80.0, 40.0 * ROBOT_SPEED)) {
-                LOGE("Mission") << "REALIGN plan failed; bailing to SEARCH.";
-                new_state = State::SEARCH;
-            } else {
-                LOG("Mission") << "REALIGN arc: delta="
-                               << (delta * 180.0 / M_PI) << " deg, D="
-                               << D << " mm, lat=" << (lat_sign * lat_mag)
-                               << " mm, goal=(" << goal_x << ", " << goal_y
-                               << ", " << home_theta_local << " rad)";
-            }
         }
     }
 
@@ -355,72 +319,6 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
         _state_entered  = now;
     }
     LOG("Mission") << state_name(old_state) << " -> " << state_name(new_state);
-}
-
-bool StateMachine::_plan_tangent_spline(const Pos2D& current,
-                                        double gx, double gy, double gtheta,
-                                        double margin_mm,
-                                        double v_max_mm_s) {
-    const double dx   = gx - current.x;
-    const double dy   = gy - current.y;
-    const double dist = std::hypot(dx, dy);
-
-    // Tangent lever length: 30% of euclidean distance, clamped to a sensible
-    // range. Larger L = smoother arc / weaker tangent commitment; smaller =
-    // sharper turn / tighter tangent. The clamp keeps PurePursuit's
-    // L_d=250mm lookahead inside the tangent-shaped region of the spline,
-    // which is what suppresses PRE_ROLL at path start and TERMINAL_ROTATE
-    // at the end.
-    const double L = clamp_d(0.3 * dist, 80.0, 300.0);
-
-    PathPoint p_start;
-    p_start.x = current.x;
-    p_start.y = current.y;
-    p_start.theta = current.theta;
-
-    // Tangent-control points at start and goal. Phantom-pad (multiplicity 3)
-    // at endpoints means the endpoint tangent direction matches the
-    // direction toward the next interior control.
-    PathPoint p_start_t;
-    p_start_t.x = current.x + L * std::cos(current.theta);
-    p_start_t.y = current.y + L * std::sin(current.theta);
-
-    PathPoint p_goal_t;
-    p_goal_t.x = gx - L * std::cos(gtheta);
-    p_goal_t.y = gy - L * std::sin(gtheta);
-
-    PathPoint p_goal;
-    p_goal.x = gx;
-    p_goal.y = gy;
-    p_goal.theta = gtheta;
-    p_goal.margin = margin_mm;
-
-    std::vector<PathPoint> controls;
-    controls.reserve(4);
-    controls.push_back(p_start);
-    controls.push_back(p_start_t);
-    controls.push_back(p_goal_t);
-    controls.push_back(p_goal);
-
-    std::vector<PathPoint> path = bcubic_spline(
-        controls,
-        20,                       // samples per segment (5 segments × 20)
-        v_max_mm_s,
-        margin_mm,
-        100.0 * ROBOT_SPEED,
-        30.0);
-
-    if (path.empty()) {
-        LOGE("Mission") << "tangent spline empty path from ("
-                        << current.x << ", " << current.y << ", "
-                        << current.theta << ") to ("
-                        << gx << ", " << gy << ", " << gtheta << ")";
-        return false;
-    }
-    path.back().margin = margin_mm;
-    path.back().theta  = gtheta;
-    _controller.set_path(path);
-    return true;
 }
 
 bool StateMachine::_plan_path_to(const Pos2D& current,
@@ -891,26 +789,10 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
         }
 
         case State::TURN_AROUND: {
-            // REALIGN: tangent-aware forward arc to _home_theta was planned
-            // in _transition() on entry. PurePursuit drives the curve; we
-            // just watch for arrival or timeout. Cases where realignment
-            // isn't needed (|delta| < deadband) or the plan failed are
-            // short-circuited in _transition() and never enter this body.
-
-            // Wall-obstruction fallback: if the spline path heads into a
-            // wall (typical when home sits in a corner and post-release
-            // heading faces the wall), the obstacle filter in loop_control
-            // zeros forward velocity and the spline stalls. Latch into a
-            // gentle in-place rotation to home_theta — slower than the
-            // spline ideal but always finishes. Sticky so a brief lidar
-            // false-positive doesn't flip-flop us between modes.
-            if (!_realign_inplace && app::obstacle_ahead.load()) {
-                LOG("Mission") << "REALIGN: obstacle ahead, falling back to "
-                                  "in-place rotation.";
-                _controller.abort();
-                _realign_inplace = true;
-            }
-
+            // Gentle in-place rotation to _home_theta. P-controller with
+            // 2.0 rad/s/rad gain capped at 1.0 rad/s — slow enough that
+            // cox gets several scan corrections during the spin and
+            // wheel-slip drift stays bounded.
             double home_theta_local;
             { std::lock_guard<std::mutex> lk(_m); home_theta_local = _home_theta; }
             const double delta = wrap_pi(home_theta_local - pose.theta);
@@ -927,23 +809,9 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 out.mode = Command::Mode::STOP;
                 break;
             }
-
-            if (_realign_inplace) {
-                // Gentle in-place rotation at 1.0 rad/s cap. Slow enough
-                // that cox gets several corrections during the spin and
-                // wheel-slip drift stays bounded.
-                out.mode = Command::Mode::DIRECT;
-                out.v_mm_s = 0.0;
-                out.omega_rad_s = clamp_d(2.0 * delta, -1.0, 1.0);
-                break;
-            }
-
-            if (_controller.has_arrived()) {
-                _transition(State::SEARCH, pose);
-                out.mode = Command::Mode::STOP;
-                break;
-            }
-            out.mode = Command::Mode::PATH_FOLLOW;
+            out.mode = Command::Mode::DIRECT;
+            out.v_mm_s = 0.0;
+            out.omega_rad_s = clamp_d(2.0 * delta, -1.0, 1.0);
             break;
         }
 

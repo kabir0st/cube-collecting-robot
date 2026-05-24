@@ -227,12 +227,14 @@ Same shape, for the hardcoded TEST sequence.
 
 In [src/controller.cpp](../src/controller.cpp):
 
-### REALIGN spline ([_transition](../src/controller.cpp#L269))
+### REALIGN in-place rotation ([State::TURN_AROUND tick body](../src/controller.cpp))
 - `DELTA_DEADBAND_RAD = 0.05` (~3°): skip realign if already aligned.
-- `LAT_MAX_MM = 150`: apex of the forward arc back to `_home_theta`.
-- `D = 250 + 250 * |δ|/π` mm: forward distance of the arc goal.
-- Increase forward `D`: gentler curvature for big realign deltas.
-  Costs floor space (arc swings further from home).
+- P-controller gain `2.0` (rad/s per rad of delta), `omega_cap = 1.0` rad/s.
+- No forward motion, no spline — just a slow chassis rotation to
+  `_home_theta`. SEARCH's bounded look-left/look-right sweep does the
+  actual re-orientation work; this just gets the chassis pointed roughly
+  back at home_theta before the sweep begins.
+- Tighten the gain or cap if cox `inliers` drops during the spin.
 
 ### Generic spline (`bcubic_spline`) defaults
 - `samples_per_segment = 20-100` — denser samples = smoother PurePursuit
