@@ -635,6 +635,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 _ssearch.forward_traveled_mm   = 0.0;
                 _ssearch.obstacle_rotated_rad  = 0.0;
                 _ssearch.obstacle_dir_sign     = 0.0;
+                _ssearch.look_right_rotated_rad = 0.0;
                 _ssearch.forward_heading_ref   = pose.theta;
                 _ssearch.in_realign            = false;
                 _ssearch.realign_stable_count  = 0;
@@ -655,6 +656,8 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 _ssearch.last_theta = pose.theta;
                 if (err <= 0.0) {
                     _ssearch.phase = SimpleSearch::Phase::LOOK_RIGHT;
+                    _ssearch.look_right_rotated_rad = 0.0;
+                    _ssearch.last_theta = pose.theta;
                 }
                 out.mode = Command::Mode::DIRECT;
                 out.v_mm_s = 0.0;
@@ -663,12 +666,14 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             }
 
             if (_ssearch.phase == SimpleSearch::Phase::LOOK_RIGHT) {
-                // Target: pose.theta == ref - π/2. CW-rotating, err is
-                // negative and rises toward 0.
-                const double err =
-                    wrap_pi((ref - M_PI / 2.0) - pose.theta);
+                // Spans ≈ π through the back of the robot — can't use an
+                // absolute target check (wrap_pi(-π) = +π would satisfy
+                // err ≥ 0 on tick 0). Integrate signed Δθ from phase
+                // entry and exit once we've rotated CW by ≥ π.
+                const double dth = wrap_pi(pose.theta - _ssearch.last_theta);
+                _ssearch.look_right_rotated_rad += dth;
                 _ssearch.last_theta = pose.theta;
-                if (err >= 0.0) {
+                if (_ssearch.look_right_rotated_rad <= -M_PI) {
                     _ssearch.phase = SimpleSearch::Phase::FORWARD;
                     _ssearch.forward_traveled_mm   = 0.0;
                     _ssearch.obstacle_rotated_rad  = 0.0;

@@ -172,6 +172,12 @@ private:
         // than spin forever.
         double obstacle_rotated_rad = 0.0;
         double obstacle_dir_sign    = 0.0;   // 0 = not currently dodging
+        // Signed rotation accumulated since LOOK_RIGHT entry. Goes
+        // negative as we rotate CW; phase exits at -π. LOOK_RIGHT spans
+        // ≈ π through the back of the robot, so an absolute-target check
+        // (wrap_pi((ref - π/2) - pose)) is +π on entry (antipodal) and
+        // would spuriously satisfy err ≥ 0 on tick 0.
+        double look_right_rotated_rad = 0.0;
         // Fixed SEARCH-axis heading. Snapshotted on first-tick init
         // (_ssearch.initialized rising edge); held constant across all
         // subsequent LOOK_LEFT/LOOK_RIGHT/FORWARD cycles so the search
