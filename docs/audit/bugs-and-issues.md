@@ -9,6 +9,15 @@ performance, **P3** = cosmetic, defensive, or future-proofing.
 > shipped this audit. Each section now ends with a **Fixed:** line citing
 > the change. Two findings (KF theta innovation wrap, cv::Mat clone)
 > turned out to be false alarms — the code was already correct.
+>
+> **Re-verified 2026-05-25**: all fixes still present in the code. Two
+> have evolved further (servo handoff, cox gating) and the descriptions
+> below have been updated to match what's actually in `src/` now. Line
+> numbers were refreshed against the current files. A new P2 finding
+> (CARRY_HOME stuck-recovery exhaustion drops box mid-arena) and a list
+> of behavioural changes since the original audit are appended in the
+> ["Post-audit changes"](#post-audit-changes-2026-05-25) section at the
+> bottom.
 
 For each item: a one-line title, the citation, what the code does today,
 why it's wrong, and a one-line fix sketch.
@@ -18,7 +27,7 @@ why it's wrong, and a one-line fix sketch.
 ## P1 — will bite
 
 ### obstacle_ahead dead flag
-**[src/utils.cpp:75](../../src/utils.cpp#L75) writes; nothing reads.**
+**[src/core.cpp:99](../../src/core.cpp#L99) writes; nothing reads.**
 
 `loop_collect_frames` checks the forward arc on every LIDAR frame boundary and
 stores the result into `app::obstacle_ahead`. No file in
@@ -27,31 +36,47 @@ proximity-stop safety feature is wired to the input but not to the output —
 the robot will drive straight into a wall the LIDAR can see at
 `OBSTACLE_DIST_MM`.
 
-**Fixed**: [src/core.cpp:218-225](../../src/core.cpp#L218) now zeroes
-(v_cmd, w_cmd) when `obstacle_ahead` is true *and* the command would
-drive forward; reverse motion is still allowed so the robot can back out
-of a near-miss.
+**Fixed**: [src/core.cpp:298-301](../../src/core.cpp#L298) zeroes
+`v_cmd` when `obstacle_ahead` is true *and* the command would drive
+forward, but keeps `w_cmd` (so the state machine can rotate away —
+"sidestep") and allows reverse motion. The gate is suppressed during
+APPROACH (visual-servo handles avoidance) and during RELEASE /
+TURN_AROUND where motion is reverse / in-place anyway
+([src/controller.cpp:238-244](../../src/controller.cpp#L238)).
+
+A subsequent refinement added a narrow gripper-mask cone
+(`GRIPPER_MASK_HALF_DEG = 20°`, `GRIPPER_MASK_DIST_MM = 200 mm`,
+[src/core.cpp:32-33](../../src/core.cpp#L32)) so the robot's own closed
+gripper / held box during CARRY_HOME doesn't pin `obstacle_ahead=true`.
+Beams outside the mask in the wider ±60° arc still trigger normally.
 
 ---
 
 ### TURN_AROUND has no timeout
-**[src/controller.cpp:731-757](../../src/controller.cpp#L731-L757).**
+**Original location (pre-refactor) was the `TURN_AROUND` case in
+[src/controller.cpp](../../src/controller.cpp).**
 
-The exit condition is `_turn_accumulated ≥ M_PI`. The accumulator only grows
+The exit condition was `_turn_accumulated ≥ M_PI`. The accumulator only grows
 (it adds `std::abs(...)` every tick), so a robot that can rotate at all will
 eventually escape. But if the motor controller saturates or the robot is
 physically blocked from rotating (wedged against a wall, gripper jammed on
 something), `_turn_accumulated` stays at ~0 and the mission hangs in
 TURN_AROUND forever. No state-level timeout transitions out.
 
-**Fixed**: [src/controller.cpp](../../src/controller.cpp) (TURN_AROUND
-case) now bails to SEARCH after
-[`_turn_around_timeout_s`](../../include/controller.hpp) (default 8 s)
-with a log line; mission-level timeouts then govern the next transition.
+**Fixed**: The TURN_AROUND state has since been repurposed as
+REALIGN-to-`_home_theta` (rotate in place to face the search direction
+after RELEASE), with the same wedging risk. The case at
+[src/controller.cpp:1279-1303](../../src/controller.cpp#L1279) bails to
+SEARCH after
+[`_turn_around_timeout_s`](../../include/controller.hpp#L374) (default
+8 s) with a log line; mission-level timeouts then govern the next
+transition. The header comment at
+[include/controller.hpp:369-371](../../include/controller.hpp#L369)
+documents the rename.
 
 ---
 
-### servo_grab() now intentionally blocks for ~140 ms
+### servo_grab() PWM brownout (now non-blocking poll-driven)
 **[src/servo.c](../../src/servo.c), [src/controller.cpp](../../src/controller.cpp).**
 
 Earlier note: the original `servo_grab()` was a single `pwmWrite()` —
@@ -60,30 +85,34 @@ step. Hobby servos draw 1 A+ during a fast 65° slew, and the resulting
 droop on the Pi's 5 V rail was browning out the SoC and hanging the
 process.
 
-**Fix**: `servo_grab()` / `servo_release()` now walk the angle in
-`STEP_DEG = 10` chunks with `STEP_MS = 20` between updates (one PWM
-frame at 50 Hz). Worst-case traversal is 7 × 20 ms ≈ 140 ms. Internal
-`last_deg[2]` tracks the previous position so repeated calls to the
-same target are no-ops and the very first call snaps (no prior state
-to interpolate from).
+The initial fix walked the angle inline (blocking ~140 ms inside
+`step()`). That has since been superseded.
 
-This re-introduces a blocking call inside `StateMachine::step()`. The
-grip-handshake already commands `v=0` on the tick *before* the smooth
-close fires, so the wheels are stationary during the block. SIGINT
-handling still works because the second-SIGINT path in
-[main.cpp](../../main.cpp) calls `_exit(130)`.
+**Current implementation** ([src/servo.c:43-78](../../src/servo.c#L43)):
+`servo_grab()` / `servo_release()` are non-blocking — they latch
+`target_deg[ch]` and return immediately. A separate
+[`servo_tick()`](../../src/servo.c#L55) is called from `loop_control`
+([src/core.cpp:231](../../src/core.cpp#L231)) and advances each channel
+by at most `STEP_DEG = 10` toward its target if `STEP_MS = 20` has
+elapsed since the last step. Worst-case traversal is still
+7 × 20 ms ≈ 140 ms but it happens across control ticks, not inside one
+of them.
 
-If 140 ms ever turns out to be too much (e.g. cox cov inflates because
-two predict cycles got dropped), move the call onto a one-shot worker
-thread and add a `_grip_in_progress` atomic the state machine polls.
+`StateMachine::step()` no longer blocks. Instead, the CARRY_HOME entry
+path commands `v=0` and polls
+[`servo_done(0)`](../../src/servo.c#L71) with a 3 s watchdog before
+driving
+([src/controller.cpp:895-921](../../src/controller.cpp#L895)). First
+call on a channel still snaps (no prior state to interpolate from);
+repeated calls to the same target are no-ops via the
+`cur_deg == target_deg` early-out.
 
 ---
 
 ### TrackerResult atomic tearing
-**[src/tracker.cpp:198-250](../../src/tracker.cpp#L198) writes
-`captured`, `lost`, `grabbable` atomics independently across ~50 lines.
-[include/types.hpp:213-219](../../include/types.hpp#L213) reads them under
-`lock` (which the writer does not hold for these stores).**
+**(Pre-fix) `src/tracker.cpp` wrote `captured`, `lost`, `grabbable`
+atomics independently across ~50 lines; readers held `lock` for the
+other fields but the writer did not hold the lock for these stores.**
 
 The reader sees a consistent `bearing/dist/area/has_target` (those are
 under the lock) but the three flag atomics can each be in any one of two
@@ -99,17 +128,20 @@ states at any time. Possible glitches a state-machine consumer can see:
   brittle.
 
 **Fixed**: The three flags are now plain `bool`s under `lock` in
-[include/types.hpp](../../include/types.hpp). The vision thread keeps
-local-mirror state, runs all three debounce machines on the locals, then
-commits the triple atomically via `result.commit_flags(...)` at the end
-of each frame ([src/tracker.cpp](../../src/tracker.cpp)). Readers go
-through `get_snapshot()` which already held `lock`.
+[include/types.hpp:205-207](../../include/types.hpp#L205). The vision
+thread keeps local-mirror state
+(`flag_captured`/`flag_lost`/`flag_grabbable` at
+[src/tracker.cpp:169-171](../../src/tracker.cpp#L169)), runs all three
+debounce machines on the locals, then commits the triple atomically via
+[`result.commit_flags(...)`](../../include/types.hpp#L250) at
+[src/tracker.cpp:433](../../src/tracker.cpp#L433). Readers go through
+`get_snapshot()` which already holds `lock`.
 
 ---
 
 ### filter.ready=false passed silently to the tracker
-**[main.cpp:121-130](../../main.cpp#L121-L130);
-[src/tracker.cpp:107-113](../../src/tracker.cpp#L107).**
+**(Pre-fix) `main.cpp` spawned `loop_vision_tracking()` even when
+calibration was aborted; the tracker did not gate on `filter.ready`.**
 
 If the user presses `q` during interactive calibration, `filter` is
 default-constructed (`ready = false`, all `cv::Scalar` zero). `main.cpp`
@@ -120,18 +152,20 @@ Scalars straight into `cv::inRange`, producing all-black masks. Every
 frame becomes `detected = false`, `lost` debounces to true within
 ~10 frames, and the state machine sits in SEARCH forever.
 
-**Fixed**: [main.cpp](../../main.cpp) now logs an error and returns 1 if
-`!filter.ready` after the calibrate/load block, before any thread is
-spawned. Vision will not start with garbage HSV bounds.
+**Fixed**: [main.cpp:176-189](../../main.cpp#L176) now checks both
+`filter.ready=true` in config AND that `load_filter_result()` returns a
+populated `FilterResult`. If either is missing it logs an error and
+returns before any thread is spawned. Vision will not start with
+garbage HSV bounds.
 
 ---
 
 ## P2 — silent degradation
 
 ### sensor_noise race
-**[src/core.cpp:80-81](../../src/core.cpp#L80) writes; no atomic, no lock.
-Readers: [src/cox.cpp:74](../../src/cox.cpp#L74),
-[src/calibrations.cpp ~519](../../src/calibrations.cpp).**
+**(Pre-fix) `loop_localization` wrote `lidar_data.sensor_noise` as a
+plain `double` while readers in cox and calibrations consumed it from
+other threads.**
 
 `get_lidar_sensor_noise()` runs after a 2 s sleep at boot, but
 `loop_collect_frames` is already writing into the buffer. Even if you
@@ -139,16 +173,17 @@ trust the write to be torn-free on this ARM target (double = 8 bytes, may
 or may not be atomic), the value is used to gate cox's inlier threshold
 and find_walls' RANSAC threshold — a wrong noise estimate skews both.
 
-**Fixed**: `sensor_noise` is now `std::atomic<double>` in
-[include/types.hpp](../../include/types.hpp); the one writer
-([src/core.cpp](../../src/core.cpp)) uses `.store()` and the readers in
-[src/cox.cpp](../../src/cox.cpp) / [src/calibrations.cpp](../../src/calibrations.cpp)
-use `.load()`.
+**Fixed**: `sensor_noise` is now `std::atomic<double>` at
+[include/types.hpp:35](../../include/types.hpp#L35); the one writer
+[src/core.cpp:108](../../src/core.cpp#L108) uses `.store()` and the
+readers at [src/cox.cpp:73](../../src/cox.cpp#L73) and
+[src/calibrations.cpp:596](../../src/calibrations.cpp#L596) use
+`.load()`.
 
 ---
 
 ### Cox ridge inflates KF trust
-**[src/cox.cpp:180-183, 216](../../src/cox.cpp#L180).**
+**[src/cox.cpp:184-187](../../src/cox.cpp#L184).**
 
 Cox adds `RIDGE = 1e-3` to the normal matrix diagonal before inversion.
 This regularises ill-conditioned scans, but it also shrinks the reported
@@ -156,12 +191,25 @@ covariance (which is `s² · A.inverse()`). The KF then trusts cox more
 than it should, drawing the fused pose harder toward the cox estimate
 when the geometry is actually poorly observed.
 
-**Fixed**: Cox now computes the eigenvalues of the information matrix
-`A` after the iteration loop and records the condition number on
-`PosEstimate.cond_number` ([src/cox.cpp](../../src/cox.cpp), via
-`SelfAdjointEigenSolver`). `cox_can_fuse()` rejects estimates with
-`cond_number > 1e5`; `cox_strong_fix()` (relocalize sweep) requires
-`cond_number ≤ 1e4`. A "cond" column is added to the Cox dashboard row.
+**Fixed (then revised)**: The original fix computed the eigenvalues of
+the information matrix `A` after the iteration loop and stored the
+condition number on `PosEstimate.cond_number`
+([src/cox.cpp:227-238](../../src/cox.cpp#L227), via
+`SelfAdjointEigenSolver`), then gated `cox_can_fuse()` on
+`cond_number > 1e5` and `cox_strong_fix()` on `cond_number ≤ 1e4`. In
+the 2-wall L-corner geometry of the arena, `cond` naturally runs ~1e6
+even when sigmas are healthy (~2 mm) — the cond gate killed every fuse
+([src/cox.cpp:260-264](../../src/cox.cpp#L260) documents this).
+
+The gate now lives on the sigmas directly, which is what `cond` was
+trying to proxy:
+[`MIN_INLIERS_FUSE = 20`, `MAX_SIGMA_XY_FUSE = 30 mm`,
+`MAX_SIGMA_THETA_FUSE = 0.025 rad`](../../src/cox.cpp#L265).
+`cox_strong_fix()` uses the same shape with tighter sigma caps
+([src/cox.cpp:274-276](../../src/cox.cpp#L274)) and additionally
+requires `converged`. `cond_number` is still computed and surfaced on
+the Cox dashboard row ([src/cox.cpp:540](../../src/cox.cpp#L540)) but
+no longer participates in the fuse decision.
 
 ---
 
@@ -176,34 +224,31 @@ needed.
 ---
 
 ### Cox covariance can be rank-deficient and still pass `cox_can_fuse`
-**[src/cox.cpp:239-255](../../src/cox.cpp#L239).**
+**[src/cox.cpp:278-294](../../src/cox.cpp#L278).**
 
-`cox_can_fuse` checks `est.converged && est.inliers >= MIN_INLIERS_FUSE
-(6)`. A single long wall produces six perfectly aligned inliers and a
-converged solve — but the perpendicular direction is unconstrained. The
-ridge regularization hides the singularity; the reported covariance is
-finite but the true uncertainty in the unobserved direction is infinite.
+`cox_can_fuse` originally checked `est.converged && est.inliers >= 6`.
+A single long wall produces a converged solve with healthy inliers —
+but the perpendicular direction is unconstrained. The ridge
+regularization hides the singularity; the reported covariance is finite
+but the true uncertainty in the unobserved direction is infinite.
 
-**Fixed**: Same fix as "Cox ridge inflates KF trust" above —
-`cox_can_fuse()` now requires `cond_number ≤ 1e5`. A geometrically
-degenerate scan blows past that threshold and is refused before the KF
-update.
+**Fixed**: same change as "Cox ridge inflates KF trust" above.
+`cox_can_fuse()` now requires `sigma_x`, `sigma_y`, `sigma_a` finite
+and each below its `MAX_SIGMA_*_FUSE` cap. A geometrically degenerate
+scan blows `sigma_y` (or whichever axis is unconstrained) well past
+30 mm and is refused before the KF update.
 
 ---
 
 ### save_filter_result is not atomic
-**[src/calibrations.cpp:317-376](../../src/calibrations.cpp#L317).**
-
-The function reads the current `config.yml`, drops the `filter:` block,
-re-opens the same file with `std::ios::trunc`, and writes the kept lines
-+ the new filter block. If the process crashes between the open and the
-full write, the user is left with a half-written config (everything
-before the crash point + nothing after).
+**(Pre-fix) `save_filter_result()` re-opened `config.yml` with
+`std::ios::trunc` and rewrote it inline; a crash between truncate and
+full write left the user with a half-written config.**
 
 **Fixed**: `save_filter_result()` now writes to `config.yml.tmp`, closes
 the file, then `std::rename()` atomically replaces the original
-([src/calibrations.cpp](../../src/calibrations.cpp)). On rename failure
-the tmp file is removed and the original stays intact.
+([src/calibrations.cpp:425-450](../../src/calibrations.cpp#L425)). On
+rename failure the tmp file is removed and the original stays intact.
 
 ---
 
@@ -219,29 +264,30 @@ No change needed.
 ---
 
 ### SEARCH ↔ APPROACH thrash on unreachable box
-**[src/controller.cpp:395-462, 640-643](../../src/controller.cpp#L395).**
-
-If the box is visible but the robot can't reach it (e.g. wedged against
-a wall, or the visual servo overshoots and loses lock), APPROACH times
-out at 20 s, the budget increments, we bounce back to SEARCH, the box is
-still visible, we re-enter APPROACH after `_search_min_dwell_s = 2 s`,
-and the cycle repeats. The mission spends 5 × 20 = 100 s before
-SAFE_STOP. Effectively a livelock.
+**Pre-fix: APPROACH timed out at 20 s, robot bounced back to SEARCH,
+re-acquired the same box, and re-entered APPROACH after the search
+dwell. Cycle repeated until SAFE_STOP.**
 
 **Fixed**: the failed approach now latches a world-frame position
-(`_last_failed_target_*`) and a timestamp into the StateMachine
-([include/controller.hpp](../../include/controller.hpp),
-[src/controller.cpp](../../src/controller.cpp)). SEARCH's at-home /
-at-failure skip logic treats any detection within
-`_failed_target_skip_radius_mm` (200 mm) and `_failed_target_skip_s`
-(30 s) of the failure point exactly like an already-delivered box. The
-memory decays so a different box at a similar bearing later isn't
-ignored, and `start()` clears it for fresh missions.
+(`_last_failed_target_x/y` +
+[`_last_failed_at`](../../include/controller.hpp#L149)) into the
+StateMachine when APPROACH times out
+([src/controller.cpp:1051-1053](../../src/controller.cpp#L1051)).
+SEARCH's at-home / at-failure skip logic
+([src/controller.cpp:616-628](../../src/controller.cpp#L616)) treats
+any detection within
+[`_failed_target_skip_radius_mm` (200 mm)](../../include/controller.hpp#L378)
+and [`_failed_target_skip_s` (30 s)](../../include/controller.hpp#L379)
+of the failure point exactly like an already-delivered box. The memory
+decays so a different box at a similar bearing later isn't ignored, and
+`start()` clears it for fresh missions
+([src/controller.cpp:145](../../src/controller.cpp#L145)).
 
 ---
 
 ### Telemetry sends a default PathPoint when no path is loaded
-**[src/core.cpp:248](../../src/core.cpp#L248) (the recent change) +
+**`telemetry::send_state` call at
+[src/core.cpp:334-338](../../src/core.cpp#L334) +
 `pp.get_active_target()`.**
 
 When the state machine is in IDLE/SEARCH (rotating, not following a
@@ -250,60 +296,73 @@ zeros. The Matlab viewer renders that as "target at (0, 0, 0)", which is
 inside the arena (likely the home zone), masking the actual mission
 state.
 
-**Fixed**: Added `PurePursuitController::has_active_target()` (false when
-the controller is idle or before the first `set_path()`). Extended
-`telemetry::send_state` with a `target_valid` parameter and a
-`"target_valid":0/1` JSON field; receivers should gate the marker on
-that flag instead of comparing `target` to `(0, 0, 0)`.
+**Fixed**:
+[`PurePursuitController::has_active_target()`](../../include/pure_pursuit.hpp#L38)
+returns false when the controller is idle or before the first
+`set_path()` ([src/pure_pursuit.cpp:69](../../src/pure_pursuit.cpp#L69)).
+[`telemetry::send_state`](../../include/telemetry.hpp#L24) takes a
+`target_valid` parameter and emits a
+[`"target_valid":0/1` JSON field](../../src/telemetry.cpp#L181);
+receivers should gate the marker on that flag instead of comparing
+`target` to `(0, 0, 0)`.
 
 ---
 
 ## P3 — cosmetic / future-proofing
 
 ### Duplicate angle wrapping
-Five files manually `wrap_pi(a - b)`:
-[src/controller.cpp:527, 625, 745](../../src/controller.cpp);
-[src/pure_pursuit.cpp:196, 220](../../src/pure_pursuit.cpp);
-plus inline normalization in [src/kalman.cpp](../../src/kalman.cpp) and
-[src/cox.cpp](../../src/cox.cpp).
+Inline `wrap_pi(a - b)` is spread across the controller
+([src/controller.cpp](../../src/controller.cpp) — ~10 sites including
+`322`, `381`, `701`, `719`, `742`, `784`, `841`, `1029`, `1286`),
+pure_pursuit ([src/pure_pursuit.cpp:207, 234](../../src/pure_pursuit.cpp#L207)),
+and kalman ([src/kalman.cpp:64, 95, 106](../../src/kalman.cpp#L64)).
 
-**Fixed**: Added `angle_error(goal, current)` to
-[include/utils.hpp](../../include/utils.hpp). Existing call sites kept
-their inline form to avoid a wide diff; new code should use the helper.
+**Fixed**: Added
+[`angle_error(goal, current)`](../../include/utils.hpp#L36) to
+`include/utils.hpp`. Existing call sites kept their inline form to
+avoid a wide diff; new code should use the helper.
 
 ---
 
 ### LIDAR-to-body transform duplicated
-[src/cox.cpp:106](../../src/cox.cpp#L106) and
-[src/calibrations.cpp ~513](../../src/calibrations.cpp) both apply
-`-angles[i] * (M_PI / 180.0) + LIDAR_MOUNT_OFFSET_RAD`.
+Both `src/cox.cpp` and `src/calibrations.cpp` historically applied
+`-angles[i] * (M_PI / 180.0) + LIDAR_MOUNT_OFFSET_RAD` inline.
 
-**Fixed**: Added `lidar_polar_to_body(angle_deg, dist, x, y)` to
-[include/utils.hpp](../../include/utils.hpp). The map-building site in
-`find_walls()` now uses it; cox.cpp's inner-loop site kept its
-hand-coded `float` version because the helper is `double` and the
+**Fixed**: Added
+[`lidar_polar_to_body(angle_deg, dist, x, y)`](../../include/utils.hpp#L45)
+to `include/utils.hpp`. The map-building site in `find_walls()` uses it
+at [src/calibrations.cpp:590](../../src/calibrations.cpp#L590) with a
+referencing comment at
+[:587](../../src/calibrations.cpp#L587). The cox inner-loop site kept
+its hand-coded `float` version because the helper is `double` and the
 inner loop is performance-sensitive — both still cite the helper as
 the canonical sign-convention source.
 
 ---
 
 ### Hysteresis counters grow without bound
-[src/tracker.cpp:83-87](../../src/tracker.cpp#L83) declares the
-hysteresis counters as plain `int`.
+(Pre-fix) the tracker's debounce counters were plain `int` and
+incremented unconditionally each frame.
 
 **Fixed**: Counters are now `unsigned` and incremented via a local
-`clamp_inc(c, cap)` lambda that saturates at the threshold. No UB
-risk, no unbounded growth.
+[`clamp_inc(c, cap)`](../../src/tracker.cpp#L162) lambda that saturates
+at the threshold (used at tracker.cpp
+[:363](../../src/tracker.cpp#L363),
+[:377](../../src/tracker.cpp#L377),
+[:391](../../src/tracker.cpp#L391),
+[:408](../../src/tracker.cpp#L408),
+[:418](../../src/tracker.cpp#L418)). No UB risk, no unbounded growth.
 
 ---
 
 ### UDP sendto has no backpressure
-[src/telemetry.cpp:34-39](../../src/telemetry.cpp#L34). Failed sends are
+Pre-fix: `send_raw()` ignored the `sendto` return; failed sends were
 silently dropped.
 
 **Fixed**: `send_raw()` now checks the `sendto` return and increments a
-cumulative `g_drop_count` on failure. A rate-limited warning
-(`once / 1000 ms`) logs the running drop total via `LOGE("Telemetry")`.
+cumulative [`g_drop_count`](../../src/telemetry.cpp#L38) on failure. A
+rate-limited warning (`once / 1000 ms`) logs the running drop total via
+`LOGE("Telemetry")` ([src/telemetry.cpp:54](../../src/telemetry.cpp#L54)).
 
 ---
 
@@ -318,12 +377,13 @@ moves off `loop_control`, the writes will need a lock.
 ---
 
 ### `_goto_pending` displaced target
-[src/controller.cpp](../../src/controller.cpp). A second `go_to()`
-before the first one is consumed silently overwrites the latched
-target.
+A second `go_to()` before the first one is consumed silently
+overwrites the latched target.
 
-**Fixed**: `go_to()` now detects an unconsumed pending target and logs
-the displaced coordinates before overwriting them.
+**Fixed**: `go_to()` now detects an unconsumed pending target
+([src/controller.cpp:189](../../src/controller.cpp#L189)) and logs
+the displaced coordinates before overwriting them
+([src/controller.cpp:202](../../src/controller.cpp#L202)).
 
 ---
 
@@ -337,9 +397,96 @@ failure is the pre-existing servo.c→wiringPi gap on the dev host.
 
 | Change | Effect |
 |---|---|
-| `obstacle_ahead` now gates forward motion | Robot stops on a wall the LIDAR sees within the forward arc; reverse motion still allowed. |
-| TURN_AROUND timeout (8 s) | Mission no longer wedges on a jammed motor. |
+| `obstacle_ahead` now gates forward motion | Robot stops on a wall the LIDAR sees within the forward arc; reverse motion still allowed. Gripper-mask cone added so the held box doesn't trip it during CARRY_HOME. |
+| TURN_AROUND timeout (8 s) | Mission no longer wedges on a jammed motor. State is now REALIGN-to-`_home_theta` semantically. |
 | Failed-target skip in SEARCH | One unreachable box no longer wastes the entire approach budget. |
-| Cox condition gate | Long-corridor / single-wall scans no longer feed the KF a falsely-confident correction. The new "cond" column on the Cox row is the live indicator. |
+| Cox sigma gate | Long-corridor / single-wall scans no longer feed the KF a falsely-confident correction. The `cond` column on the Cox row is the live indicator (the original cond-number gate was replaced by sigma gates after it killed valid fuses in L-corner geometry). |
 | Telemetry `target_valid` flag | Receivers should consume this; legacy receivers reading `target` alone need updating. |
 | `commit_flags()` on TrackerResult | If any external code touches `result.captured/lost/grabbable` directly (it shouldn't — but check), it now goes through plain bools under `lock`. |
+
+---
+
+## Post-audit changes (2026-05-25)
+
+This section captures behavioural shifts and one new finding from a
+2026-05-25 re-read of the branch. The original audit's fixes are still
+in place; these are additions or revisions that landed afterwards.
+
+### Re-verification summary
+
+All P1/P2/P3 items in the sections above are still present in the code.
+The two fixes whose implementation has materially changed since the
+original audit:
+
+- **Servo grip handoff** — the inline "blocking ~140 ms walk" was
+  replaced by a non-blocking poll-driven scheme
+  (`servo_grab()`/`servo_release()` latch a target;
+  [`servo_tick()`](../../src/servo.c#L55) called from `loop_control`
+  steps once per `STEP_MS`). `StateMachine::step()` no longer blocks;
+  CARRY_HOME entry polls
+  [`servo_done(0)`](../../src/servo.c#L71) with a 3 s watchdog
+  ([src/controller.cpp:895-921](../../src/controller.cpp#L895)). The
+  "P1 — servo_grab" section above has been rewritten to reflect this.
+
+- **Cox cond-number gate replaced by sigma gates** — see the rewritten
+  "Cox ridge inflates KF trust" and "Cox covariance can be
+  rank-deficient" sections above. `cond_number` is still computed and
+  dashboarded but no longer participates in the fuse decision.
+
+### New finding (2026-05-25)
+
+#### P2 — CARRY_HOME stuck-recovery exhaustion releases mid-arena
+**[src/controller.cpp:1223-1235](../../src/controller.cpp#L1223).**
+
+The CARRY_HOME stuck-recovery sub-state machine
+([added in d0c50f4](../../src/controller.cpp#L1150)) detects
+no-progress via a sliding-window anchor and runs up to
+`_carry_recovery_max_attempts` (default 2) reverse-then-curl recovery
+cycles. When all attempts are exhausted, the current behaviour is:
+
+```cpp
+LOG("Mission") << "... releasing in place (" << dist_to_home
+               << " mm from home) and returning to SEARCH.";
+_transition(State::RELEASE, pose);
+```
+
+This opens the gripper **regardless of distance to the home zone**.
+Effect: a robot stuck against an obstacle anywhere in the arena will
+litter the held box on the floor mid-arena, then re-enter SEARCH and
+likely re-acquire the same dropped box (subject to the
+`_failed_target_skip_radius_mm` / `_failed_target_skip_s` gate from the
+SEARCH-thrash fix above).
+
+Commit `0b285fc` ("add position guard to prevent gripper release
+outside home zone") explicitly added a guard in the previous CARRY_HOME
+implementation that refused to release outside the home zone and
+SAFE_STOPped instead. Commit `2789ecb`
+("refactor CARRY_HOME logic: enhance path retry mechanism…") rewrote
+the CARRY_HOME case and the new stuck-recovery exhaustion path does
+not restore that guard. The has-arrived path
+([:1114-1136](../../src/controller.cpp#L1114)) does re-plan to home
+rather than releasing far from it, but it has no equivalent of the
+"out-of-zone → SAFE_STOP" check.
+
+**Severity**: P2. The drop usually lands close to home (recovery only
+fires after the robot already drove most of the way), but a stuck
+event triggered early in CARRY_HOME can drop a box well inside the
+arena where it will be re-targeted as if it were a fresh delivery
+candidate.
+
+**Suggested fix**: gate the exhaustion-RELEASE on `at_home`
+(`dist_to_home <= _home_margin`). When false, either SAFE_STOP with
+the box still gripped (matches the spirit of `0b285fc`) or fall through
+to one more straight-shot plan attempt before SAFE_STOP. Operator
+intervention is cheaper than mis-categorised boxes.
+
+#### Drag guard removed (informational, not a finding)
+
+The same `2789ecb` refactor removed the
+`_carry_target_lost_timeout_s` / `_carry_last_target_seen_at` drag
+guard that watched for "captured stayed true but vision never saw the
+box again" during CARRY_HOME. The stuck-recovery state machine
+nominally subsumes the same failure mode (the box-swap scenario the
+drag guard targeted would also manifest as lack-of-progress), but
+there's no explicit drag-time check anymore. Noted here so future
+auditors don't go looking for it.

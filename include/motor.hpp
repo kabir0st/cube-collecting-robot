@@ -11,17 +11,23 @@
 class Motor {
     public:
         // Drive-train constants. Per-wheel calibration: the encoders +
-        // wheels are not identical (typical ~2% asymmetry from wheel-radius
-        // variation), and feeding both raw deltas through one shared scale
-        // injects a fake heading change every step that compounds into
-        // unbounded drift. Calibrate each wheel independently against the
-        // same ground-truth distance and update here.
+        // wheels are not identical (sub-1% asymmetry on this chassis), and
+        // feeding both raw deltas through one shared scale injects a fake
+        // heading change every step that compounds into unbounded drift.
+        // Calibrate each wheel independently against the same ground-truth
+        // distance and update here.
         //
         // Calibration method: push the robot in a straight line over a
         // tape-measured distance (e.g. 1 m), read raw ticks per wheel,
         // ticks_per_mm = raw_ticks / actual_mm.
-        static constexpr double LEFT_TICKS_PER_MM  = 121.04;
-        static constexpr double RIGHT_TICKS_PER_MM = 118.42;
+        //
+        // Current values: through-origin LSQ fit on two tape-measured runs
+        // (300 mm: L=302, R=313.29 reported; 600 mm: L=610, R=624 reported).
+        // Replaced earlier hardcoded {121.04, 118.42} which were from a
+        // different chassis and produced visible rightward drift in GOTO
+        // open-loop motion before Cox could correct.
+        static constexpr double LEFT_TICKS_PER_MM  = 122.82;
+        static constexpr double RIGHT_TICKS_PER_MM = 123.26;
         static constexpr double WHEELBASE_MM       = 175.0;
 
         Motor();
