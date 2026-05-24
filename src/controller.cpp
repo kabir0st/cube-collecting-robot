@@ -262,7 +262,10 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
             std::atan2(hy_l - current.y, hx_l - current.x);
         if (!_plan_path_to(current, hx_l, hy_l, tan_to_goal,
                            hm_l, _planned_v_max_mm_s)) {
-            new_state = State::SAFE_STOP;
+            // Don't SAFE_STOP — leave _controller path-less; step()'s
+            // CARRY_HOME body retries the plan each tick.
+            LOG("Mission")
+                << "CARRY_HOME entry plan failed; will retry from step()";
         }
     }
 
@@ -277,10 +280,7 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
     }
 
     if (new_state == State::CARRY_HOME) {
-        // Seed the drag-guard so a brief gripper-arm occlusion right
-        // after capture doesn't fire the target-lost release.
         const auto now = std::chrono::steady_clock::now();
-        _carry_last_target_seen_at = now;
         // Stuck-recovery sub-state. NORMAL = follow the spline that
         // CARRY_HOME's plan-block above just installed. Anchor the
         // stuck-detection window at the current pose; it advances each
@@ -620,9 +620,11 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                     // Budget-exhausted SAFE_STOP removed by request:
                     // SEARCH runs indefinitely until the user sends
                     // SIGINT (Ctrl+C). `attempts` keeps incrementing for
-                    // diagnostics but is no longer fatal.
-                    if (attempts >= max_attempts) {
-                        LOG("Mission") << "Approach budget exhausted ("
+                    // diagnostics but is no longer fatal. Log only on
+                    // the crossing tick (== max), not every subsequent
+                    // APPROACH transition.
+                    if (attempts == max_attempts) {
+                        LOG("Mission") << "Approach budget reached ("
                                        << attempts << "/" << max_attempts
                                        << "); continuing anyway.";
                     }
@@ -821,7 +823,11 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                     << " mm; flipping heading ref toward home.";
                 _ssearch.forward_heading_ref =
                     wrap_pi(_ssearch.forward_heading_ref + M_PI);
-                _ssearch.phase                  = SimpleSearch::Phase::LOOK_LEFT;
+                // Skip LOOK_LEFT — its err would be ~-π/2 against the
+                // flipped ref and it'd transition out on the next tick
+                // anyway (after one tick of wrong-direction CCW). Jump
+                // straight to LOOK_RIGHT, which performs the U-turn CW.
+                _ssearch.phase                  = SimpleSearch::Phase::LOOK_RIGHT;
                 _ssearch.forward_traveled_mm    = 0.0;
                 _ssearch.look_right_rotated_rad = 0.0;
                 _ssearch.obstacle_rotated_rad   = 0.0;
@@ -1063,59 +1069,54 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
         }
 
         case State::CARRY_HOME: {
-            // Drag guard: only carry home when we can still see the
-            // target colour. The gripper arms occlude the box during
-            // normal carry so a brief lost-track is expected — the
-            // _carry_target_lost_timeout_s wait covers that. Persistent
-            // loss is treated as "wrong / swapped box" and we release,
-            // but ONLY when vision is otherwise healthy (target colour
-            // not present but other detections exist). Pure occlusion
-            // (camera sees nothing at all — gripper geometry blocks
-            // it) gets infinite grace.
-            if (snap.has_target) {
-                _carry_last_target_seen_at = std::chrono::steady_clock::now();
-            }
-            const bool vision_healthy =
-                snap.has_target || !snap.obstacles.empty();
-            const double t_since_seen =
-                seconds_since(_carry_last_target_seen_at);
-            // Position guard: refuse to open the gripper anywhere other
-            // than the home zone. If a release would fire from out here,
-            // hand off to SAFE_STOP with the box still gripped so an
-            // operator can intervene rather than littering the arena.
             const double dist_to_home =
                 std::hypot(pose.x - hx, pose.y - hy);
             const bool at_home = dist_to_home <= _home_margin;
-            if (vision_healthy
-                && t_since_seen > _carry_target_lost_timeout_s) {
-                if (!at_home) {
-                    LOGE("Mission")
-                        << "CARRY_HOME: target lost for " << t_since_seen
-                        << " s with healthy vision, but " << dist_to_home
-                        << " mm from home (> " << _home_margin
-                        << " mm); SAFE_STOP instead of release.";
-                    _transition(State::SAFE_STOP, pose);
+
+            // Entry-plan retry. If _transition(CARRY_HOME) couldn't
+            // build a spline, _controller has no path. Retry from the
+            // live pose each tick until it succeeds. Only relevant in
+            // NORMAL phase — REVERSING uses direct backward commands
+            // (no path) and CURLING installs its path inside the
+            // reverse-done branch below.
+            if (_carry_phase == CarryPhase::NORMAL
+                && _controller.total() == 0) {
+                const double tan_to_goal =
+                    std::atan2(hy - pose.y, hx - pose.x);
+                if (!_plan_path_to(pose, hx, hy, tan_to_goal,
+                                   _home_margin, _planned_v_max_mm_s)) {
                     out.mode = Command::Mode::STOP;
                     break;
                 }
                 LOG("Mission")
-                    << "CARRY_HOME: target lost for " << t_since_seen
-                    << " s with healthy vision; releasing "
-                       "(suspected wrong box in gripper).";
-                _transition(State::RELEASE, pose);
-                out.mode = Command::Mode::DIRECT;
-                out.v_mm_s = _release_v;
-                out.omega_rad_s = 0.0;
-                break;
+                    << "CARRY_HOME: deferred plan succeeded from step() "
+                       "retry";
+                _stuck_anchor_pose = pose;
+                _stuck_anchor_at   = std::chrono::steady_clock::now();
             }
+
             if (_controller.has_arrived()) {
                 if (!at_home) {
-                    LOGE("Mission")
+                    // PurePursuit reached the end of its spline but
+                    // Kalman says we're still > _home_margin from home.
+                    // Build a fresh spline and keep dragging instead of
+                    // stranding the box mid-arena.
+                    const double tan_to_goal =
+                        std::atan2(hy - pose.y, hx - pose.x);
+                    LOG("Mission")
                         << "CARRY_HOME: pure-pursuit arrived but Kalman is "
                         << dist_to_home << " mm from home (> " << _home_margin
-                        << " mm); SAFE_STOP instead of release.";
-                    _transition(State::SAFE_STOP, pose);
-                    out.mode = Command::Mode::STOP;
+                        << " mm); re-planning to home.";
+                    if (!_plan_path_to(pose, hx, hy, tan_to_goal,
+                                       _home_margin, _planned_v_max_mm_s)) {
+                        // No path; the no-path branch above will retry
+                        // next tick.
+                        out.mode = Command::Mode::STOP;
+                        break;
+                    }
+                    _stuck_anchor_pose = pose;
+                    _stuck_anchor_at   = std::chrono::steady_clock::now();
+                    out.mode = Command::Mode::PATH_FOLLOW;
                     break;
                 }
                 _transition(State::RELEASE, pose);
@@ -1158,11 +1159,14 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                             pose, hx, hy, tan_to_goal,
                             _home_margin, _planned_v_max_mm_s,
                             sign * _carry_recovery_curl_offset_mm)) {
-                        LOGE("Mission")
-                            << "CARRY_HOME: recovery replan failed; "
-                               "SAFE_STOP";
-                        _transition(State::SAFE_STOP, pose);
-                        out.mode = Command::Mode::STOP;
+                        // Stay stationary in REVERSING phase; the
+                        // reverse-done check is time/distance-based so
+                        // it'll re-evaluate the plan next tick. Don't
+                        // bump _carry_recovery_attempts until a plan
+                        // actually loads.
+                        out.mode = Command::Mode::DIRECT;
+                        out.v_mm_s = 0.0;
+                        out.omega_rad_s = 0.0;
                         break;
                     }
                     LOG("Mission")
@@ -1202,14 +1206,16 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                        > _carry_stuck_window_s) {
                 if (_carry_recovery_attempts
                     >= _carry_recovery_max_attempts) {
-                    LOGE("Mission")
+                    LOG("Mission")
                         << "CARRY_HOME: stuck again after "
                         << _carry_recovery_attempts
-                        << " recovery attempts; SAFE_STOP "
-                           "(box still gripped at "
-                        << dist_to_home << " mm from home).";
-                    _transition(State::SAFE_STOP, pose);
-                    out.mode = Command::Mode::STOP;
+                        << " recovery attempts; releasing in place ("
+                        << dist_to_home
+                        << " mm from home) and returning to SEARCH.";
+                    _transition(State::RELEASE, pose);
+                    out.mode = Command::Mode::DIRECT;
+                    out.v_mm_s = _release_v;
+                    out.omega_rad_s = 0.0;
                     break;
                 }
                 LOG("Mission")

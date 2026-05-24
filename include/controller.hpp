@@ -224,13 +224,6 @@ private:
     // loop_control thread.
     std::chrono::steady_clock::time_point _approach_last_seen_at;
 
-    // CARRY_HOME drag guard. Latched on CARRY_HOME entry and refreshed
-    // each tick where snap.captured is true. If the target tracker stays
-    // lost for _carry_target_lost_timeout_s we release whatever is in the
-    // gripper — guards against carrying the wrong colored box home if a
-    // swap occurred mid-drag.
-    std::chrono::steady_clock::time_point _carry_last_target_seen_at;
-
     // World-frame memory of obstacle-color boxes detected by vision.
     // Each Entry is a single-color blob's projected world position, with
     // a last_seen timestamp. step() merges this-frame observations
@@ -305,7 +298,9 @@ private:
     // far wall; below it we face theta = 0 (open arena ahead).
     double _search_far_threshold_mm = 3400.0;
     double _search_stage_x_min_mm   = 300.0;
-    double _search_stage_x_max_mm   = 3300.0;
+    // Staging clamp matches _search_x_far_turn_mm so _enter_search
+    // never plants the robot past the in-sweep turn-back boundary.
+    double _search_stage_x_max_mm   = 2000.0;
     // In-sweep turn-back. Once pose.x crosses this while driving the
     // FORWARD leg with the heading pointing into the arena (+x), flip
     // forward_heading_ref by π and restart the sweep so the next legs
@@ -355,7 +350,7 @@ private:
     // indefinitely toward a stale latched target. Independent of the
     // outer _approach_timeout_s (which fires even with vision still up).
     double _approach_vision_lost_timeout_s = 3.0;
-    double _carry_timeout_s     = 90.0;
+    double _carry_timeout_s     = 120.0;
     // Hard timeout on TURN_AROUND (now REALIGN-to-home_theta) so a jammed
     // motor doesn't wedge the mission. If we cannot reach the target
     // heading within this many seconds, give up and fall back to SEARCH
@@ -378,13 +373,6 @@ private:
     double _obstacle_merge_radius_mm     = 200.0;
     double _obstacle_forget_s            = 30.0;
     double _obstacle_block_radius_mm     = 250.0;
-    // CARRY_HOME drag guard. If snap.captured stays false for this many
-    // seconds AND vision is otherwise healthy (target or any obstacle
-    // colour visible) we release whatever is in the gripper. Pure
-    // occlusion (camera sees nothing at all) gets infinite grace — the
-    // gripper arms genuinely block the camera in some configurations.
-    double _carry_target_lost_timeout_s  = 10.0;
-
     // CARRY_HOME stuck recovery. The robot can push a previously-delivered
     // box into the home wall and stall — no progress, gripper still
     // closed, drag-guard happy. Detection: while in the NORMAL or CURLING
