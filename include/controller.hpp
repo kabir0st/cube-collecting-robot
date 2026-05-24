@@ -288,10 +288,11 @@ private:
     // Tunables. Conservative defaults; safe to tweak from main if needed.
     // _search_omega is NOT scaled with ROBOT_SPEED, same reason as
     // PurePursuit::_omega_max (pure_pursuit.hpp:63): cox runs at ~10 Hz,
-    // so faster yaw smears the scan and KF drift accumulates. 0.6 rad/s ≈
-    // 34°/s gives cox ~3-4 ticks per 90° sweep half, well inside the
-    // motion-compensation envelope.
-    double _search_omega        = 0.6;                  // rad/s, fixed
+    // so faster yaw smears the scan and KF drift accumulates. Also bounded
+    // by vision FPS (4-12 Hz) — at 0.4 rad/s ≈ 23°/s the camera sees
+    // ~3.8°/frame at 6 FPS, gentle enough that a target in the sweep arc
+    // gets caught by the tracker instead of being smeared between frames.
+    double _search_omega        = 0.4;                  // rad/s, fixed
     double _search_v_forward_mm_s   = 50.0 * ROBOT_SPEED;  // forward speed during the FORWARD leg
     double _search_forward_target_mm = 800.0;             // 80 cm leg before each look-around rotation
     // Pre-search staging (see _enter_search). When SEARCH is requested
@@ -325,8 +326,18 @@ private:
     double _search_realign_exit_rad      = 0.05;   // ~3°
     int    _search_realign_stable_ticks  = 3;
     double _approach_v          = 30.0 * ROBOT_SPEED;  // mm/s, visual-servo cruise
-    double _approach_k_omega    = 1.8;   // rad/s per rad of bearing
-    double _approach_omega_max  = 1.2 * ROBOT_SPEED;   // clamp on steering rate
+    // Bearing-P gain. Lowered from 1.8 — at 6 FPS the camera can't
+    // keep up with a 4.8 rad/s slew (≈46°/frame, more than the camera
+    // HFOV); a 22° bearing under the old gain commanded 0.69 rad/s
+    // which still smeared the target off-frame inside a couple of
+    // ticks. 1.2 rad/s/rad pairs with the tighter omega cap below.
+    double _approach_k_omega    = 1.2;
+    // NOT scaled with ROBOT_SPEED, same reason as PurePursuit::_omega_max
+    // (pure_pursuit.hpp:63): vision runs at 6-15 Hz, so faster yaw smears
+    // the tracker across frame-to-frame motion and the bearing P loop
+    // can't catch up. 1.2 rad/s ≈ 11.5°/frame at 6 FPS, well inside the
+    // camera HFOV.
+    double _approach_omega_max  = 1.2;
     // Reactive obstacle avoidance during APPROACH (visual servo only —
     // no path planning). omega_avoid = gain / max(obs.dist, 100) per
     // detected obstacle in front of the target, signed away from the
