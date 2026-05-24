@@ -103,17 +103,31 @@ filter:
   ready: true
   target:
     has_wrap_around: false
-    dominant_color: "107.55,132.957,65.2032"
-    lower1: "99,51,3"
-    upper1: "116,180,125"
+    dominant_color: "106.569,135.738,83.6992"
+    lower1: "99,48,20"
+    upper1: "116,172,138"
     lower2: "0,0,0"
     upper2: "0,0,0"
   obstacles:
-    count: 1
+    count: 3
     0:
       has_wrap_around: false
-      dominant_color: "164.624,185.367,111.432"
-      lower1: "155,112,45"
-      upper1: "173,208,164"
+      dominant_color: "164.086,185.679,128.855"
+      lower1: "155,130,62"
+      upper1: "171,207,177"
+      lower2: "0,0,0"
+      upper2: "0,0,0"
+    1:
+      has_wrap_around: false
+      dominant_color: "23.214,180.989,127.003"
+      lower1: "16,131,61"
+      upper1: "32,211,176"
+      lower2: "0,0,0"
+      upper2: "0,0,0"
+    2:
+      has_wrap_around: false
+      dominant_color: "128.884,110.705,69.2139"
+      lower1: "119,58,9"
+      upper1: "140,138,122"
       lower2: "0,0,0"
       upper2: "0,0,0"
