@@ -304,28 +304,79 @@ std::string fmt_scalar3(const cv::Scalar& s) {
     return os.str();
 }
 
-bool load_filter_result(const Config& cfg, FilterResult& out) {
-    if (!cfg.has("filter.ready") ||
-        !cfg.has("filter.has_wrap_around") ||
-        !cfg.has("filter.dominant_color") ||
-        !cfg.has("filter.lower1") ||
-        !cfg.has("filter.upper1")) {
-        return false;
-    }
-    if (!parse_scalar3(cfg.get_str("filter.dominant_color"), out.dominant_color)) return false;
-    if (!parse_scalar3(cfg.get_str("filter.lower1"),         out.lower1))         return false;
-    if (!parse_scalar3(cfg.get_str("filter.upper1"),         out.upper1))         return false;
-    out.has_wrap_around = cfg.get_bool("filter.has_wrap_around", false);
+// Load a single FilterResult from the given dotted-key prefix (e.g.
+// "filter.target" or "filter.obstacles.0"). The prefix must NOT end in a
+// dot. Returns false if any required key is missing/malformed.
+static bool load_filter_at_prefix(const Config& cfg,
+                                  const std::string& prefix,
+                                  FilterResult& out) {
+    const std::string p = prefix + ".";
+    if (!cfg.has(p + "lower1") || !cfg.has(p + "upper1")) return false;
+    if (!parse_scalar3(cfg.get_str(p + "lower1"), out.lower1)) return false;
+    if (!parse_scalar3(cfg.get_str(p + "upper1"), out.upper1)) return false;
+    out.has_wrap_around = cfg.get_bool(p + "has_wrap_around", false);
     if (out.has_wrap_around) {
-        if (!cfg.has("filter.lower2") || !cfg.has("filter.upper2")) return false;
-        if (!parse_scalar3(cfg.get_str("filter.lower2"), out.lower2)) return false;
-        if (!parse_scalar3(cfg.get_str("filter.upper2"), out.upper2)) return false;
+        if (!cfg.has(p + "lower2") || !cfg.has(p + "upper2")) return false;
+        if (!parse_scalar3(cfg.get_str(p + "lower2"), out.lower2)) return false;
+        if (!parse_scalar3(cfg.get_str(p + "upper2"), out.upper2)) return false;
     }
-    out.ready = cfg.get_bool("filter.ready", false);
-    return out.ready;
+    if (cfg.has(p + "dominant_color")) {
+        parse_scalar3(cfg.get_str(p + "dominant_color"), out.dominant_color);
+    }
+    out.ready = true;
+    return true;
 }
 
-bool save_filter_result(const std::string& path, const FilterResult& result) {
+bool load_filter_result(const Config& cfg, FilterResult& out) {
+    if (!cfg.get_bool("filter.ready", false)) return false;
+    // Preferred: new nested schema under filter.target.*.
+    if (load_filter_at_prefix(cfg, "filter.target", out)) return true;
+    // Legacy fallback: pre-multi-color configs put the single target's
+    // HSV keys directly under filter.* — keep loading those so existing
+    // calibrations don't force a re-run.
+    if (cfg.has("filter.lower1") && cfg.has("filter.upper1")) {
+        return load_filter_at_prefix(cfg, "filter", out);
+    }
+    return false;
+}
+
+std::vector<FilterResult> load_obstacle_filters(const Config& cfg) {
+    std::vector<FilterResult> out;
+    const int count = cfg.get_int("filter.obstacles.count", 0);
+    if (count <= 0) return out;
+    out.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        std::ostringstream key;
+        key << "filter.obstacles." << i;
+        FilterResult f;
+        if (!load_filter_at_prefix(cfg, key.str(), f)) {
+            LOGE("Cal") << "Missing/malformed obstacle filter at "
+                        << key.str() << " — skipping.";
+            continue;
+        }
+        out.push_back(f);
+    }
+    return out;
+}
+
+// Emit one filter under the given indent (`  ` or `    `).
+static void write_filter_block(std::ofstream& out,
+                               const std::string& indent,
+                               const FilterResult& f) {
+    out << indent << "has_wrap_around: "
+        << (f.has_wrap_around ? "true" : "false") << '\n';
+    out << indent << "dominant_color: \""
+        << fmt_scalar3(f.dominant_color) << "\"\n";
+    out << indent << "lower1: \"" << fmt_scalar3(f.lower1) << "\"\n";
+    out << indent << "upper1: \"" << fmt_scalar3(f.upper1) << "\"\n";
+    out << indent << "lower2: \"" << fmt_scalar3(f.lower2) << "\"\n";
+    out << indent << "upper2: \"" << fmt_scalar3(f.upper2) << "\"\n";
+}
+
+bool save_filter_section(const std::string& path,
+                         const FilterResult& target,
+                         const std::vector<FilterResult>& obstacles,
+                         bool ready) {
     // Read existing file (if any) so we can preserve comments and other
     // sections. Missing file is fine — we'll create it fresh.
     std::vector<std::string> lines;
@@ -381,13 +432,15 @@ bool save_filter_result(const std::string& path, const FilterResult& result) {
     for (const std::string& l : kept) out << l << '\n';
     if (!kept.empty()) out << '\n';
     out << "filter:\n";
-    out << "  ready: " << (result.ready ? "true" : "false") << '\n';
-    out << "  has_wrap_around: " << (result.has_wrap_around ? "true" : "false") << '\n';
-    out << "  dominant_color: \"" << fmt_scalar3(result.dominant_color) << "\"\n";
-    out << "  lower1: \"" << fmt_scalar3(result.lower1) << "\"\n";
-    out << "  upper1: \"" << fmt_scalar3(result.upper1) << "\"\n";
-    out << "  lower2: \"" << fmt_scalar3(result.lower2) << "\"\n";
-    out << "  upper2: \"" << fmt_scalar3(result.upper2) << "\"\n";
+    out << "  ready: " << (ready ? "true" : "false") << '\n';
+    out << "  target:\n";
+    write_filter_block(out, "    ", target);
+    out << "  obstacles:\n";
+    out << "    count: " << obstacles.size() << '\n';
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+        out << "    " << i << ":\n";
+        write_filter_block(out, "      ", obstacles[i]);
+    }
     if (!out.good()) return false;
     out.close();
     // rename(2): atomic on the same filesystem. After this call the new

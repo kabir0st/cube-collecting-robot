@@ -60,12 +60,24 @@ bool load_config(const std::string& path, Config& out);
 
 // Populate `out` from `cfg`. Returns false if any required filter.* key is
 // missing or malformed — caller treats that as "not calibrated yet".
+// Reads `filter.target.*` if present; falls back to legacy flat
+// `filter.<key>` form (lower1/upper1/...) for backward compatibility so
+// existing single-color configs keep working.
 bool load_filter_result(const Config& cfg, FilterResult& out);
 
-// Save just the `filter:` section to `path`. Reads the existing file (if any),
-// drops any prior `filter:` block, and appends the new one. All other lines /
-// comments are preserved verbatim. Returns false on I/O failure.
-bool save_filter_result(const std::string& path, const FilterResult& result);
+// Load 0..N obstacle filters from `filter.obstacles.count` +
+// `filter.obstacles.<i>.*`. Returns the populated list (empty if no
+// obstacles configured or `count` missing).
+std::vector<FilterResult> load_obstacle_filters(const Config& cfg);
+
+// Save the full `filter:` section to `path` (target + obstacles +
+// `filter.ready`). Reads the existing file (if any), drops any prior
+// `filter:` block, and appends the new one. All other lines / comments
+// are preserved verbatim. Returns false on I/O failure.
+bool save_filter_section(const std::string& path,
+                         const FilterResult& target,
+                         const std::vector<FilterResult>& obstacles,
+                         bool ready);
 
 double get_lidar_sensor_noise(LidarData &lidar_data);
 

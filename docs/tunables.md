@@ -169,10 +169,24 @@ Cruise speed during the FORWARD leg.
 - Increase: cover the arena faster.
 - Decrease: better odom/cox fusion in a long traversal.
 
-#### `_search_forward_target_mm = 1000`
-Distance per FORWARD leg before the next 360° look-around.
-- Increase: less time spent rotating, more arena coverage per cycle.
+#### `_search_forward_target_mm = 800`
+Distance per FORWARD leg between sweeps. The sweep itself locks to a
+fixed axis (`forward_heading_ref`, snapshotted on SEARCH entry) — every
+cycle's LOOK_LEFT / LOOK_RIGHT targets are absolute (ref ± π/2) and
+FORWARD realigns to ref before driving. No per-cycle drift.
+- Increase: fewer sweeps per unit area, more coverage per cycle.
 - Decrease: more frequent visibility sweeps for targets behind/beside.
+
+#### `_search_realign_enter_rad = 0.15`, `_search_realign_exit_rad = 0.05`, `_search_realign_stable_ticks = 3`
+Hysteresis on the FORWARD-leg realign-to-ref sub-state. Realign engages
+when heading error exceeds `enter_rad`; disengages only after error
+sits inside `exit_rad` for `stable_ticks` consecutive ticks. The gap
+between enter/exit + the stable counter kills the R/L/FWD flap that
+raw cox heading jitter caused near a single threshold.
+- Widen `enter` / tighten `exit`: more dead zone, less chatter at the
+  cost of slightly drifted forward heading.
+- Increase `stable_ticks`: tolerates more cox noise mid-realign, costs
+  slightly more time before resuming forward.
 
 #### `_search_min_dwell_s = 0.0`
 Minimum time in SEARCH before APPROACH can engage. Currently 0 (engage
@@ -204,6 +218,47 @@ world target. Give up and fall back to SEARCH inside this radius.
 - Increase: more tolerance for transient vision drops.
 - Decrease: faster bail on lost targets.
 
+#### `_approach_repulsion_gain = 50` (rad/s × mm)
+Reactive obstacle avoidance inside the visual servo. For every
+non-target colored box detected in front of the target on the visual
+axis, omega gets a bias `gain / max(distance_mm, 100)` signed away
+from the obstacle. At 250 mm this is 0.2 rad/s of avoidance bias on
+top of the bearing P-term.
+- Increase: stronger swerve around obstacles; risk of overshooting
+  the target's bearing.
+- Decrease: gentler avoidance, risk of brushing past blockers.
+- Set to 0 to disable reactive avoidance (target will be chased
+  straight; chain-push case will only be caught at the SEARCH
+  obstacle-block filter).
+
+#### `_approach_push_v = 20 mm/s`, `_approach_push_distance_mm = 30`, `_approach_push_timeout_s = 2.0`
+Push-then-grip phase. On the first `grabbable` tick, instead of
+immediately decelerating + closing the jaws, drive forward slowly
+for `push_distance_mm` (or until `push_timeout_s`) so the target is
+fully seated in the gripper before the close-servo fires. Avoids
+the "jaws close on the front face" half-grip when the visual gate
+triggers slightly short.
+- Increase distance: deeper seating; risk of pushing the target out
+  of the gripper if too long.
+- Decrease distance: less push; risk of half-grip failures.
+- Bump `push_v` for faster cycles, but slow keeps the target from
+  squirting out under contact.
+
+### CARRY_HOME drag guard
+
+#### `_carry_target_lost_timeout_s = 10.0`
+If `snap.captured` stays false for this many continuous seconds during
+CARRY_HOME **and** vision is otherwise healthy (target colour absent
+but at least one obstacle blob seen), the gripper releases whatever
+it has — guards against carrying the wrong colored box if a swap
+occurred mid-drag. Pure occlusion (camera sees no blobs at all) gets
+infinite grace, since the gripper arms genuinely block the camera in
+some configurations.
+- Increase: more tolerance for partial occlusion (heavy arm shadows,
+  slow target re-acquisition).
+- Decrease: catches swaps faster, risk of false-release if the
+  tracker takes a while to re-acquire after gripper close.
+
 ### RELEASE / TURN_AROUND
 
 #### `_release_v = -40 mm/s` (backward)
@@ -227,12 +282,14 @@ Same shape, for the hardcoded TEST sequence.
 
 In [src/controller.cpp](../src/controller.cpp):
 
-### REALIGN spline ([_transition](../src/controller.cpp#L269))
+### REALIGN in-place rotation ([State::TURN_AROUND tick body](../src/controller.cpp))
 - `DELTA_DEADBAND_RAD = 0.05` (~3°): skip realign if already aligned.
-- `LAT_MAX_MM = 150`: apex of the forward arc back to `_home_theta`.
-- `D = 250 + 250 * |δ|/π` mm: forward distance of the arc goal.
-- Increase forward `D`: gentler curvature for big realign deltas.
-  Costs floor space (arc swings further from home).
+- P-controller gain `2.0` (rad/s per rad of delta), `omega_cap = 1.0` rad/s.
+- No forward motion, no spline — just a slow chassis rotation to
+  `_home_theta`. SEARCH's bounded look-left/look-right sweep does the
+  actual re-orientation work; this just gets the chassis pointed roughly
+  back at home_theta before the sweep begins.
+- Tighten the gain or cap if cox `inliers` drops during the spin.
 
 ### Generic spline (`bcubic_spline`) defaults
 - `samples_per_segment = 20-100` — denser samples = smoother PurePursuit
@@ -265,15 +322,19 @@ Used by GOTO / TEST to settle the KF before declaring arrival.
 
 - `OBSTACLE_DIST_MM = 230` — any lidar return inside ±60° forward arc
   at less than this triggers `obstacle_ahead` (zeroes `v_cmd`, keeps
-  `w_cmd`). The gate is **suppressed entirely** while carrying a
-  payload (CARRY_HOME, RELEASE, TURN_AROUND) — see
-  [src/core.cpp](../src/core.cpp) — so the robot can drive up to the
-  home wall and release.
+  `w_cmd`). The gate is **suppressed** during APPROACH (visual servo
+  + colour-based reactive omega handles avoidance; the lidar gate
+  would zero `v` whenever the target itself entered the arc, stalling
+  the grab) and during CARRY_HOME / RELEASE / TURN_AROUND (the closed
+  gripper / held box sits inside the gate's forward arc). SEARCH keeps
+  the gate as its safety net against unseen walls — see
+  `StateMachine::obstacle_gate_suppressed()` in
+  [src/controller.cpp](../src/controller.cpp).
 - `OBSTACLE_ARC_HALF_DEG = 60` — width of the trigger cone.
 - `GRIPPER_MASK_HALF_DEG = 20`, `GRIPPER_MASK_DIST_MM = 200` —
   narrower cone the closed gripper / held box occupies. Filtered out
-  at the lidar layer (belt-and-suspenders alongside the payload-state
-  gate above).
+  at the lidar layer (belt-and-suspenders alongside the state-based
+  gate above; matters mostly for SEARCH where the gate is active).
 - Increase `OBSTACLE_DIST_MM`: earlier stop, safer in cluttered arenas
   but stalls more often on near-miss walls.
 - Decrease: more confident driving up to walls, risk of bumper-tap.
@@ -281,6 +342,39 @@ Used by GOTO / TEST to settle the KF before declaring arrival.
   false-positive rate from the gripper cone.
 - Widen `GRIPPER_MASK_*`: hides the held box more reliably from the
   obstacle gate. If too wide, real obstacles in that arc are ignored.
+
+### Colour-based obstacle memory ([include/controller.hpp](../include/controller.hpp))
+
+The vision tracker reports per-frame observations of any non-target
+colour configured under `filter.obstacles.*`. The state machine
+projects each observation to world coordinates and keeps a decaying
+memory used by SEARCH (skip targets adjacent to a known obstacle)
+and APPROACH (reactive omega bias).
+
+- `_obstacle_merge_radius_mm = 200` — observations within this
+  distance of an existing entry of the same colour are merged via EMA
+  blend (α=0.35) instead of appended. Tighter = more sensitive to
+  jitter; looser = entries drift faster as the obstacle moves.
+- `_obstacle_forget_s = 30` — entries older than this are dropped on
+  every tick. Decrease for genuinely dynamic obstacles; increase if
+  the operator wants long-lived memory of static obstacles.
+- `_obstacle_block_radius_mm = 250` — SEARCH skips any detected
+  target inside this radius of a remembered obstacle (logged as
+  `reason=obs_block`). Tune to the typical chain-push distance.
+
+### Calibration ([src/calibrations.cpp](../src/calibrations.cpp), [main.cpp](../main.cpp))
+
+App startup checks `filter.ready` in `config.yml`. If false / missing,
+the calibration routine runs once for the target colour, then loops
+asking the operator (`y/n` on stdin) whether to calibrate another
+obstacle colour. Each `y` opens the same trackbar UI and writes the
+result under `filter.obstacles.<N>`. On finish, sets
+`filter.ready=true`, writes the config, and exits — restart to run
+the mission.
+
+To recalibrate later, edit `config.yml` and set `filter.ready: false`
+(optionally also clear the existing `filter.target` / `filter.obstacles`
+keys), then restart.
 
 ---
 

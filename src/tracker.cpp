@@ -44,10 +44,75 @@ namespace {
 
 }  // namespace
 
+namespace {
+
+// Minimum contour area (pixels) for a non-target obstacle blob to count.
+// Same order of magnitude as the target's area gate (500 px²) — smaller
+// blobs are typically lighting flicker on similarly-coloured background.
+constexpr double MIN_OBSTACLE_AREA_PX = 500.0;
+
+// Apply one HSV filter (with optional red-edge wrap-around) and return
+// the largest contour above MIN_OBSTACLE_AREA_PX, or an empty optional.
+// Reused across obstacle filters per frame; `mask_buf` and `wrap_buf`
+// avoid per-call allocations.
+struct LargestBlob {
+    cv::Rect    bbox;
+    cv::Point2f center;
+    double      area;
+};
+bool find_largest_blob(const cv::Mat& hsv_frame,
+                       const FilterResult& filter,
+                       cv::Mat& mask_buf,
+                       cv::Mat& wrap_buf,
+                       const cv::Mat& close_kernel,
+                       int dead_zone_y,
+                       LargestBlob& out) {
+    if (filter.has_wrap_around) {
+        cv::inRange(hsv_frame, filter.lower1, filter.upper1, mask_buf);
+        cv::inRange(hsv_frame, filter.lower2, filter.upper2, wrap_buf);
+        cv::bitwise_or(mask_buf, wrap_buf, mask_buf);
+    } else {
+        cv::inRange(hsv_frame, filter.lower1, filter.upper1, mask_buf);
+    }
+    cv::morphologyEx(mask_buf, mask_buf, cv::MORPH_CLOSE, close_kernel);
+
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(mask_buf, contours,
+                     cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    int    sel  = -1;
+    double sel_area = -1.0;
+    cv::Point2f sel_center;
+    cv::Rect sel_bbox;
+    for (size_t i = 0; i < contours.size(); ++i) {
+        const double area = cv::contourArea(contours[i]);
+        if (area < MIN_OBSTACLE_AREA_PX) continue;
+        const cv::Moments M = cv::moments(contours[i]);
+        if (M.m00 == 0.0) continue;
+        const cv::Point2f c(static_cast<float>(M.m10 / M.m00),
+                            static_cast<float>(M.m01 / M.m00));
+        if (c.y < static_cast<float>(dead_zone_y)) continue;
+        if (area > sel_area) {
+            sel        = static_cast<int>(i);
+            sel_area   = area;
+            sel_center = c;
+            sel_bbox   = cv::boundingRect(contours[i]);
+        }
+    }
+    if (sel < 0) return false;
+    out.bbox   = sel_bbox;
+    out.center = sel_center;
+    out.area   = sel_area;
+    return true;
+}
+
+}  // namespace
+
 void loop_vision_tracking(Dashboard& dash,
-                          FilterResult filter,
+                          FilterResult target_filter,
+                          std::vector<FilterResult> obstacle_filters,
                           CameraConfig cfg,
                           TrackerResult& result) {
+    const FilterResult& filter = target_filter;
     cv::VideoCapture cap(0);
     if (!cap.isOpened()) {
         LOGE("Vision") << "Cannot open camera 0";
@@ -62,7 +127,12 @@ void loop_vision_tracking(Dashboard& dash,
         cv::MORPH_RECT, cv::Size(5, 5));
 
     cv::Mat frame, hsv_frame, mask, wrap_mask;
+    // Scratch buffers reused per frame for the obstacle filter loop, so
+    // we don't allocate N OpenCV mats per tick.
+    cv::Mat obs_mask, obs_wrap;
     std::vector<std::vector<cv::Point>> contours;
+    std::vector<ObstacleObservation> obs_observations;
+    obs_observations.reserve(obstacle_filters.size());
 
     // Continuity bias: prefer detections close to the last accepted one
     // (kills momentary swaps to a smaller distant blob with similar hue).
@@ -108,7 +178,9 @@ void loop_vision_tracking(Dashboard& dash,
                   << cfg.width << "x" << cfg.height
                   << " @ " << cfg.fps_target << " target fps, "
                   << "f_px=" << cfg.focal_length_px
-                  << ", box H=" << BOX_HEIGHT_MM << " mm)";
+                  << ", box H=" << BOX_HEIGHT_MM << " mm, "
+                  << "obstacle filters=" << obstacle_filters.size()
+                  << ")";
 
     while (!app::shutdown && result.is_running()) {
         cap >> frame;
@@ -245,6 +317,35 @@ void loop_vision_tracking(Dashboard& dash,
             has_last_position = false;
         }
 
+        // ---------- Obstacle (non-target) colour detection ----------
+        // One pass per configured obstacle filter. Same pinhole math as
+        // target; no debounce — consumers decide what to do with the
+        // single-frame observation. Empty filter list => no work.
+        obs_observations.clear();
+        for (size_t fi = 0; fi < obstacle_filters.size(); ++fi) {
+            const FilterResult& of = obstacle_filters[fi];
+            if (!of.ready) continue;
+            LargestBlob blob;
+            if (!find_largest_blob(hsv_frame, of,
+                                   obs_mask, obs_wrap,
+                                   close_kernel, dead_zone_y, blob)) {
+                continue;
+            }
+            const double obs_dist = pinhole_distance_mm(blob.bbox, cfg);
+            if (obs_dist <= 0.0) continue;
+            const double obs_bearing = bearing_rad(blob.center.x, cfg);
+            ObstacleObservation o;
+            o.color_id    = static_cast<int>(fi);
+            o.bearing_rad = obs_bearing;
+            o.distance_mm = obs_dist;
+            o.area_px     = blob.area;
+            obs_observations.push_back(o);
+            // Magenta box in the debug view so obstacles are visually
+            // distinct from the red target bbox.
+            cv::rectangle(frame, blob.bbox, cv::Scalar(255, 0, 255), 2);
+        }
+        result.commit_obstacles(obs_observations);
+
         cv::rectangle(frame, bottom_region, cv::Scalar(0, 255, 255), 1);
         // Upper exclusion zone — magenta so it doesn't blend with the
         // yellow grab-region or the red bbox.
@@ -366,6 +467,8 @@ void loop_vision_tracking(Dashboard& dash,
             dash.set("Vision", "dist_mm", snap.distance_mm);
             dash.set("Vision", "area_px", snap.area_px);
         }
+        dash.set("Vision", "obs_seen",
+                 static_cast<int64_t>(snap.obstacles.size()));
     }
 
     if (cfg.show_debug_view && std::getenv("DISPLAY")) {

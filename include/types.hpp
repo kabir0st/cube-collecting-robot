@@ -181,6 +181,16 @@ struct FilterResult {
     bool has_wrap_around = false;
 };
 
+// Per-frame observation of a non-target ("obstacle") colored box. Bearing
+// and distance use the same pinhole convention as the target. color_id is
+// the index into the configured obstacle filter list (filter.obstacles.N).
+struct ObstacleObservation {
+    int    color_id    = -1;
+    double bearing_rad = 0.0;       // +left, -right
+    double distance_mm = 0.0;       // pinhole-size estimate
+    double area_px     = 0.0;
+};
+
 // Result of the camera-tracking worker (`loop_vision_tracking`).
 struct TrackerResult {
     mutable std::mutex lock;
@@ -205,6 +215,12 @@ struct TrackerResult {
     double bearing_rad = 0.0;        // angle from optical axis, +left
     double distance_mm = 0.0;        // pinhole-size estimate (Method A)
     double area_px     = 0.0;        // contour area in pixels (confidence)
+
+    // Per-frame snapshot of non-target colored boxes. One entry per
+    // configured obstacle color where the largest blob exceeded the area
+    // threshold; absent colors produce no entry. Reset every frame by
+    // commit_obstacles().
+    std::vector<ObstacleObservation> obstacles;
 
     mutable std::mutex mutex_frame;
     std::atomic<int> fps{0};
@@ -238,6 +254,13 @@ struct TrackerResult {
         grabbable = new_grabbable;
     }
 
+    // Replace this-frame obstacle list. Writer-only; callers pass an empty
+    // vector when no obstacle filters are configured or none matched.
+    void commit_obstacles(std::vector<ObstacleObservation> next) {
+        std::lock_guard<std::mutex> guard(lock);
+        obstacles = std::move(next);
+    }
+
     struct Snapshot {
     bool   has_target;
     double bearing_rad;
@@ -247,6 +270,7 @@ struct TrackerResult {
     bool   captured;
     bool   lost;
     bool   grabbable;
+    std::vector<ObstacleObservation> obstacles;
     };
 
 
@@ -255,7 +279,8 @@ struct TrackerResult {
         return { has_target, bearing_rad,
                  distance_mm,
                  area_px, fps,
-                 captured, lost, grabbable };
+                 captured, lost, grabbable,
+                 obstacles };
     }
 
     void update_frame(const cv::Mat &f, int frame_rate);

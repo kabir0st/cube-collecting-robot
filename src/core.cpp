@@ -277,16 +277,16 @@ void loop_control(Dashboard& dash,
         // rotate away from the obstacle ("sidestep"). Reverse motion is
         // also allowed so the robot can back out of a near-miss.
         //
-        // The obstacle gate is suppressed entirely while carrying a payload
-        // (CARRY_HOME, RELEASE, TURN_AROUND) so the robot can drive up to
-        // the home wall and release the box, and so the held box itself
-        // (which protrudes past the narrow gripper mask) can't trip the
-        // wider obstacle arc.
+        // The obstacle gate is suppressed during APPROACH (visual-servo +
+        // colour-based reactive omega handles avoidance) and while
+        // carrying a payload (CARRY_HOME, RELEASE, TURN_AROUND — the
+        // gripper / held box sits inside the gate's forward arc). SEARCH
+        // keeps the gate as its safety net against unseen walls.
         if (app::relocalizing.load()) {
             v_cmd = 0.0;
             w_cmd = 0.0;
         } else if (app::obstacle_ahead.load() && v_cmd > 0.0
-                   && !sm.is_carrying_payload()) {
+                   && !sm.obstacle_gate_suppressed()) {
             v_cmd = 0.0;
         }
 
