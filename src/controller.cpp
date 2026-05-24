@@ -259,7 +259,7 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
         const double tan_to_goal =
             std::atan2(hy_l - current.y, hx_l - current.x);
         if (!_plan_path_to(current, hx_l, hy_l, tan_to_goal,
-                           hm_l, 60.0 * ROBOT_SPEED)) {
+                           hm_l, _planned_v_max_mm_s)) {
             new_state = State::SAFE_STOP;
         }
     }
@@ -268,6 +268,9 @@ void StateMachine::_transition(State new_state, const Pos2D& current) {
         // Each approach starts from a fresh grip cycle.
         _grip_stop_sent = false;
         _grip_fired     = false;
+        // Seed the vision-lost watchdog so we don't immediately fire on a
+        // single frame of perception noise during state entry.
+        _approach_last_seen_at = std::chrono::steady_clock::now();
     }
 
     if (new_state == State::RELEASE) {
@@ -410,12 +413,11 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 break;
             }
 
-            const bool allow_engage = (t_in >= _search_min_dwell_s);
             const bool target_visible = (!snap.lost && snap.has_target);
             bool at_home_skip = false;
 
             // Vision has a target -> engage, but enforce the retry budget.
-            if (allow_engage && target_visible) {
+            if (target_visible) {
                 // At-home filter: if the tracker has a usable distance and
                 // the detected box already sits inside the home zone, this
                 // is a previously-delivered box. Skip it (stay in SEARCH,
@@ -691,11 +693,27 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                                _last_target_x, _last_target_y);
                 _last_target_valid = true;
             }
+            if (target_visible) {
+                _approach_last_seen_at = std::chrono::steady_clock::now();
+            }
 
             if (!target_visible) {
-                // Vision dropped. If we still have a latched world target
-                // and we haven't reached it yet, keep driving toward it
-                // instead of spinning — re-entering SEARCH here was the
+                // Watchdog: if vision has been continuously lost for
+                // _approach_vision_lost_timeout_s, give up and fall back
+                // to SEARCH instead of dead-reckoning toward a stale
+                // latched target. No budget charge — this is a perception
+                // gap, same class as the no-latched-target branch below.
+                const double t_lost = seconds_since(_approach_last_seen_at);
+                if (t_lost > _approach_vision_lost_timeout_s) {
+                    LOG("Mission") << "APPROACH: vision lost for "
+                                   << t_lost << " s; -> SEARCH";
+                    _transition(State::SEARCH, pose);
+                    out.mode = Command::Mode::STOP;
+                    break;
+                }
+                // Vision dropped briefly. If we still have a latched world
+                // target and we haven't reached it yet, keep driving toward
+                // it instead of spinning — re-entering SEARCH here was the
                 // root cause of the "lose target → rotate → lose new
                 // bearing" thrash. No budget charge: this is a perception
                 // gap, not a failed engagement.
@@ -825,7 +843,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 std::lock_guard<std::mutex> lk(_m);
                 pending = _goto_pending;
                 tx = _goto_x; ty = _goto_y; tth = _goto_theta;
-                vmax = _goto_v_max_mm_s; margin = _goto_margin_mm;
+                vmax = _planned_v_max_mm_s; margin = _planned_margin_mm;
                 if (pending) _goto_pending = false;
             }
             if (pending) {
@@ -889,7 +907,7 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 }
                 const TestWaypoint& wp = TEST_WAYPOINTS[_test_step];
                 if (!_plan_path_to(pose, wp.x, wp.y, wp.theta,
-                                   _test_margin_mm, _test_v_max_mm_s)) {
+                                   _planned_margin_mm, _planned_v_max_mm_s)) {
                     LOGE("Mission") << "TEST: leg " << (_test_step + 1)
                                     << " plan failed; -> SAFE_STOP";
                     _transition(State::SAFE_STOP, pose);

@@ -75,8 +75,10 @@ private:
     // produces visible stop-and-go at arrival.
     double _terminal_unlatch_extra_mm = 30.0;   // mm
     double _pre_roll_thresh = 0.52;   // ~30 deg, PRE_ROLL entry
-    double _k_pre_roll = 2.0;    // P gain for PRE_ROLL omega target
-    double _k_terminal = 2.0;    // P gain for terminal rotate omega
+    // Shared P gain for in-place rotation (PRE_ROLL bearing alignment +
+    // TERMINAL_ROTATE heading alignment). Same wheel-slip-dominant scenario,
+    // same cap (_inplace_omega_cap), same gain.
+    double _inplace_k_omega = 2.0;
     // In-place rotation cap. PRE_ROLL and TERMINAL_ROTATE both spin the
     // chassis with v=0, which dominates the wheel-slip portion of the
     // odometry noise (var_theta ~ K_ROT^2 * d_theta^2). At 0.8 rad/s a

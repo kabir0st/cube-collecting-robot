@@ -179,6 +179,12 @@ private:
     bool _grip_fired     = false;       // tick N+1+: smooth close fired
     std::chrono::steady_clock::time_point _grip_fired_at;
 
+    // Last time vision had a valid target during APPROACH. Reset on entry;
+    // refreshed every tick the tracker reports the box. Drives the
+    // _approach_vision_lost_timeout_s watchdog. Only touched from the
+    // loop_control thread.
+    std::chrono::steady_clock::time_point _approach_last_seen_at;
+
     // GOTO state: latched single target pose. Set by go_to(), consumed once
     // on entry to State::GOTO inside _transition() to build the spline.
     // Protected by _m.
@@ -186,16 +192,19 @@ private:
     double _goto_y = 0.0;
     double _goto_theta = 0.0;
     bool   _goto_pending = false;
-    double _goto_v_max_mm_s = 60.0 * ROBOT_SPEED;    // a bit faster than SEARCH; tunable
-    double _goto_margin_mm  = 40.0;    // tighter than SEARCH for lab accuracy
+    // Shared spline-leg tunables for any planner that calls `_plan_path_to`
+    // (CARRY_HOME, GOTO, TEST). `_planned_v_max_mm_s` is the cruise cap
+    // handed to bcubic_spline; `_planned_margin_mm` is the PurePursuit
+    // arrival radius. `_home_margin` (configured per mission) stays
+    // separate because it lives on a different axis (mission geometry).
+    double _planned_v_max_mm_s = 60.0 * ROBOT_SPEED;
+    double _planned_margin_mm  = 40.0;
 
     // TEST state: walks the hardcoded leg list defined in controller.cpp.
     // _test_replan_needed is set on entry and after each leg arrival; the
     // next step() tick consumes it to build the spline for the next leg.
     size_t _test_step           = 0;
     bool   _test_replan_needed  = false;
-    double _test_v_max_mm_s     = 70.0 * ROBOT_SPEED;
-    double _test_margin_mm      = 40.0;
 
     // Halt-and-localize bookkeeping. When PurePursuit reports arrived for a
     // closed-loop leg (TEST/GOTO), we latch _halting=true, command zero
@@ -212,7 +221,6 @@ private:
 
     // Tunables. Conservative defaults; safe to tweak from main if needed.
     double _search_omega        = 0.5 * ROBOT_SPEED;   // rad/s, ~29°/s spin cruise (ramp stays gentle via ACCEL_W_BASE)
-    double _search_min_dwell_s  = 0.0;   // engage on sight; failed-target skip handles bounce protection
     double _search_v_forward_mm_s   = 50.0 * ROBOT_SPEED;  // forward speed during the FORWARD leg
     double _search_forward_target_mm = 700.0;             // 100 cm leg before each look-around rotation
     double _approach_v          = 30.0 * ROBOT_SPEED;  // mm/s, visual-servo cruise
@@ -228,6 +236,11 @@ private:
     double _release_hard_timeout_s = 5.0;// give up if box stays stuck on arms
     double _search_timeout_s    = 60.0;
     double _approach_timeout_s  = 20.0;
+    // Watchdog inside APPROACH: if vision has been continuously lost for
+    // this many seconds, bail back to SEARCH instead of dead-reckoning
+    // indefinitely toward a stale latched target. Independent of the
+    // outer _approach_timeout_s (which fires even with vision still up).
+    double _approach_vision_lost_timeout_s = 3.0;
     double _carry_timeout_s     = 90.0;
     // Hard timeout on TURN_AROUND (now REALIGN-to-home_theta) so a jammed
     // motor doesn't wedge the mission. If we cannot reach the target

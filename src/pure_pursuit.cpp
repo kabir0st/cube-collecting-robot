@@ -217,7 +217,7 @@ void PurePursuitController::compute(const Pos2D& pose,
                     v_target = 0.0;
                     w_target = std::max(-_inplace_omega_cap,
                               std::min( _inplace_omega_cap,
-                                        _k_pre_roll * err));
+                                        _inplace_k_omega * err));
                 }
                 break;
             }
@@ -244,7 +244,7 @@ void PurePursuitController::compute(const Pos2D& pose,
                     v_target = 0.0;
                     w_target = std::max(-_inplace_omega_cap,
                               std::min( _inplace_omega_cap,
-                                        _k_terminal * delta));
+                                        _inplace_k_omega * delta));
                 }
                 break;
             }
