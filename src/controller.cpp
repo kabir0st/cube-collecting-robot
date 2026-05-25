@@ -430,24 +430,17 @@ bool StateMachine::_plan_path_via_offset(const Pos2D& current,
                                          double gx, double gy, double gtheta,
                                          double margin_mm, double v_max_mm_s,
                                          double lateral_offset_mm) {
+    // Why: a B-cubic through three collinear points (start, midpoint, goal)
+    // degenerates to a straight line. Insert tangent-aligned handles along
+    // the start and goal headings so the spline leaves/arrives tangent to
+    // those headings and traces a visible curve (Lab 4 visualisation).
+    constexpr double HANDLE_FRAC   = 0.4;
+    constexpr double HANDLE_MAX_MM = 600.0;
+
     PathPoint p_start;
     p_start.x = current.x;
     p_start.y = current.y;
     p_start.theta = current.theta;
-
-    PathPoint p_mid;
-    p_mid.x = 0.5 * (current.x + gx);
-    p_mid.y = 0.5 * (current.y + gy);
-    if (lateral_offset_mm != 0.0) {
-        const double dx = gx - current.x;
-        const double dy = gy - current.y;
-        const double n  = std::hypot(dx, dy);
-        if (n > 1e-6) {
-            // Unit-left vector (rotate start->goal by +90°: (dx,dy) -> (-dy,dx)).
-            p_mid.x += lateral_offset_mm * (-dy / n);
-            p_mid.y += lateral_offset_mm * ( dx / n);
-        }
-    }
 
     PathPoint p_goal;
     p_goal.x = gx;
@@ -455,10 +448,32 @@ bool StateMachine::_plan_path_via_offset(const Pos2D& current,
     p_goal.theta = gtheta;
     p_goal.margin = margin_mm;
 
+    const double dx   = gx - current.x;
+    const double dy   = gy - current.y;
+    const double dist = std::hypot(dx, dy);
+    const double d    = std::min(HANDLE_FRAC * dist, HANDLE_MAX_MM);
+
+    PathPoint p_h_start;
+    p_h_start.x = current.x + d * std::cos(current.theta);
+    p_h_start.y = current.y + d * std::sin(current.theta);
+
+    PathPoint p_h_goal;
+    p_h_goal.x = gx - d * std::cos(gtheta);
+    p_h_goal.y = gy - d * std::sin(gtheta);
+
     std::vector<PathPoint> controls;
-    controls.reserve(3);
+    controls.reserve(5);
     controls.push_back(p_start);
-    controls.push_back(p_mid);
+    controls.push_back(p_h_start);
+    if (lateral_offset_mm != 0.0 && dist > 1e-6) {
+        // Obstacle-avoidance lateral push inserted between the handles so
+        // the start/goal tangent constraints still hold.
+        PathPoint p_mid;
+        p_mid.x = 0.5 * (p_h_start.x + p_h_goal.x) + lateral_offset_mm * (-dy / dist);
+        p_mid.y = 0.5 * (p_h_start.y + p_h_goal.y) + lateral_offset_mm * ( dx / dist);
+        controls.push_back(p_mid);
+    }
+    controls.push_back(p_h_goal);
     controls.push_back(p_goal);
 
     std::vector<PathPoint> path = bcubic_spline(
