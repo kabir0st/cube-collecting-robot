@@ -895,7 +895,19 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
             // — closing the jaws at full chase speed. Push-phase latch
             // resets on the same gate so a single-frame grabbable blink
             // doesn't leave the pushed-distance accumulator stale.
-            if (!_grip_fired && !snap.captured && !snap.grabbable) {
+            // Wall directly ahead (lidar fires) and no vision-detected
+            // obstacle box in front → it's a wall, not something we want
+            // to swerve around. Boxes sit below the lidar plane so any
+            // lidar return at <230 mm in the ±60° forward arc that isn't
+            // a known vision blob must be a wall.
+            const bool wall_close = app::obstacle_ahead.load()
+                                 && snap.obstacles.empty();
+            // Hold the push latch through a brief grabbable flicker only
+            // when wall_close is true — wall contact can squish the
+            // target out of the camera's view, but we still want the
+            // grip to fire from the early-capture branch below.
+            if (!_grip_fired && !snap.captured && !snap.grabbable
+                && !(_push_active && wall_close)) {
                 _grip_stop_sent = false;
                 _push_active    = false;
             }
@@ -975,8 +987,13 @@ StateMachine::Command StateMachine::step(const Pos2D& pose,
                 const double dy = pose.y - _push_start_y;
                 const double pushed = std::hypot(dx, dy);
                 const double t_pushing = seconds_since(_push_started_at);
+                // wall_close (computed at the top of this case) short-
+                // circuits the push: target is already pinned against a
+                // wall, so seating is established and further push only
+                // crushes the gripper into the wall.
                 const bool push_done = (pushed >= _approach_push_distance_mm)
-                                    || (t_pushing >= _approach_push_timeout_s);
+                                    || (t_pushing >= _approach_push_timeout_s)
+                                    || wall_close;
                 if (!push_done) {
                     out.mode = Command::Mode::DIRECT;
                     out.v_mm_s = _approach_push_v;
