@@ -30,21 +30,13 @@ inline double wrap_pi(double a) {
     return a;
 }
 
-// Signed difference `goal - current` wrapped into (-pi, pi]. Centralizes the
-// goal/current sign convention so call sites don't have to remember which
-// side of the subtraction is which.
 inline double angle_error(double goal, double current) {
     return wrap_pi(goal - current);
 }
 
-// LIDAR scan point -> robot body frame Cartesian. Matches the per-scan
-// transform in cox.cpp and the map-building transform in find_walls:
-//   - LIDAR scans clockwise (angle_deg increases CW)
-//   - Math convention is CCW, hence the minus sign
-//   - LIDAR_MOUNT_OFFSET_RAD aligns the LIDAR's 0° with the robot's +x
 inline void lidar_polar_to_body(double angle_deg, double dist_mm,
                                 double& x, double& y) {
-    const double a = -angle_deg * (M_PI / 180.0) + LIDAR_MOUNT_OFFSET_RAD;
+    const double a = -angle_deg * (M_PI / 180.0);
     x = dist_mm * std::cos(a);
     y = dist_mm * std::sin(a);
 }

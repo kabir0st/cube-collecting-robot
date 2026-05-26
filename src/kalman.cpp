@@ -26,7 +26,7 @@ namespace {
 }
 
 Pose2DCov KalmanFilter::default_cov() {
-    // Boot seed when we *expect* the robot is at home. If it isn't,
+    // Boot seed when we expect the robot is at home. If it isn't,
     // loop_scan_cox_estimation's first untrusted estimate triggers a
     // relocalize sweep which re-pins the KF with moderate_recovery_cov().
     Pose2DCov c;
@@ -70,8 +70,7 @@ void KalmanFilter::predict(double d, double d_theta,
           0.0, 0.0,  1.0;
 
     // Input Jacobian Fu w.r.t. (d, d_theta), evaluated at midpoint.
-    // The (h * s, h * c) terms inject heading-position correlation into Q,
-    // which is what saves the filter from heading-overconfidence later.
+    // The (h * s, h * c) terms inject heading-position correlation into Q
     Eigen::Matrix<double, 3, 2> Fu;
     Fu << c,     -h * s,
           s,      h * c,
@@ -105,8 +104,6 @@ void KalmanFilter::correct(const Pos2D& z, const Pose2DCov& R_in) {
     _pose.y    += update(1);
     _pose.theta = wrap_pi(_pose.theta + update(2));
 
-    // Joseph-form covariance update — symmetric and PSD-preserving even
-    // under finite-precision K.
     const Eigen::Matrix3d I       = Eigen::Matrix3d::Identity();
     const Eigen::Matrix3d I_min_K = I - K;
     const Eigen::Matrix3d P_new   = I_min_K * P * I_min_K.transpose()

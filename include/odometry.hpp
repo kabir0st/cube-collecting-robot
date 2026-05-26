@@ -3,8 +3,6 @@
 #include <mutex>
 
 // Single-step motion increment + its diagonal noise
-// `valid = false` is returned during the seeding phase (first call after reset)
-// when no delta is available yet.
 struct OdomStep {
     double d_mm = 0.0; // forward distance (signed)
     double d_theta = 0.0; // heading change in rad (signed)
@@ -15,8 +13,7 @@ struct OdomStep {
     bool   valid = false;
 };
 
-// Differential-drive odometry step generator. Inputs are cumulative per-wheel
-// distances in mm (forward = +); outputs are per-cycle (d, d_theta) plus their noise
+// Differential-drive odometry step generator.
 class Odometry {
 public:
     Odometry();

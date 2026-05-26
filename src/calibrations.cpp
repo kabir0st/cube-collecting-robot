@@ -3,9 +3,7 @@
 #include <array>
 #include <cmath>
 #include <algorithm>
-#include <atomic>
 #include <limits>
-#include <mutex>
 #include <random>
 #include <cctype>
 #include <cstdio>
@@ -110,14 +108,7 @@ bool CalibrateCamera::create_filter_mask(FilterResult& result){
     const bool spans_red_edges =
         h_min <= red_edge_window && h_max >= (180.f - red_edge_window);
 
-    // Asymmetric margins: shadows DARKEN pixels (V drops sharply, S a bit)
-    // but never the opposite, so we expand the LOWER bounds aggressively
-    // while keeping the UPPER bounds tight. Tight uppers still reject the
-    // bulk of background noise and overexposed highlights (the original
-    // "tightened margins" intent); generous lowers keep detection alive
-    // when the robot casts its own shadow on the box at close range —
-    // which is exactly the moment the grab gate needs the box to stay
-    // visible. Hue is preserved by shadow, so its margin stays symmetric.
+    // Asymmetric margins
     const float hue_margin     = 6.f;
     const float s_margin_lower = 25.f;
     const float s_margin_upper = 10.f;
@@ -305,8 +296,7 @@ std::string fmt_scalar3(const cv::Scalar& s) {
 }
 
 // Load a single FilterResult from the given dotted-key prefix (e.g.
-// "filter.target" or "filter.obstacles.0"). The prefix must NOT end in a
-// dot. Returns false if any required key is missing/malformed.
+// "filter.target")
 static bool load_filter_at_prefix(const Config& cfg,
                                   const std::string& prefix,
                                   FilterResult& out) {
@@ -340,25 +330,6 @@ bool load_filter_result(const Config& cfg, FilterResult& out) {
     return false;
 }
 
-std::vector<FilterResult> load_obstacle_filters(const Config& cfg) {
-    std::vector<FilterResult> out;
-    const int count = cfg.get_int("filter.obstacles.count", 0);
-    if (count <= 0) return out;
-    out.reserve(static_cast<size_t>(count));
-    for (int i = 0; i < count; ++i) {
-        std::ostringstream key;
-        key << "filter.obstacles." << i;
-        FilterResult f;
-        if (!load_filter_at_prefix(cfg, key.str(), f)) {
-            LOGE("Cal") << "Missing/malformed obstacle filter at "
-                        << key.str() << " — skipping.";
-            continue;
-        }
-        out.push_back(f);
-    }
-    return out;
-}
-
 // Emit one filter under the given indent (`  ` or `    `).
 static void write_filter_block(std::ofstream& out,
                                const std::string& indent,
@@ -375,7 +346,6 @@ static void write_filter_block(std::ofstream& out,
 
 bool save_filter_section(const std::string& path,
                          const FilterResult& target,
-                         const std::vector<FilterResult>& obstacles,
                          bool ready) {
     // Read existing file (if any) so we can preserve comments and other
     // sections. Missing file is fine — we'll create it fresh.
@@ -386,11 +356,7 @@ bool save_filter_section(const std::string& path,
         while (std::getline(in, line)) lines.push_back(line);
     }
 
-    // Drop any prior top-level `filter:` block. A block starts at a line whose
-    // first non-space char sits at column 0 and matches `filter:` (with
-    // optional trailing comment). It ends at the next non-blank top-level
-    // line (indent == 0) or EOF. Blank/indented lines in between belong to
-    // the block.
+    // Drop any prior top-level `filter:` block
     std::vector<std::string> kept;
     kept.reserve(lines.size());
     bool in_filter_block = false;
@@ -422,10 +388,6 @@ bool save_filter_section(const std::string& path,
         kept.pop_back();
     }
 
-    // Atomic write: write to a sibling temp file, then rename() it over the
-    // original. POSIX rename(2) is atomic within a filesystem, so a crash
-    // before the rename leaves the old config untouched, and a crash after
-    // leaves the new config fully in place. No torn writes.
     const std::string tmp_path = path + ".tmp";
     std::ofstream out(tmp_path, std::ios::trunc);
     if (!out) return false;
@@ -435,12 +397,6 @@ bool save_filter_section(const std::string& path,
     out << "  ready: " << (ready ? "true" : "false") << '\n';
     out << "  target:\n";
     write_filter_block(out, "    ", target);
-    out << "  obstacles:\n";
-    out << "    count: " << obstacles.size() << '\n';
-    for (size_t i = 0; i < obstacles.size(); ++i) {
-        out << "    " << i << ":\n";
-        write_filter_block(out, "      ", obstacles[i]);
-    }
     if (!out.good()) return false;
     out.close();
     // rename(2): atomic on the same filesystem. After this call the new
@@ -583,9 +539,9 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
                            static_cast<double>(pts.second.size());
         // Closer than ~8 cm is typically the LIDAR seeing its own chassis/mount.
         if (avg < 80) continue;
-        // LiDAR CW → math CCW + LIDAR_MOUNT_OFFSET_RAD. Centralized in
-        // utils.hpp::lidar_polar_to_body so map-building (here) and the
-        // per-scan transform in cox.cpp can never drift out of sync.
+        // LiDAR CW → math CCW (centralized in utils.hpp::lidar_polar_to_body
+        // so map-building here and the per-scan transform in cox.cpp can
+        // never drift out of sync).
         double bx, by;
         lidar_polar_to_body(pts.first, avg, bx, by);
         points.emplace_back(bx, by);
@@ -732,41 +688,3 @@ std::vector<LineSeg> find_walls(LidarData& lidar_data,
     LOG("MAP") << "Found " << walls.size() << " Walls.";
     return walls;
 }
-
-namespace calib {
-namespace {
-std::atomic<bool> g_bounds_ready{false};
-std::mutex        g_bounds_m;
-MapBounds         g_bounds;
-}  // namespace
-
-void compute_map_bounds(const std::vector<LineSeg>& walls) {
-    if (walls.empty()) return;
-    MapBounds b;
-    b.min_x =  std::numeric_limits<double>::max();
-    b.max_x =  std::numeric_limits<double>::lowest();
-    b.min_y =  std::numeric_limits<double>::max();
-    b.max_y =  std::numeric_limits<double>::lowest();
-    for (const auto& seg : walls) {
-        b.min_x = std::min({b.min_x, (double)seg.ax, (double)seg.bx});
-        b.max_x = std::max({b.max_x, (double)seg.ax, (double)seg.bx});
-        b.min_y = std::min({b.min_y, (double)seg.ay, (double)seg.by});
-        b.max_y = std::max({b.max_y, (double)seg.ay, (double)seg.by});
-    }
-    {
-        std::lock_guard<std::mutex> lk(g_bounds_m);
-        g_bounds = b;
-    }
-    g_bounds_ready.store(true, std::memory_order_release);
-    LOG("Calib") << "Map bbox: (" << b.min_x << "," << b.min_y
-                 << ") to (" << b.max_x << "," << b.max_y << ")";
-}
-
-bool get_map_bounds(MapBounds& out) {
-    if (!g_bounds_ready.load(std::memory_order_acquire)) return false;
-    std::lock_guard<std::mutex> lk(g_bounds_m);
-    out = g_bounds;
-    return true;
-}
-
-}  // namespace calib

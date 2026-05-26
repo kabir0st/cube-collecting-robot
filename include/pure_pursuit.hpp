@@ -20,24 +20,18 @@ public:
     bool has_arrived() const;
     bool is_near_goal() const;
 
-    // Dashboard helpers: where in the path the controller is currently
+    // Dashboard helpers where in the path the controller is currently
     // aiming and how long the path is. Used only for telemetry.
     size_t   current_index() const;
     size_t   total() const;
 
-    // The point the controller is currently steering toward — lookahead point
+    // This is the point the controller is currently steering toward the lookahead point
     // in PURSUIT, last point in TERMINAL_ROTATE/DONE. Returned as a PathPoint
     // copy so the caller (dashboard, debug) sees the same fields the path
     // planner produced.
     PathPoint get_active_target() const;
 
-    // True iff `get_active_target()` reflects a real path target rather than
-    // a default-constructed PathPoint{}. False before the first set_path()
-    // call, after abort(), and while idling. Telemetry consumers gate
-    // their "draw target" overlay on this.
     bool has_active_target() const;
-
-    // Snapshot of the currently-loaded path.
     std::vector<PathPoint> get_path() const;
 
     // One control step. Reads pose, decides mode, writes target (v, ω).
@@ -49,55 +43,24 @@ private:
 
     mutable std::mutex      _m;
     std::vector<PathPoint>  _path;
-    size_t                  _closest_idx = 0;   // monotonic hint into _path
+    size_t                  _closest_idx = 0;
     Mode                    _mode = Mode::IDLE;
     bool                    _arrived = true;
 
-    // Last point we actually steered toward — published as the "current
-    // target" for the dashboard.
     PathPoint _active_target{};
 
-    // Tunables.
-    double _L_d = 250.0;  // mm, lookahead distance
-    double _v_max = 75.0 * ROBOT_SPEED;   // mm/s, absolute clamp
-    // Yaw cap NOT scaled with ROBOT_SPEED. Driving faster doesn't make cox
-    // better at folding in heading corrections, so the rate at which we're
-    // *allowed* to yaw is capped by sensor cadence (cox @ 10 Hz), not by
-    // chassis hardware. At 2.0 rad/s a curve-following PURSUIT step yields
-    // ~11° per cox tick — about the upper bound where motion-compensated
-    // scan matching still tracks.
-    double _omega_max = 2.0;    // rad/s, absolute clamp
-    double _heading_done_rad = 0.05;   // ~3 deg, TERMINAL_ROTATE exit
-    // Hysteresis on TERMINAL_ROTATE un-latch. Once we're rotating in place
-    // at the goal, only fall back to PURSUIT if the pose drifts past
-    // `margin + _terminal_unlatch_extra_mm`. Without this, tick-to-tick
-    // KF/Cox jitter on the margin boundary toggles the mode at 5 Hz and
-    // produces visible stop-and-go at arrival.
+    // mm, lookahead distance
+    double _lookahead_dist = 250.0;  
+    double _v_max = 75.0 * ROBOT_SPEED;   
+    double _omega_max = 2.0; 
+    double _heading_done_rad = 0.05;
     double _terminal_unlatch_extra_mm = 30.0;   // mm
-    double _pre_roll_thresh = 0.52;   // ~30 deg, PRE_ROLL entry
-    // Shared P gain for in-place rotation (PRE_ROLL bearing alignment +
-    // TERMINAL_ROTATE heading alignment). Same wheel-slip-dominant scenario,
-    // same cap (_inplace_omega_cap), same gain.
+    double _pre_roll_thresh = 0.52;
     double _inplace_k_omega = 2.0;
-    // In-place rotation cap. PRE_ROLL and TERMINAL_ROTATE both spin the
-    // chassis with v=0, which dominates the wheel-slip portion of the
-    // odometry noise (var_theta ~ K_ROT^2 * d_theta^2). At 0.8 rad/s a
-    // 180° flip takes ~3.9 s (≈40 cox ticks at 10 Hz) and a 90° corner
-    // takes ~2.0 s (≈20 ticks) — enough heading anchoring for the
-    // 3-minute mission budget without spending it all spinning in place.
     double _inplace_omega_cap = 0.8;     // rad/s
 
-    // Walk forward from `_closest_idx` along the path, advancing the hint
-    // past any points we've already passed (cumulative arc length is what
-    // separates "in front" from "behind"). Returns the index of the
-    // lookahead point at distance >= `_L_d` ahead of the closest point.
-    // Caller must hold `_m`.
     size_t _find_lookahead_index_locked(const Pos2D& pose);
 
-    // Pure Pursuit geometry: transform `target` to the robot frame and emit
-    // the (v, omega) the steering law commands. Used by both PURSUIT and
-    // the PRE_ROLL -> PURSUIT fallthrough so the formula lives in one place.
-    // Caller must hold `_m`.
     void _compute_pursuit_locked(const Pos2D& pose,
                                  const PathPoint& target,
                                  double& v_target,

@@ -1,8 +1,6 @@
-#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <csignal>
-#include <iostream>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -34,11 +32,6 @@ std::atomic<double> app::v_cmd_last_mm_s{0.0};
 std::atomic<double> app::w_cmd_last_rad_s{0.0};
 std::vector<std::thread> threads;
 
-// Definition for the extern declared in global.hpp. Boot default is the
-// previous compile-time tuning (1.875); main() overwrites this from
-// `robot.speed` in config.yml before any motor / controller object is
-// constructed, so member initializers that read ROBOT_SPEED see the
-// configured value.
 double ROBOT_SPEED = 1.875;
 
 
@@ -73,11 +66,6 @@ int main() {
                     << " (" << cfg.raw().size() << " keys).";
     }
 
-    // Apply ROBOT_SPEED FIRST, before any object that captures it at
-    // construction time (Motor, PurePursuit, StateMachine — all built down
-    // inside loop_control). Clamp to a sane range so a typo in config
-    // doesn't ramp accel into orbit; logs the resolved value so the
-    // operator can see what's actually in effect.
     {
         double rs = cfg.get_dbl("robot.speed", ROBOT_SPEED);
         if (!std::isfinite(rs) || rs <= 0.0) {
@@ -120,8 +108,6 @@ int main() {
     mission.home_margin   = cfg.get_dbl("mission.home_margin_mm",  mission.home_margin);
     mission.arm_length_mm = cfg.get_dbl("mission.arm_length_mm",   mission.arm_length_mm);
 
-    // Lab-3 goto: "x_mm,y_mm,theta_deg". When present, loop_control will
-    // call sm.go_to(...) instead of starting the SEARCH mission.
     {
         std::string g = cfg.get_str("mission.goto", "");
         if (!g.empty()) {
@@ -142,9 +128,6 @@ int main() {
         }
     }
 
-    // RANSAC parameters for the boot-time lidar map build. Defaults tuned
-    // for a rectangular arena with 1-2 other robots inside (see config.yml
-    // map.ransac block for the rationale per key).
     RansacParams map_ransac;
     map_ransac.inlier_thresh_mm    = cfg.get_dbl("map.ransac.inlier_thresh_mm",    25.0);
     map_ransac.max_iters_per_line  = cfg.get_int("map.ransac.max_iters_per_line",  400);
@@ -164,15 +147,12 @@ int main() {
         cfg.get_bool("logger.udp_enabled",   false),
         cfg.get_int ("logger.scan_subsample", 2));
 
-    // Lab-3 file logger: time + pose + uncertainty for odom, cox, kalman
-    // at 100 ms cadence. No-op if logger.files_enabled is false.
     DataLogger data_logger;
     data_logger.open(
         cfg.get_bool("logger.files_enabled", false),
         cfg.get_str ("logger.out_dir",       "logs"));
 
     FilterResult target_filter;
-    std::vector<FilterResult> obstacle_filters;
     const bool filter_ready  = cfg.get_bool("filter.ready", false);
     const bool target_loaded = filter_ready && load_filter_result(cfg, target_filter);
 
@@ -190,42 +170,17 @@ int main() {
             LOGE("Main") << "Target calibration aborted; nothing saved.";
             return 1;
         }
-        // Loop for obstacle colours. Terminal-driven so we can run on a
-        // headless Pi without a window manager wrapper.
-        for (size_t i = 0; ; ++i) {
-            std::cout << "Calibrate obstacle colour " << i
-                      << "? (y/n): " << std::flush;
-            std::string answer;
-            if (!std::getline(std::cin, answer)) break;
-            if (answer.empty()) continue;
-            const char c = static_cast<char>(std::tolower(
-                static_cast<unsigned char>(answer[0])));
-            if (c != 'y') break;
-            CalibrateCamera obs_cal(cam_cfg);
-            FilterResult of = obs_cal.start_filter_calibration();
-            if (!of.ready) {
-                LOG("Main") << "Obstacle " << i
-                            << " calibration aborted; skipping.";
-                continue;
-            }
-            obstacle_filters.push_back(of);
-        }
-        if (!save_filter_section(config_path, target_filter, obstacle_filters,
-                                 /*ready=*/true)) {
+        if (!save_filter_section(config_path, target_filter, /*ready=*/true)) {
             LOGE("Main") << "Failed to write filter calibration to "
                          << config_path;
             return 1;
         }
-        LOG("Main") << "Saved calibration: target + "
-                    << obstacle_filters.size()
-                    << " obstacle colour(s). Restart the app to run the mission.";
+        LOG("Main") << "Saved target calibration. "
+                       "Restart the app to run the mission.";
         return 0;
     }
 
-    obstacle_filters = load_obstacle_filters(cfg);
-    LOG("Main") << "Loaded filter calibration from " << config_path
-                << " (target + " << obstacle_filters.size()
-                << " obstacle colour(s))";
+    LOG("Main") << "Loaded filter calibration from " << config_path;
 
     // start rest of the system
     INA219 power_interface = configure_voltage_interface();
@@ -253,7 +208,7 @@ int main() {
 
     dash.add_row("Vision");
     threads.emplace_back(loop_vision_tracking,
-        std::ref(dash), target_filter, obstacle_filters,
+        std::ref(dash), target_filter,
         cam_cfg, std::ref(target));
     dash.render();
     dash.add_row("Motor");

@@ -36,9 +36,8 @@ class CalibrateCamera {
 
 class Config {
 public:
-    // True if the given dotted key was present in the file.
     bool has(const std::string& key) const;
-    // return defaults if config value is not found
+    // i want to set default values too if config key is not found 
     std::string get_str (const std::string& key, const std::string& def = "") const;
     int         get_int (const std::string& key, int    def = 0)    const;
     double      get_dbl (const std::string& key, double def = 0.0)  const;
@@ -52,31 +51,12 @@ private:
     std::map<std::string, std::string> _kv;
 };
 
-// Read a YAML file from disk into `out`. Returns false if the file can't be
-// opened; missing file is NOT an error to the caller — they should treat it
-// as "all defaults" and proceed. Malformed lines are silently skipped so a
-// stray comment / blank line doesn't abort boot.
 bool load_config(const std::string& path, Config& out);
 
-// Populate `out` from `cfg`. Returns false if any required filter.* key is
-// missing or malformed — caller treats that as "not calibrated yet".
-// Reads `filter.target.*` if present; falls back to legacy flat
-// `filter.<key>` form (lower1/upper1/...) for backward compatibility so
-// existing single-color configs keep working.
 bool load_filter_result(const Config& cfg, FilterResult& out);
 
-// Load 0..N obstacle filters from `filter.obstacles.count` +
-// `filter.obstacles.<i>.*`. Returns the populated list (empty if no
-// obstacles configured or `count` missing).
-std::vector<FilterResult> load_obstacle_filters(const Config& cfg);
-
-// Save the full `filter:` section to `path` (target + obstacles +
-// `filter.ready`). Reads the existing file (if any), drops any prior
-// `filter:` block, and appends the new one. All other lines / comments
-// are preserved verbatim. Returns false on I/O failure.
 bool save_filter_section(const std::string& path,
                          const FilterResult& target,
-                         const std::vector<FilterResult>& obstacles,
                          bool ready);
 
 double get_lidar_sensor_noise(LidarData &lidar_data);
@@ -84,15 +64,3 @@ double get_lidar_sensor_noise(LidarData &lidar_data);
 std::vector<LineSeg> find_walls(LidarData &lidar_data,
                                 const RansacParams& params);
 
-namespace calib {
-
-// Axis-aligned bounding box of the reference map, computed once at boot
-// from find_walls' output and read by the search planner.
-struct MapBounds {
-    double min_x = 0.0, max_x = 0.0, min_y = 0.0, max_y = 0.0;
-};
-
-void compute_map_bounds(const std::vector<LineSeg>& walls);
-bool get_map_bounds(MapBounds& out);
-
-}  // namespace calib

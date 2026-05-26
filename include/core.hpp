@@ -8,14 +8,8 @@
 #include <calibrations.hpp>
 
 struct MissionConfig {
-    // Home is hardcoded as the robot's starting pose (0, 0, 0). Only the
-    // zone radius and arm geometry are tunable.
     double home_margin   = 100;
     double arm_length_mm = 80.0;
-
-    // Lab-3 single-shot goto. When enabled, loop_control calls
-    // sm.go_to(goto_x_mm, goto_y_mm, goto_theta_rad) instead of starting
-    // the SEARCH mission. Theta is pre-converted from degrees in main.cpp.
     bool   goto_enabled    = false;
     double goto_x_mm       = 0.0;
     double goto_y_mm       = 0.0;

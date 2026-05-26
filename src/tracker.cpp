@@ -15,16 +15,8 @@
 #include <types.hpp>
 
 namespace {
-
     // Pinhole-size distance.
     //   distance_mm = f_px * BOX_HEIGHT_MM / box_height_observed_px
-    //
-    // We match the physical height (BOX_HEIGHT_MM) against the image
-    // bounding-box's vertical extent. That ratio is invariant to rotation
-    // about the vertical axis, so the estimate stays consistent however
-    // the box is oriented on the floor — unlike matching against width,
-    // which depends on whether the box is showing its long or short side.
-    // Returns -1 if the value can't be computed.
     inline double pinhole_distance_mm(const cv::Rect& bbox,
                                       const CameraConfig& cfg) {
         if (cfg.focal_length_px <= 0.0 || BOX_HEIGHT_MM <= 0.0) {
@@ -34,7 +26,6 @@ namespace {
         return cfg.focal_length_px * BOX_HEIGHT_MM
              / static_cast<double>(bbox.height);
     }
-
     // Bearing of the target relative to the camera's optical axis.
     // +left, -right, in radians.
     inline double bearing_rad(double cx_target, const CameraConfig& cfg) {
@@ -44,72 +35,8 @@ namespace {
 
 }  // namespace
 
-namespace {
-
-// Minimum contour area (pixels) for a non-target obstacle blob to count.
-// Same order of magnitude as the target's area gate (500 px²) — smaller
-// blobs are typically lighting flicker on similarly-coloured background.
-constexpr double MIN_OBSTACLE_AREA_PX = 500.0;
-
-// Apply one HSV filter (with optional red-edge wrap-around) and return
-// the largest contour above MIN_OBSTACLE_AREA_PX, or an empty optional.
-// Reused across obstacle filters per frame; `mask_buf` and `wrap_buf`
-// avoid per-call allocations.
-struct LargestBlob {
-    cv::Rect    bbox;
-    cv::Point2f center;
-    double      area;
-};
-bool find_largest_blob(const cv::Mat& hsv_frame,
-                       const FilterResult& filter,
-                       cv::Mat& mask_buf,
-                       cv::Mat& wrap_buf,
-                       const cv::Mat& close_kernel,
-                       int dead_zone_y,
-                       LargestBlob& out) {
-    if (filter.has_wrap_around) {
-        cv::inRange(hsv_frame, filter.lower1, filter.upper1, mask_buf);
-        cv::inRange(hsv_frame, filter.lower2, filter.upper2, wrap_buf);
-        cv::bitwise_or(mask_buf, wrap_buf, mask_buf);
-    } else {
-        cv::inRange(hsv_frame, filter.lower1, filter.upper1, mask_buf);
-    }
-    cv::morphologyEx(mask_buf, mask_buf, cv::MORPH_CLOSE, close_kernel);
-
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(mask_buf, contours,
-                     cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    int    sel  = -1;
-    double sel_area = -1.0;
-    cv::Point2f sel_center;
-    cv::Rect sel_bbox;
-    for (size_t i = 0; i < contours.size(); ++i) {
-        const double area = cv::contourArea(contours[i]);
-        if (area < MIN_OBSTACLE_AREA_PX) continue;
-        const cv::Moments M = cv::moments(contours[i]);
-        if (M.m00 == 0.0) continue;
-        const cv::Point2f c(static_cast<float>(M.m10 / M.m00),
-                            static_cast<float>(M.m01 / M.m00));
-        if (c.y < static_cast<float>(dead_zone_y)) continue;
-        if (area > sel_area) {
-            sel        = static_cast<int>(i);
-            sel_area   = area;
-            sel_center = c;
-            sel_bbox   = cv::boundingRect(contours[i]);
-        }
-    }
-    if (sel < 0) return false;
-    out.bbox   = sel_bbox;
-    out.center = sel_center;
-    out.area   = sel_area;
-    return true;
-}
-
-}  // namespace
-
 void loop_vision_tracking(Dashboard& dash,
                           FilterResult target_filter,
-                          std::vector<FilterResult> obstacle_filters,
                           CameraConfig cfg,
                           TrackerResult& result) {
     const FilterResult& filter = target_filter;
@@ -127,33 +54,19 @@ void loop_vision_tracking(Dashboard& dash,
         cv::MORPH_RECT, cv::Size(5, 5));
 
     cv::Mat frame, hsv_frame, mask, wrap_mask;
-    // Scratch buffers reused per frame for the obstacle filter loop, so
-    // we don't allocate N OpenCV mats per tick.
-    cv::Mat obs_mask, obs_wrap;
     std::vector<std::vector<cv::Point>> contours;
-    std::vector<ObstacleObservation> obs_observations;
-    obs_observations.reserve(obstacle_filters.size());
 
-    // Continuity bias: prefer detections close to the last accepted one
-    // (kills momentary swaps to a smaller distant blob with similar hue).
     bool has_last_position = false;
     cv::Point2f last_center;
 
-    // Capture-state hysteresis counters (see TrackerResult::captured/lost).
-    // All thresholds are ~0.66s at 15 FPS — long enough to ignore single-
-    // frame HSV blinks, short enough that the state machine reacts quickly.
+    // Capture-state hysteresis counters
     constexpr int CAPTURE_FRAMES   = 10;
     constexpr int RETENTION_FRAMES = 10;
     constexpr int LOST_FRAMES      = 10;
-    // Grabbable hysteresis: shorter so the servo gets the signal quickly
-    // once the box is in range, but still long enough to ride out a one-
-    // or two-frame HSV blink (~0.53 s at 15 fps).
+    // Grabbable hysteresis
     constexpr int GRAB_FRAMES      = 8;
     constexpr int RELEASE_FRAMES   = 8;
-    // Counters saturate at their thresholds (see clamp_inc) so a long
-    // detection streak / dropout doesn't accumulate boundless integer
-    // values. unsigned makes the saturation intent explicit and removes
-    // any signed-overflow UB question.
+ 
     unsigned in_capture_counter       = 0;
     unsigned out_of_retention_counter = 0;
     unsigned no_detection_counter     = 0;
@@ -163,9 +76,6 @@ void loop_vision_tracking(Dashboard& dash,
         if (c < cap) ++c;
     };
 
-    // Local mirror of the published flags. Single-source-of-truth for the
-    // debounce state machines below; committed in one critical section per
-    // frame via result.commit_flags() so readers never see torn triples.
     bool flag_captured  = false;
     bool flag_lost      = true;
     bool flag_grabbable = false;
@@ -178,9 +88,7 @@ void loop_vision_tracking(Dashboard& dash,
                   << cfg.width << "x" << cfg.height
                   << " @ " << cfg.fps_target << " target fps, "
                   << "f_px=" << cfg.focal_length_px
-                  << ", box H=" << BOX_HEIGHT_MM << " mm, "
-                  << "obstacle filters=" << obstacle_filters.size()
-                  << ")";
+                  << ", box H=" << BOX_HEIGHT_MM << " mm)";
 
     while (!app::shutdown && result.is_running()) {
         cap >> frame;
@@ -201,11 +109,7 @@ void loop_vision_tracking(Dashboard& dash,
 
         cv::findContours(mask, contours,
                          cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-
-        // Upper dead-zone: detections whose centroid falls in the top
-        // `detect_top_exclude_ratio` of the frame are skipped. Computed once
-        // per frame so the contour loop just does a y-compare.
-        const int dead_zone_y = static_cast<int>(
+       const int dead_zone_y = static_cast<int>(
             cfg.height * cfg.detect_top_exclude_ratio);
 
         // Score = area, penalized by distance from the last detection.
@@ -237,9 +141,7 @@ void loop_vision_tracking(Dashboard& dash,
             }
         }
 
-        // Bottom-region "grabbable" zone — depends only on cfg, so
-        // compute once per frame regardless of detection. Drawn in the
-        // debug overlay below so the gate is tunable by eye.
+        // Bottom-region "grabbable" zone
         const int top_y = static_cast<int>(
             cfg.height * (1.0 - cfg.grab_bottom_region_ratio));
         const cv::Rect bottom_region(0, top_y,
@@ -266,12 +168,6 @@ void loop_vision_tracking(Dashboard& dash,
             const double bottom_fill  =
                 (region_area > 0.0) ? overlap_area / region_area : 0.0;
 
-            // Orientation: cv::minAreaRect.angle is in (-90, 0]. Bringing
-            // anything below -45 up by +90 maps it into (-45, 45]; the
-            // absolute value is then the residual misalignment from
-            // axis-aligned in [0, 45]. Boxes are 90°-symmetric so this is
-            // the only angle we need to gate on. minAreaRect is undefined
-            // for <5-point contours — pessimistic default fails the gate.
             cv::RotatedRect rr;
             bool rr_valid = false;
             double angle_misalignment_deg = 90.0;
@@ -283,9 +179,8 @@ void loop_vision_tracking(Dashboard& dash,
                 rr_valid = true;
             }
 
-            // Two-way grab gate: sufficient bottom-region fill (vertical
-            // proximity) AND near-axis-aligned. The existing GRAB_FRAMES
-            // debouncer below covers both since this is a boolean AND.
+            // we have two-way grab gate that is sufficient bottom-region fill (vertical
+            // proximity) AND near-axis-aligned.
             const bool fill_ok  = bottom_fill >= cfg.grab_bottom_fill_ratio;
             const bool angle_ok = angle_misalignment_deg <= cfg.grab_angle_tol_deg;
             grab_gate = fill_ok && angle_ok;
@@ -316,35 +211,6 @@ void loop_vision_tracking(Dashboard& dash,
             result.clear_target();
             has_last_position = false;
         }
-
-        // ---------- Obstacle (non-target) colour detection ----------
-        // One pass per configured obstacle filter. Same pinhole math as
-        // target; no debounce — consumers decide what to do with the
-        // single-frame observation. Empty filter list => no work.
-        obs_observations.clear();
-        for (size_t fi = 0; fi < obstacle_filters.size(); ++fi) {
-            const FilterResult& of = obstacle_filters[fi];
-            if (!of.ready) continue;
-            LargestBlob blob;
-            if (!find_largest_blob(hsv_frame, of,
-                                   obs_mask, obs_wrap,
-                                   close_kernel, dead_zone_y, blob)) {
-                continue;
-            }
-            const double obs_dist = pinhole_distance_mm(blob.bbox, cfg);
-            if (obs_dist <= 0.0) continue;
-            const double obs_bearing = bearing_rad(blob.center.x, cfg);
-            ObstacleObservation o;
-            o.color_id    = static_cast<int>(fi);
-            o.bearing_rad = obs_bearing;
-            o.distance_mm = obs_dist;
-            o.area_px     = blob.area;
-            obs_observations.push_back(o);
-            // Magenta box in the debug view so obstacles are visually
-            // distinct from the red target bbox.
-            cv::rectangle(frame, blob.bbox, cv::Scalar(255, 0, 255), 2);
-        }
-        result.commit_obstacles(obs_observations);
 
         cv::rectangle(frame, bottom_region, cv::Scalar(0, 255, 255), 1);
         // Upper exclusion zone — magenta so it doesn't blend with the
@@ -425,14 +291,10 @@ void loop_vision_tracking(Dashboard& dash,
             }
         }
 
-        // Publish all three flags atomically so readers never see a torn
-        // triple. set_target/clear_target above already took the lock for
-        // bearing/dist; this is a separate critical section because the
-        // state-machine logic between then and now consumes the previous
-        // flag values.
+        // Publish all three flags atomically
         result.commit_flags(flag_captured, flag_lost, flag_grabbable);
 
-        // FPS estimator (averages over ~1 s windows).
+        // FPS estimator
         ++hz_frame_count;
         const auto now = std::chrono::steady_clock::now();
         const double elapsed =
@@ -467,8 +329,6 @@ void loop_vision_tracking(Dashboard& dash,
             dash.set("Vision", "dist_mm", snap.distance_mm);
             dash.set("Vision", "area_px", snap.area_px);
         }
-        dash.set("Vision", "obs_seen",
-                 static_cast<int64_t>(snap.obstacles.size()));
     }
 
     if (cfg.show_debug_view && std::getenv("DISPLAY")) {
