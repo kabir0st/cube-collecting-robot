@@ -10,18 +10,15 @@ static void set_raw(struct termios &saved) {
     tcsetattr(STDIN_FILENO, TCSANOW, &raw);
 }
 
-// Drive the non-blocking slew to completion. The real app calls
-// servo_tick() from the 40 ms control loop; the test has no loop, so
-// we spin here until the latched target is reached.
 static void drain_slew() {
     while (!servo_done(0)) {
         servo_tick();
-        usleep(5 * 1000); // 5 ms — well under STEP_MS, tick paces itself
+        usleep(5 * 1000);
     }
 }
 
 int main() {
-    int angle = 90; // safe mid-range start; first call commits directly
+    int angle = 90;
     Servo(0, angle);
     drain_slew();
     std::printf("Servo test — a:-5  d:+5  q:quit\nangle=%d\n", angle);
