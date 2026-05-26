@@ -1,5 +1,4 @@
 #pragma once
-#include <cstdint>
 
 #ifdef __cplusplus
 extern "C" {
@@ -8,8 +7,10 @@ extern "C" {
 #define PWM_OUTPUT  2
 #define PWM_MODE_MS 0
 
-void delay(unsigned int howLong);
-void delayMicroseconds(unsigned int howLong);
+void          delay(unsigned int howLong);
+void          delayMicroseconds(unsigned int howLong);
+unsigned int  millis(void);
+unsigned int  micros(void);
 int  wiringPiSetup(void);
 int  wiringPiSetupGpio(void);
 void pinMode(int pin, int mode);
