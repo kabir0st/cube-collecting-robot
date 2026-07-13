@@ -70,23 +70,11 @@ void loop_localization(Dashboard& dash,
                        LidarData& lidar_data, KalmanFilter& kf,
                        const RansacParams& ransac,
                        DataLogger& logger) {
-    // Start the lidar motor *now*, in parallel with loop_control's motor
-    // startup + SPI handshake. The 1.5 s lidar spin-up and the 300 ms
-    // chassis settle overlap instead of summing, saving ~1.5 s of boot
-    // time. Frame collection itself is still gated on motors_ready below
-    // so the map only captures the post-handshake pose (any wheel pulse
-    // is excluded).
     hh::Lidar lidar;
     if (!start_lidar(lidar)) {
         return;
     }
 
-    // Wait for the motor thread to finish its SPI handshake and the
-    // chassis to settle. The map built below is implicitly anchored to
-    // whatever pose the robot is in during frame collection — letting any
-    // motor-startup wheel pulse happen first means the twitch is folded
-    // into the map instead of becoming a hidden offset that pushes the
-    // cox first-fix seed outside its basin of convergence.
     LOG("Main") << "Waiting for motors_ready before collecting frames...";
     while (!app::motors_ready.load(std::memory_order_acquire)
         && !app::shutdown.load()) {
@@ -97,10 +85,6 @@ void loop_localization(Dashboard& dash,
     std::thread thread_loop_collect_frames(loop_collect_frames,
                 std::ref(lidar), std::ref(lidar_data));
 
-    // Collect enough lidar frames for the RANSAC wall fit. At ~5 Hz this
-    // gives ~20 frames — well over what find_walls needs to lock the 4
-    // arena walls (a single frame has ~360 points; 20 frames angle-binned
-    // gives several thousand). The old 10 s wait was over-conservative.
     LOG("Main") << "Collecting lidar frames for map build...";
     std::this_thread::sleep_for(std::chrono::seconds(4));
 
@@ -118,12 +102,7 @@ void loop_localization(Dashboard& dash,
         return;
     }
     LOG("Main") << "Built reference map (" << ref_map.size() << " walls).";
-    calib::compute_map_bounds(ref_map);
     telemetry::send_map(ref_map);
-
-    // Seed the KF at the starting pose = home (0, 0, 0). If cox later
-    // disagrees it will repin via the relocalize sweep — "I'm somewhere
-    // unknown" is recoverable, not fatal.
     kf.reset(Pos2D(0.0, 0.0, 0.0), KalmanFilter::default_cov());
 
     std::thread thread_loop_scan_cox(
@@ -142,16 +121,12 @@ void loop_control(Dashboard& dash,
                   LidarData& lidar_data,
                   const MissionConfig& mission,
                   DataLogger& logger) {
-    // sequence (fwd 400 mm -> +90° + 300 mm -> back home)
     constexpr bool IS_TEST = false;
 
     Motor motor;
     Odometry odom;
     PurePursuitController pp;
     StateMachine sm(target, pp);
-    // Parallel dead-reckoning-only EKF: receives the same predict() steps
-    // as `kf` but is never corrected by Cox. Its snapshot is what Lab-3
-    // reports as the "odometry" estimate + uncertainty.
     KalmanFilter odom_only;
     odom_only.reset(Pos2D(0.0, 0.0, 0.0), KalmanFilter::default_cov());
     double total_d = 0;
@@ -159,15 +134,9 @@ void loop_control(Dashboard& dash,
     if (!motor.start())
     {
         LOGE("Main") << "Motor start failed";
-        // Unblock loop_localization, which is waiting on motors_ready.
         app::shutdown.store(true);
         return;
     }
-    // Give the chassis a beat to settle after the SPI handshake before
-    // signaling loop_localization. Any one-shot wheel pulse at controller
-    // init lands inside this window so the encoder seed (and the lidar
-    // frames collected immediately after) reflect the rest position.
-    // 300 ms is plenty for the SPI handshake and any pulse to land.
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     {
         // resetting
@@ -177,22 +146,11 @@ void loop_control(Dashboard& dash,
     }
     app::motors_ready.store(true, std::memory_order_release);
 
-    // Home is fixed at the localization origin (0, 0, 0).
     sm.configure(0.0, 0.0, 0.0,
                  mission.home_margin, mission.arm_length_mm);
 
     // Block any mission entry (TEST, SEARCH, or future GOTO seeded from
     // here) until cox has produced a fix that the KF actually accepted.
-    // Otherwise the SM kicks off on the seeded (0,0,0) pose and the robot
-    // drives before localization is real. The budget covers:
-    //   - 10 s of lidar frame collection in loop_localization (gated on
-    //     motors_ready, which we just set)
-    //   - ~1-2 s of RANSAC wall extraction
-    //   - up to ~10 s of cox's own boot sweep if spontaneous fits don't
-    //     converge (see [[boot_sweep_done]] in cox.cpp)
-    // Fall through on timeout so a fully misconfigured map / bad scan
-    // doesn't hang forever -- we drive on dead reckoning, matching the
-    // pre-gate behaviour, but emit a loud error.
     {
         constexpr auto WAIT_TIMEOUT = std::chrono::seconds(30);
         const auto t_start = std::chrono::steady_clock::now();
@@ -222,14 +180,8 @@ void loop_control(Dashboard& dash,
     }
 
     while(!app::shutdown) {
-        // giving time for 2 readings
         std::this_thread::sleep_for(std::chrono::milliseconds(40));
-
-        // Advance any pending gripper slew by one STEP_DEG (paced internally
-        // to STEP_MS). Non-blocking: keeps the 5 V rail safe without
-        // stalling odometry / motor updates.
         servo_tick();
-
         double l_mm, r_mm;
         motor.get_encoders(l_mm, r_mm);
         dash.set("Motor", "L_mm", l_mm);
@@ -278,19 +230,6 @@ void loop_control(Dashboard& dash,
                 w_cmd = 0.0;
                 break;
         }
-        // Hold motors while cox is running a relocalize sweep -- driving on
-        // a stale pose is worse than standing still. On a forward-arc
-        // obstacle (loop_collect_frames sets app::obstacle_ahead when any
-        // beam inside ±OBSTACLE_ARC_HALF_DEG is closer than OBSTACLE_DIST_MM)
-        // we zero forward velocity but KEEP w_cmd so the state machine can
-        // rotate away from the obstacle ("sidestep"). Reverse motion is
-        // also allowed so the robot can back out of a near-miss.
-        //
-        // The obstacle gate is suppressed during APPROACH (visual-servo +
-        // colour-based reactive omega handles avoidance) and while
-        // carrying a payload (CARRY_HOME, RELEASE, TURN_AROUND — the
-        // gripper / held box sits inside the gate's forward arc). SEARCH
-        // keeps the gate as its safety net against unseen walls.
         if (app::relocalizing.load()) {
             v_cmd = 0.0;
             w_cmd = 0.0;
@@ -300,6 +239,8 @@ void loop_control(Dashboard& dash,
         }
 
         motor.set_velocity(v_cmd, w_cmd);
+        app::v_cmd_last_mm_s.store(v_cmd);
+        app::w_cmd_last_rad_s.store(w_cmd);
 
         uint64_t rejects = 0;
         motor.get_spi_stats(rejects);
@@ -318,9 +259,8 @@ void loop_control(Dashboard& dash,
 
         dash.set("Mission", "state",
                  std::string(StateMachine::state_name(sm.state())));
-
-        // Gated telemetry + Lab-3 file logging: 10 Hz regardless of the
-        // 25 Hz control loop. Cox is logged from its own 100 ms loop.
+        
+        // for logging
         static auto last_send = std::chrono::steady_clock::now();
         const auto now = std::chrono::steady_clock::now();
         if (now - last_send >= std::chrono::milliseconds(100)) {

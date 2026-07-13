@@ -7,11 +7,7 @@
 #include <mutex>
 #include <opencv2/opencv.hpp>
 
-// Circular buffer of lidar frames. Sized to give the boot-time map
-// builder (find_walls / get_lidar_sensor_noise) enough data to extract
-// stable walls via RANSAC. Runtime cox uses only the newest frame, so
-// the buffer depth costs ~290 KB of RAM and a one-shot snapshot copy
-// per boot — both negligible.
+// Circular buffer of lidar frames
 constexpr std::size_t FRAME_COUNT = 50;
 
 struct Frame {
@@ -28,10 +24,7 @@ struct Frame {
 
 struct LidarData {
     mutable std::mutex lock;
-    // sensor_noise is written once at boot (from loop_localization, after
-    // a settling sleep) and read by cox / find_walls / telemetry from
-    // worker threads. Atomic so the read/write is well-defined without
-    // making the lidar buffer lock visible at every reader.
+
     std::atomic<double> sensor_noise;
 
     std::array<Frame, FRAME_COUNT> frames;
@@ -157,13 +150,9 @@ struct CameraConfig {
 
     double grab_bottom_region_ratio = 0.40;
     double grab_bottom_fill_ratio   = 0.50;
-    // Max axis-misalignment of the detected box (from cv::minAreaRect),
-    // in degrees. Squares are 90°-symmetric so the residual is in [0,45].
+    
     double grab_angle_tol_deg       = 5.0;
 
-    // Detections whose centroid falls inside the top fraction of the frame
-    // are rejected outright (typical use: ignore pink things on walls/lab
-    // posters above the floor plane).
     double detect_top_exclude_ratio = 0.25;
 
     CameraConfig(int w, int h, int f):
@@ -181,27 +170,11 @@ struct FilterResult {
     bool has_wrap_around = false;
 };
 
-// Per-frame observation of a non-target ("obstacle") colored box. Bearing
-// and distance use the same pinhole convention as the target. color_id is
-// the index into the configured obstacle filter list (filter.obstacles.N).
-struct ObstacleObservation {
-    int    color_id    = -1;
-    double bearing_rad = 0.0;       // +left, -right
-    double distance_mm = 0.0;       // pinhole-size estimate
-    double area_px     = 0.0;
-};
-
 // Result of the camera-tracking worker (`loop_vision_tracking`).
 struct TrackerResult {
     mutable std::mutex lock;
     std::atomic<bool> running{true};
 
-    // captured/lost/grabbable USED to be std::atomic<bool> set independently
-    // across ~50 lines of tracker.cpp. The reader (StateMachine::step) takes
-    // them all in one snapshot under `lock`, so previously a reader could
-    // observe e.g. captured=true && lost=true mid-update. Now all three are
-    // plain bools protected by `lock`, and the writer commits them in one
-    // critical section via commit_flags() at end-of-frame.
     bool captured  = false;
     bool lost      = true;
     bool grabbable = false;
@@ -215,12 +188,6 @@ struct TrackerResult {
     double bearing_rad = 0.0;        // angle from optical axis, +left
     double distance_mm = 0.0;        // pinhole-size estimate (Method A)
     double area_px     = 0.0;        // contour area in pixels (confidence)
-
-    // Per-frame snapshot of non-target colored boxes. One entry per
-    // configured obstacle color where the largest blob exceeded the area
-    // threshold; absent colors produce no entry. Reset every frame by
-    // commit_obstacles().
-    std::vector<ObstacleObservation> obstacles;
 
     mutable std::mutex mutex_frame;
     std::atomic<int> fps{0};
@@ -244,21 +211,11 @@ struct TrackerResult {
         area_px           = 0.0;
     }
 
-    // Commit the three debounced flags atomically with respect to readers.
-    // Writer-only entry point (loop_vision_tracking); the reader observes a
-    // consistent triple via get_snapshot().
     void commit_flags(bool new_captured, bool new_lost, bool new_grabbable) {
         std::lock_guard<std::mutex> guard(lock);
         captured  = new_captured;
         lost      = new_lost;
         grabbable = new_grabbable;
-    }
-
-    // Replace this-frame obstacle list. Writer-only; callers pass an empty
-    // vector when no obstacle filters are configured or none matched.
-    void commit_obstacles(std::vector<ObstacleObservation> next) {
-        std::lock_guard<std::mutex> guard(lock);
-        obstacles = std::move(next);
     }
 
     struct Snapshot {
@@ -270,7 +227,6 @@ struct TrackerResult {
     bool   captured;
     bool   lost;
     bool   grabbable;
-    std::vector<ObstacleObservation> obstacles;
     };
 
 
@@ -279,8 +235,7 @@ struct TrackerResult {
         return { has_target, bearing_rad,
                  distance_mm,
                  area_px, fps,
-                 captured, lost, grabbable,
-                 obstacles };
+                 captured, lost, grabbable };
     }
 
     void update_frame(const cv::Mat &f, int frame_rate);

@@ -26,8 +26,6 @@ void PurePursuitController::set_path(const std::vector<PathPoint>& path) {
             _mode = Mode::IDLE;
             _arrived = true;
         } else {
-            // Defer the PRE_ROLL-vs-PURSUIT choice to the first compute() — we
-            // need a pose to know the heading error.
             _mode = Mode::PRE_ROLL;
             _arrived = false;
         }
@@ -76,26 +74,6 @@ std::vector<PathPoint> PurePursuitController::get_path() const {
     return _path;
 }
 
-// Two-phase walker, no robot-offset seeding.
-//
-// 1. Window-scan: pick the absolute-minimum-distance point in a forward
-//    window of CLOSEST_SCAN_WINDOW samples starting at the current
-//    _closest_idx. Monotonic — we never search behind _closest_idx because
-//    Pure Pursuit only moves forward along the path. More robust than a
-//    "next closer than current" heuristic, which can stall on tight curves
-//    where adjacent path points are at comparable distances.
-//
-//    Window size: at v_max=150 mm/s and dt=0.2 s the robot advances at most
-//    ~30 mm/tick; B-spline samples here are spaced ~17-34 mm; so 10 points
-//    covers a generous worst case.
-//
-// 2. From the (new) closest index, accumulate path arc length until it
-//    reaches _L_d. Cross-track recovery — when the robot is off the path
-//    — happens naturally via the y_l term in the curvature formula, so we
-//    do NOT add the robot->closest distance to the accumulator (doing so
-//    causes a Cox-jump-induced pose offset to collapse the lookahead onto
-//    the closest point, which is the opposite of what Pure Pursuit needs
-//    in that situation).
 size_t PurePursuitController::_find_lookahead_index_locked(const Pos2D& pose) {
     if (_path.empty()) return 0;
 
@@ -122,7 +100,7 @@ size_t PurePursuitController::_find_lookahead_index_locked(const Pos2D& pose) {
 
     double accumulated = 0.0;
     size_t idx = _closest_idx;
-    while (idx + 1 < _path.size() && accumulated < _L_d) {
+    while (idx + 1 < _path.size() && accumulated < _lookahead_dist) {
         const double dx = _path[idx+1].x - _path[idx].x;
         const double dy = _path[idx+1].y - _path[idx].y;
         accumulated += std::hypot(dx, dy);
@@ -135,19 +113,18 @@ void PurePursuitController::_compute_pursuit_locked(const Pos2D& pose,
                                                     const PathPoint& target,
                                                     double& v_target,
                                                     double& w_target) const {
-    const double dx   = target.x - pose.x;
-    const double dy   = target.y - pose.y;
-    // y_l: cross-track component of the lookahead in the robot frame.
-    // +y_l means lookahead is to the robot's left -> turn left (+omega).
-    const double y_l  = -dx * std::sin(pose.theta) + dy * std::cos(pose.theta);
-    // Use the ACTUAL chord squared (dx^2 + dy^2), not _L_d^2. Near the end
-    // of the path the lookahead clamps to the last point at chord < _L_d;
-    // using _L_d in the denominator under-estimates curvature exactly when
-    // the robot most needs to commit to the final approach.
-    const double L_sq = dx*dx + dy*dy;
-    const double kappa = (L_sq > 1e-6) ? (2.0 * y_l) / L_sq : 0.0;
+    const double dx = target.x - pose.x;
+    const double dy = target.y - pose.y;
+    // Lateral offset of the lookahead in the robot's body frame.
+    // Positive = lookahead is to the robot's left -> turn left (+omega).
+    const double lookahead_lateral =
+        -dx * std::sin(pose.theta) + dy * std::cos(pose.theta);
+    // Using chord squared
+    const double chord_sq = dx*dx + dy*dy;
+    const double curvature =
+        (chord_sq > 1e-6) ? (2.0 * lookahead_lateral) / chord_sq : 0.0;
     v_target = std::min(target.v_max, _v_max);
-    w_target = v_target * kappa;
+    w_target = v_target * curvature;
 }
 
 void PurePursuitController::compute(const Pos2D& pose,
@@ -164,25 +141,10 @@ void PurePursuitController::compute(const Pos2D& pose,
         const double dy_last = last.y - pose.y;
         const double rho_last = std::hypot(dx_last, dy_last);
 
-        // Re-evaluate TERMINAL_ROTATE every tick (DONE is sticky — once
-        // aligned, we stop).
-        // Two guards on entry:
-        //   - `_closest_idx == last`: we actually traversed the path. Stops
-        //     accidental entry when a path doubles back through the start.
-        //   - `rho_last < margin`: physically at the goal.
-        // Un-latch back to PURSUIT if we drift outside margin (inertia, a Cox
-        // correction jump). Re-evaluating each tick means a robot that
-        // drifts past the goal can recover by pursuing the path back to it,
-        // instead of rotating in place far from where it should be.
+        // Re-evaluate TERMINAL_ROTATE every tick
         if (_mode != Mode::DONE) {
             const bool at_last_waypoint = (_closest_idx + 1 >= _path.size());
             if (_mode == Mode::TERMINAL_ROTATE) {
-                // Hysteresis: stay latched unless we drift well past the
-                // goal. Without this, KF/Cox jitter on the margin boundary
-                // flips us back to PURSUIT for 200 ms, producing visible
-                // stop-and-go at arrival. Don't fall back to PRE_ROLL —
-                // robot is already moving and roughly aligned; PURSUIT's
-                // curvature pulls it back to the path.
                 const double unlatch_radius =
                     last.margin + _terminal_unlatch_extra_mm;
                 if (!at_last_waypoint || rho_last > unlatch_radius) {
@@ -197,8 +159,8 @@ void PurePursuitController::compute(const Pos2D& pose,
         switch (_mode) {
             case Mode::PRE_ROLL: {
                 // Pick the lookahead first so we know which way "forward"
-                // points; if the heading error to that bearing is small,
-                // engage PURSUIT immediately (same tick, no zero-output stall).
+                // points and if the heading error to that bearing is small,
+                // engage PURSUIT immediately
                 const size_t look_idx = _find_lookahead_index_locked(pose);
                 _active_target = _path[look_idx];
                 const double dx = _active_target.x - pose.x;
@@ -211,7 +173,7 @@ void PurePursuitController::compute(const Pos2D& pose,
                                             v_target, w_target);
                 } else {
                     // Rotate in place toward the lookahead bearing.
-                    // Proportional target — but capped to _inplace_omega_cap
+                    // Proportional to target but capped to _inplace_omega_cap
                     // (gentler than _omega_max) so cox has time to fold
                     // corrections into the KF heading during the spin.
                     v_target = 0.0;
@@ -238,7 +200,7 @@ void PurePursuitController::compute(const Pos2D& pose,
                     v_target = 0.0;
                     w_target = 0.0;
                 } else {
-                    // Same in-place omega cap as PRE_ROLL — TERMINAL_ROTATE
+                    // Same in-place omega cap as PRE_ROLL TERMINAL_ROTATE
                     // is the symmetric end-of-path version of the same
                     // wheel-slip-dominant scenario.
                     v_target = 0.0;
@@ -258,10 +220,6 @@ void PurePursuitController::compute(const Pos2D& pose,
         }
     }
 
-    // Saturate to absolute limits. Slew shaping and any low-pass filtering
-    // live downstream in the Motor's 50 Hz IO loop, so this function emits
-    // the *target* (v, ω) — staircase-shaped at the 5 Hz control rate, but
-    // interpolated by the motor smoother into a continuous chassis command.
     v_target = std::max(-_v_max,     std::min(v_target, _v_max));
     w_target = std::max(-_omega_max, std::min(w_target, _omega_max));
 

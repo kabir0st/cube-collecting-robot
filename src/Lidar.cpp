@@ -8,6 +8,7 @@
 
 #include <wiringPi.h>
 #include <wiringSerial.h>
+#include <cstdint>
 #include <iostream>
 #include <iomanip>
 #include <sys/ioctl.h>

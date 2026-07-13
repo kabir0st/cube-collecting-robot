@@ -32,9 +32,6 @@ std::vector<LineSeg> g_last_map;
 std::thread g_rebroadcast;
 std::atomic<bool> g_run{false};
 
-// Backpressure / loss tracking. UDP sendto drops silently when the kernel
-// socket buffer is full; surface that to the operator without spamming
-// every send call.
 std::atomic<uint64_t> g_drop_count{0};
 std::atomic<int64_t>  g_last_warn_ms{0};
 

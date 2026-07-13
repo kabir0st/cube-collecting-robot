@@ -7,6 +7,7 @@ LIB_DIR = libraries
 
 TARGET = app
 CXXFLAGS = -std=c++11 -Wall -Wextra -O2 -I$(INCLUDE_DIR)
+CFLAGS   = -std=c99   -Wall          -O2 -I$(INCLUDE_DIR)
 
 MAKEFLAGS += -j3
 
@@ -51,7 +52,7 @@ $(BUILD_DIR)/servo_test.o: servo_test.cpp | $(BUILD_DIR)
 
 # Compile src/servo.c (C source)
 $(BUILD_DIR)/servo.o: $(SRC_DIR)/servo.c | $(BUILD_DIR)
-	$(CC) -std=c99 -Wall -O2 -I$(INCLUDE_DIR) -c $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
 # Compile src/*.cpp files
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
@@ -68,7 +69,8 @@ clean:
 
 # for syntax check
 check: CXXFLAGS += -Istubs
-check: $(OBJS)
+check: CFLAGS   += -Istubs
+check: $(BUILD_DIR) $(OBJS)
 	@echo "✔ Compile check successful"
 
 .PHONY: all clean run info test check
